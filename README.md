@@ -1,208 +1,228 @@
-# FieldRecognitionDemo · 现场识别
+<div align="center">
 
-独立的二维码识别、场景登记、设备绑定与真实 PaddleOCR 面板识别演示。复用现有 Agent 的语音拍照文件，只读取 NAS 中当前绑定相机的照片，不修改 VisionCortex 采集或预处理服务。
+<img src="static/BrandLogo.png" alt="FieldRecognition 项目标识" width="80">
 
-完整设计与实现说明见 [项目技术方案](技术方案.md)，包含二维码制作与解码、绑定生命周期、视频协议、NAS 照片监控、OCR、视觉兜底、数据与接口、部署和验证边界。
+<h1>FieldRecognition</h1>
 
-## 独立项目
+<p><strong>挂脖相机扫码绑定 · 语音照片面板读数</strong></p>
 
-项目仓库：[kealan-Jun/FieldRecognition](https://github.com/kealan-Jun/FieldRecognition)。
+<p>面向实验现场的仪器识别与读数系统。<br>用实时视频确认正在使用的仪器，用已有 Agent 的拍照结果读取面板，让每次识别都有照片、时间和绑定记录可查。</p>
 
-本机项目根目录为 `/home/x1/Projects/FieldRecognition`，使用独立 Git 仓库和 Python 虚拟环境。历史证据中的旧目录引用保留原样；当前图片接口按 capture_id 从本项目 Data/Images 读取。Python 3.11.15 由用户级 uv 运行时提供，不依赖 VisionCortex 的解释器、代码或配置。
+<p>
+  <a href="技术方案.md"><b>📐 技术方案</b></a> ·
+  <a href="AgentTools.md"><b>🤖 Agent 接入</b></a> ·
+  <a href="docs/运行与验证记录.md"><b>📚 部署与验证记录</b></a>
+</p>
 
-| 内容 | 路径 |
+<p>
+  <a href="#quick-start">快速开始</a> ·
+  <a href="#architecture">系统架构</a> ·
+  <a href="#workflow">使用流程</a> ·
+  <a href="#evaluation">验证与边界</a>
+</p>
+
+<p>
+  <img src="https://img.shields.io/badge/Python-3.11-3776AB?style=flat-square&amp;logo=python&amp;logoColor=white" alt="Python 3.11">
+  <img src="https://img.shields.io/badge/PaddleOCR-3.2-1769E0?style=flat-square" alt="PaddleOCR 3.2">
+  <img src="https://img.shields.io/badge/Inference-CPU-24545C?style=flat-square" alt="本地 CPU 推理">
+  <img src="https://img.shields.io/badge/API-FastAPI-009688?style=flat-square&amp;logo=fastapi&amp;logoColor=white" alt="FastAPI 接口">
+</p>
+
+</div>
+
+## ✨ 项目介绍
+
+在实验现场，记录一个面板数字，还需要知道它来自哪台仪器、由谁操作、照片拍于何时。FieldRecognition 将这些信息放进同一次使用流程：实验员让挂脖相机依次扫到场景码和仪器码，建立绑定；需要读数时，对现有 Agent 说“拍照”，系统读取该相机保存到 NAS 的新照片，识别面板并保留原图与结果。
+
+视频扫码持续寻找有效二维码，**实际处理的一帧解出唯一且场景匹配的仪器码，即可完成绑定**。有效绑定期间无需为每次读数重复扫码；设备采集服务离线或采集会话变化后，需要重新绑定。绑定成功即在本地后台加载 PaddleOCR，后续照片复用常驻模型；单张读数任务运行 5 秒仍无完整数字候选时，按配置调用阿里云视觉模型兜底。
+
+![FieldRecognition 从视频扫码到语音照片读数的流程概览](docs/assets/overview.svg)
+
+本仓库提供识别服务、网页和 Agent HTTP 工具。挂脖设备、Receiver、Agent 的语音与拍照服务、NAS 保存流程由现有系统提供。当前实现面向**单个配置相机、本地 CPU 推理**，完整机制与实现边界见 [技术方案](技术方案.md)。
+
+### 核心能力
+
+| 能力 | 当前实现 |
 |---|---|
-| FastAPI 服务、异步 OCR 与存证 | `app.py` |
-| 挂脖设备 GWHP 主码流接收 | `receiver.py` |
-| 二维码解码、场景绑定 | `qr_decode.py`、`scene_binding.py` |
-| Agent HTTP 工具与客户端 | `agent_tools.py`、`agent_client.py`、`AgentTools.md` |
-| 网页和二维码样张 | `static/` |
-| 仪器、场景初始登记 | `InstrumentRegistry.json`、`SceneRegistry.json` |
-| 依赖、测试、服务模板 | `Requirements.lock.txt`、`tests/`、`deployment/` |
-| 本地照片、数据库 | `Data/` |
-| 历史验证、标签交付、临时材料 | `Verification/`、`VerificationData/`、`output/`、`tmp/` |
+| 🎥 **连续视频扫码** | 接收 H.264 主码流，使用 ZXing / OpenCV 解码新鲜帧；唯一合规二维码命中后自动进入场景或绑定仪器。 |
+| 🔗 **会话内持续绑定** | 保存相机、实验员、场景、仪器的关系；重复提交沿用原绑定，设备采集服务会话失效后结束旧关系。 |
+| 📷 **复用语音拍照** | 监控当前绑定相机的 NAS 新照片，等待文件稳定后导入；照片和任务持久化去重，保留源文件。 |
+| 🔢 **常驻本地 OCR** | 绑定后后台加载 CPU PaddleOCR；对具体照片执行识别，支持手动框选面板，后续任务复用模型。 |
+| ☁️ **视觉模型兜底** | 单张任务运行 5 秒无完整数字时尝试阿里云视觉识别；页面统一展示读数，后台保留两条识别路径的回执。 |
+| 🧾 **结果可追溯** | 保存图片引用、SHA-256、拍摄与接收时间、绑定快照、选框和模型原始结果；提供网页查询与九个 Agent 工具。 |
 
-迁移保留全部已有本地材料；运行数据、历史验证原件、模型、虚拟环境和日志均不纳入 Git。下文的 `Verification/` 引用只在本机历史材料中存在，新克隆不会附带这些实拍数据或回执。模型缓存仍使用 PaddleOCR/PaddleX 的用户级默认位置，不复制进代码仓库。
+## 🗞️ 项目进展
 
-### 新环境安装
+- **2026-09-11**：发布连续视频扫码、采集服务会话绑定、OCR 常驻、NAS 语音照片监控与视觉兜底实现，以及完整技术方案。发布前 66 项自动测试通过；现场验证状态见[验证与边界](#evaluation)。
 
-以下命令用于新克隆或新环境；本机已迁移环境无需重建。需要已安装 uv，并将终端切换到项目根目录：
+<a id="quick-start"></a>
+
+## 🚀 快速开始
+
+### 1. 安装并启动
+
+以下命令面向已安装 `uv` 的新环境，使用项目独立的 Python 3.11 虚拟环境：
 
 ```bash
+git clone https://github.com/kealan-Jun/FieldRecognition.git
+cd FieldRecognition
+
 uv python install 3.11.15
 uv venv --python 3.11.15 .venv
 uv pip install --python .venv/bin/python -r Requirements.lock.txt
+
+OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 \
+  .venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 8188
 ```
 
-`Requirements.lock.txt` 是已有环境的完整版本清单，包含运行和测试依赖。模型权重不在仓库内；首次成功绑定后会在后台加载 OCR 模型，缺少缓存时可能下载权重；加载成功后保持在本地识别服务内存中。
+打开 [http://127.0.0.1:8188](http://127.0.0.1:8188)。不配置 Receiver 时，可先通过照片上传和仓库中的 [二维码样张](static/labels/) 体验场景与仪器绑定。仪器的名称、型号和所属场景在网页登记。
 
-### 本地启动与测试
+模型权重不随仓库分发。首次成功绑定后会在后台加载 OCR；缺少缓存时可能下载权重，加载完成后留在本地识别服务内存中。若已有用户服务占用 8188，请直接使用现有页面。
 
-不配置 receiver 时，可使用照片上传和二维码样张。启动命令：
+### 2. 接入挂脖相机与语音照片
+
+配置项模板见 [.env.example](.env.example)。手动启动需要先设置环境变量；程序不会自动读取 `.env`。使用 systemd 部署时，由[用户服务模板](deployment/field-recognition-demo.service)加载该文件。安装步骤和已有服务的配置方式见[部署与运行记录](docs/运行与验证记录.md)。
+
+| 配置项 | 用途 |
+|---|---|
+| `FIELD_RECEIVER_URL`、`FIELD_CAMERA_ID` | Receiver 地址与目标相机标识；需支持本项目使用的 GWHP 主码流协议。 |
+| `FIELD_SAVED_PHOTO_ROOT` | 已挂载的语音照片根目录，例如 `/mnt/realityloop-nas/voice_photos`。 |
+| `FIELD_SAVED_PHOTO_WATCH_ENABLED=1` | 开启有效绑定相机的新照片监控。 |
+| `FIELD_SAVED_PHOTO_TIMEZONE` | 照片文件名时间的时区，默认 `Asia/Shanghai`。 |
+| `DASHSCOPE_API_KEY`、`FIELD_ALIYUN_FALLBACK_ENABLED=1` | 配置阿里云凭证并启用视觉兜底；凭证只放环境变量或未跟踪的 `.env`。 |
+| `FIELD_ALIYUN_MODEL` | 本版配置为 `qwen3.8-max`，实际可用性以账户和服务区域为准。 |
+| `FIELD_ALIYUN_NO_DIGITS_SECONDS` | 单张任务无完整数字候选的等待时间，默认 `5` 秒。 |
+
+照片目录需符合以下布局，日期与时间必须相互匹配；支持 `.jpg`、`.jpeg`、`.png`：
+
+```text
+voice_photos/
+└── <camera_id>/
+    └── YYYY-MM-DD/
+        └── HH-MM-SS/
+            └── YYYYMMDD_HHMMSS[_序号].jpg
+```
+
+接收协议、文件稳定性检查、时间过滤和去重规则详见[技术方案](技术方案.md)。
+
+<a id="architecture"></a>
+
+## 🛠️ 系统架构
+
+```mermaid
+flowchart LR
+    subgraph Identity[视频扫码与绑定]
+        Camera[挂脖相机] --> Receiver[现有 Receiver]
+        Receiver --> Decode[GWHP / H.264 CPU 解码]
+        Decode --> Preview[实时预览]
+        Decode --> QR[场景码 / 仪器码解码]
+        QR --> Binding[相机 · 实验员 · 场景 · 仪器绑定]
+    end
+
+    subgraph Reading[已有照片的读数识别]
+        Agent[现有 Agent 执行语音拍照] --> NAS[NAS 语音照片]
+        NAS --> Watch[新文件稳定性检查与去重]
+        Watch --> Job[单张读数任务开始运行]
+        Job --> OCR[常驻 PaddleOCR]
+        Job --> Timer[单张任务 5 秒计时]
+        Timer -->|仍无完整数字且允许调用| Cloud[阿里云视觉模型]
+    end
+
+    Binding -.->|限定照片相机与有效时间| Watch
+    Binding -.->|后台预加载| OCR
+    OCR --> Result[统一读数与过程回执]
+    Cloud --> Result
+    Result --> UI[网页 / Agent 查询]
+    Binding --> Store[(SQLite + 本地图片)]
+    Result --> Store
+```
+
+| 组成 | 主要技术 | 负责什么 |
+|---|---|---|
+| 视频与二维码 | PyAV、ZXing-C++、OpenCV | 解码主码流、显示实时画面、从码内容取得场景或仪器 ID。 |
+| 绑定与任务 | FastAPI、SQLite | 校验关系、维持绑定生命周期、派发读数任务、持久化去重。 |
+| 照片与识别 | 文件轮询、Pillow、PaddleOCR | 导入具体语音照片，纠正图片方向，执行文本检测与识别。 |
+| 视觉兜底 | HTTPX、阿里云视觉接口 | 发送本次照片或选框，校验返回结构，保留请求回执。 |
+| 交互与集成 | HTML / JavaScript、HTTP JSON 工具 | 展示预览与读数，支持框选、历史查询和 Agent 适配。 |
+
+二维码的 JSON 载荷、制作示例、解码策略、OCR 检测与识别原理、并发调度、数据库和全部接口，都在[技术方案](技术方案.md)中逐节展开。
+
+<a id="workflow"></a>
+
+## 🧩 使用流程
+
+1. **登记并扫码。** 填写仪器信息和实验员，点击“连续扫码绑定”，依次对准场景码、仪器码。唯一且符合场景的仪器码成功解码后自动绑定；多个候选需要手动选择。
+2. **保持本次绑定。** 绑定成功后停止扫码，视频预览继续，OCR 在后台加载。刷新页面或重复提交沿用原绑定；设备采集服务离线或会话变化后，重新上线需要重新扫码，也可主动结束绑定。
+3. **说“拍照”。** 用户对现有 Agent 发起拍照，照片写入该相机的 NAS 目录。服务只接收本次有效绑定之后的新照片，文件稳定后自动创建读数任务。网页也支持上传照片和框选识别。
+4. **读取面板。** 常驻 OCR 先处理该照片；任务开始 5 秒仍没有完整数字候选时，满足配置与调用间隔条件就尝试视觉兜底。每个任务最多一次云端请求，同一绑定两次尝试至少间隔 30 秒。
+5. **核对并留存。** 网页自动刷新显示统一读数；无法看清时保留无读数结果。后台保存原图引用、时间和识别过程，可查询历史或导出 JSON。
+
+Agent 如果需要在对话里播报识别结果，可通过 `get_field_state` 和 `get_panel_result` 查询。已有拍照回执也可直接交给 `read_saved_panel`。工具参数、返回结构和 Python 示例见 [AgentTools.md](AgentTools.md)；本仓库尚未修改现有 Agent 的聊天或播报逻辑。
+
+<a id="evaluation"></a>
+
+## 📊 验证与边界
+
+以下状态来自 **2026-09-11 的已有验证**。`PROVEN` 表示列明的有限检查已经完成；`PARTIAL_EVIDENCE` 表示只覆盖部分环节；`NOT_PROVEN` 表示还缺少对应现场验收。自动测试数量、模型置信分数与真实仪器准确率是不同指标。
+
+| 验证项 | 状态 | 已有证据与尚缺环节 |
+|---|---|---|
+| 解码、绑定、照片去重、异步与兜底规则 | `PROVEN` | 发布前 66 项自动测试通过，使用临时数据与模型 / HTTP 替身；覆盖范围见 `tests/`。 |
+| 真实挂脖视频接入与预览 | `PROVEN` | 已取得 1280 × 800 主码流；一次预览检查在约 3.2 秒内收到 45 张不同 JPEG，约 14 fps，不代表二维码识别吞吐。 |
+| 本地 OCR 常驻与模型调用 | `PROVEN` | 已检查真实 CPU 模型加载、复用和合成面板预测；尚不能由此推断物理仪器准确率。 |
+| 语音照片导入与视觉兜底 | `PARTIAL_EVIDENCE` | 已只读解析实际 NAS 照片；合成输入已跑通真实 OCR → 约 5 秒等待 → 真实云端调用。真实语音拍照到物理仪器读数的整条链路待验收。 |
+| 采集服务停启后重新绑定 | `PARTIAL_EVIDENCE` | 已读取接收端会话字段，失效规则通过模拟测试；实际设备服务停启闭环待验收。 |
+| 现场标签连续扫码与面板读数准确率 | `NOT_PROVEN` | 早期 12 张挂脖实拍均未成功解码；仍需清晰现场标签、真实面板样本和人工真值进行验收。 |
+
+原始回执保留在本机 `Verification/`，不随 Git 分发。测试范围、历史结果和回执路径见[运行与验证记录](docs/运行与验证记录.md)及[技术方案](技术方案.md)。
+
+当前实现还具有以下边界：
+
+- **设备会话判断：** 使用 Receiver 的在线状态和 `rgb_ingress_session_id`；设备重连或 Receiver 重启也可能改变该字段。严格区分设备进程重启与网络重连，需要上游提供稳定的服务实例 ID。
+- **照片识别范围：** 自动监控默认识别整张照片，尚未自动定位面板；数字候选可能识别错误，低模型分数本身不触发兜底。照片须对准当前绑定仪器，结果仍需核对。
+- **部署与身份：** 当前为单个配置相机、CPU 推理、默认本机访问。二维码是未签名的演示身份码，不能作为防复制凭证；面板文字不构成物理操作证明。
+
+运行自动测试时，在项目根目录执行：
 
 ```bash
-.venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 8188
+env -u FIELD_RECEIVER_URL -u FIELD_CAMERA_SNAPSHOT_URL \
+  OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 \
+  .venv/bin/python -m pytest -q tests
 ```
 
-若本机用户服务已运行，请直接使用现有页面；同一端口不能再启动第二个实例。运行已有测试：
+## 📂 仓库结构
 
-```bash
-env -u FIELD_RECEIVER_URL -u FIELD_CAMERA_SNAPSHOT_URL OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 .venv/bin/python -m pytest -q tests
+```text
+FieldRecognition/
+├── app.py                          # HTTP 服务、数据存储与 OCR 生命周期
+├── receiver.py                     # Receiver 接入与 H.264 解码
+├── qr_decode.py                    # 二维码解码与增强重试
+├── live_scan.py                    # 连续扫码与采集会话判断
+├── scene_binding.py                # 场景进入与绑定校验
+├── photo_watch.py / saved_photo.py  # NAS 照片监控、导入与去重
+├── panel_readout.py                 # 本地识别与超时兜底调度
+├── aliyun_vision.py                 # 阿里云视觉调用与结果校验
+├── agent_tools.py / agent_client.py # Agent 工具与 Python 适配器
+├── static/                         # 网页、项目标识与二维码样张
+├── InstrumentRegistry.json         # 仪器初始登记
+├── SceneRegistry.json              # 场景初始登记
+├── tests/                          # 自动测试
+├── deployment/                     # systemd 用户服务模板
+├── docs/                           # 概览图、运行与历史验证记录
+├── .env.example                    # 配置模板，不含实际凭证
+├── Requirements.lock.txt           # 锁定依赖
+├── AgentTools.md                   # 工具接口与接入示例
+└── 技术方案.md                      # 各模块机制与完整实现说明
 ```
 
-测试使用临时数据库和样张，不启动 PaddleOCR 模型，不连接真实 receiver。
+运行时的 `Data/` 保存本地图片与数据库；`Verification/`、`VerificationData/`、`output/`、`tmp/` 为本地验证或交付材料。这些目录、虚拟环境、模型权重、日志及密钥均不纳入 Git。
 
-### 用户服务安装
+## 📋 后续工作
 
-服务模板为 [deployment/field-recognition-demo.service](deployment/field-recognition-demo.service)，默认项目位置为 `~/Projects/FieldRecognition`。其他安装位置须调整模板中的工作目录、启动命令和环境文件路径。新安装时：
+- [ ] 完成现场仪器标签连续扫码和设备采集服务停启的联合验收。
+- [ ] 完成真实语音拍照 → NAS 新文件 → 当前仪器读数的现场闭环。
+- [ ] 建立不同仪器、距离、角度、反光条件下的人工标注样本与准确率评测。
+- [ ] 引入面板区域定位和更细的读数质量判断。
+- [ ] 对接稳定的设备服务实例 ID，并按部署需求补充身份认证与多相机调度。
 
-```bash
-cp .env.example .env
-# 在 .env 中填写本机 receiver 与 camera 设置；不要提交 .env。
-mkdir -p ~/.config/systemd/user
-cp deployment/field-recognition-demo.service ~/.config/systemd/user/field-recognition-demo.service
-systemctl --user daemon-reload
-systemctl --user enable --now field-recognition-demo.service
-```
-
-本机已有服务的配置在迁移时保留，只更新项目路径。不要用新安装模板覆盖已有相机配置；修改实际服务的环境配置后执行 `systemctl --user daemon-reload` 和 `systemctl --user restart field-recognition-demo.service`。手动启动的进程不会自动读取 `.env`，需在启动前设置环境变量。
-
-## 使用
-
-打开 http://127.0.0.1:8188/ 。
-
-1. 在“仪器登记”中填写两台仪器的实际名称、型号和所属场景。
-2. 填写实验员，点击“连续扫码绑定”。页面显示挂脖实时视频；先对准场景码，再对准仪器码。唯一场景自动进入，唯一且场景匹配的仪器只需一帧成功解码即可自动绑定。多个候选会暂停并要求手动选择。
-3. 绑定成功后停止扫码，实时视频继续显示；OCR 模型同时在后台自动加载，页面显示“模型常驻 · 已就绪”后供后续识别复用。重复扫码、重复提交和刷新页面均沿用原绑定，不新增记录。设备采集服务离线或采集会话变化后旧绑定结束，服务恢复后重新点击连续扫码。
-4. 对准面板，对现有 Agent 说“拍照”。照片写入该相机的 NAS 语音拍照目录并稳定后，本服务自动对这张照片识别，不重新拍照。也可在网页上传照片、框选并识别。
-5. 页面统一显示读数。OCR 请求开始 5 秒后仍无完整数字时，调用阿里云视觉模型兜底；结果仍需核对，不据此推断物理实验动作。
-6. 结束绑定或导出 JSON。原图、哈希、选框、模型结果、仪器/场景快照及时间分别留存。
-
-摄像头码尚未用于领用登记。本版实验员由页面填写，设备标识来自取流协议或上传声明，不具备用户认证/硬件认证。两张仪器码沿用已有唯一 ID，未签名，不具有防复制能力。
-
-## 接收端协议
-
-参考用户提供的《下游_全路RGB主码流_Windows_Python开发与接口协议.md》（2026-08-11 / f806ba9）。
-
-- 设备发现：`GET /api/status`，以 `sender_id` 和 `camera_id` 为身份，选择 `online && media_live` 的目标相机。
-- 主码流：`GET /api/preview/rgb-h264-frames?sender_id=...&camera_id=...&quality=main&metadata=global`。
-- 校验 `X-GWV3-Rgb-Stream: main`；解析 GWHP v1/v2、扩展头及长度边界；不把 HTTP chunk 当视频帧。
-- 单目标相机、两包上限队列、丢包后等待 KEY|CONFIG 并重建解码器；只保留最新解码图，超过一秒拒绝当作新照片。
-- 保存帧 PTS、sequence、sender 时间、global 时间与 clock_sync_valid；不额外加 offset。
-- 本 Demo 使用 PyAV CPU 单路解码，**不是协议中要求的生产级全路 NVDEC 验收**。软件解码和 PaddleOCR 都不占用 NAS YOLO 的 GPU。
-- 不直连 sender 内部媒体端口，不连接 Depth，不修改接收端连接容量。
-
-当前 receiver：`http://192.168.1.196:8080`，目标：`lubancat-52d2ef0c_cam01`。2026-09-11 已实测主码流连接及真实取图，分辨率 1280×800。拍摄证据与时间戳见 `Verification/ActualNeckCapture.json`。当前画面未出现仪器二维码或可读面板，尚不能证明真实仪器绑定及面板识别准确率。
-
-## 运行
-
-独立 Python 环境：`.venv`，已安装 CPU `paddlepaddle==3.2.0`、`paddleocr==3.2.0`、`av==16.1.0`。完整依赖见 Requirements.lock.txt。
-
-用户服务：`field-recognition-demo.service`。当前只监听本机 8188，CPU 上限 2 核、Nice=10，不对公网开放。
-
-```bash
-systemctl --user start field-recognition-demo.service
-systemctl --user stop field-recognition-demo.service
-```
-
-在该服务环境配置中更新 `FIELD_RECEIVER_URL` 后，仅重启此 Demo 服务。不要重启 `visioncortex-analysis.service`。
-
-主要环境变量：
-
-- `FIELD_RECEIVER_URL`：receiver 的 HTTP 地址。
-- `FIELD_CAMERA_ID`：目标 camera key，从 `/api/status` 精确匹配后取得稳定身份。
-- `FIELD_DEMO_DATA`：默认项目下 Data；测试使用独立目录。
-- `FIELD_CAMERA_SNAPSHOT_URL`：无 GWHP receiver 配置时可选的 JPEG/PNG 接口，不与 GWHP 混用。
-
-## 独立接口
-
-- `GET /api/state`：设备登记、绑定、OCR 和取流状态。
-- `PUT /api/instruments/{id}`：登记仪器和所属场景。
-- `POST /api/scans`：上传照片，解码二维码并保存证据。
-- `POST /api/camera/capture`：读取所选挂脖设备最新主码流帧并扫码。
-- `GET /api/camera/preview.mjpg`：不落盘的实时 MJPEG 预览，最多 15 fps。
-- `POST /api/camera/scan-sessions`：传 `{"operator":"实验员"}`，开始连续扫码。
-- `GET /api/camera/scan-sessions/{session_id}`：读取结果并续期；建议每 0.5 秒读取。
-- `DELETE /api/camera/scan-sessions/{session_id}`：停止扫码，已有绑定保留。
-- `POST /api/bindings`：确认使用关系；同相机、仪器和实验员重复提交返回原绑定，其他新绑定请求须先结束旧绑定。
-- `POST /api/bindings/{id}/end`：结束使用。
-- `POST /api/ocr`：提交 binding_id、capture_id 和可选 crop=[x,y,w,h]，异步返回 job_id。
-- `GET /api/jobs/{id}`：读取状态和 OCR 原文、坐标、模型分数。
-- `GET /api/export`：导出登记、绑定和 OCR 结果；原图片以引用提供。
-
-相机身份不同、照片中的仪器码与当前绑定冲突、绑定已结束或面板选框越界时拒绝识别请求。面板照片若没有二维码，其仪器关联依据为操作人选择的当前绑定，而非模型已证明同一仪器。
-
-## 验证边界
-
-- tests：真实二维码解码、绑定隔离、历史快照、错误输入、异步派发、协议拆包、真实 H.264 CPU 解码及过期帧拒绝。
-- Verification/ActualOcr.json：真实 PaddleOCR 模型调用；输入为带明显标记的合成测试面板，不是实际设备拍摄，不能作为仪器准确率结论。
-- Verification/BrowserCheck.json：独立测试数据下的浏览器扫码、登记、绑定、框选和 OCR 流程；与正式 Demo 数据隔离。
-- 挂脖设备主码流连接与真实取图：PROVEN，见 Verification/ActualNeckCapture.json。
-- 真实仪器扫码绑定及面板准确率、生产级多路 GPU 吞吐：NOT_PROVEN。
-
-PaddleOCR 安装与调用依据：https://www.paddleocr.ai/main/en/quick_start.html 。
-
-## Agent 小工具
-
-已提供九个共用现有实现的 HTTP JSON 工具，工具发现入口为 `/api/tools`。接入说明见 [AgentTools.md](AgentTools.md)，标准库 Python 适配器见 [agent_client.py](agent_client.py)。`Verification/AgentTools.json` 记录工具接口真实取图验证和测试边界。
-
-## 场景扫码接入（2026-09-11）
-
-场景 01 已登记为湿实验实验台，称量仪器 A/B 均属于该场景。先用挂脖设备拍摄场景二维码，点击“确认进入场景”；再用同一设备拍摄仪器码，填写实验员并绑定，之后拍面板提交 OCR。同场景重复确认幂等；当前有仪器绑定时拒绝切换场景，须先主动结束或等待设备采集服务重启。其他相机的场景记录不可借用，仪器场景不一致拒绝绑定。每次 OCR 无需重复扫码，但必须保留有效的仪器绑定和场景记录。
-
-页面和 Agent 共用 `/api/scene/enter` 与 `enter_scene` 工具；参数为 scan_id、scene_id。状态包含 scenes、scene_visits；扫码包含 scene_matches；绑定及 OCR 回执保留 scene_visit_id、场景快照和原图引用。原二维码不变，仍是未签名 Demo 码。场景所属关系由登记提供，扫码不能证明真实地理位置或硬件身份。
-
-23 项测试通过，包括真实二维码解码、相机隔离、场景切换、重复进入、仪器绑定及 OCR 前置验证。浏览器使用 DemoSampleCamera 验证场景样张到仪器绑定，验证绑定已结束。真实挂脖设备在现场拍摄贴纸的完整验证尚待用户操作。
-
-## 2026-09-11 实物扫码排查
-
-扫码增加 ZXing-C++ 2.3.0 补充解码、灰度放大与局部对比度重试，保留原图、真实解码内容与原图坐标；扫描记录新增 qr_diagnostics。只接受校验通过的码内容，不根据标签文字或已登记设备猜测身份。依据：https://github.com/zxing-cpp/zxing-cpp/tree/master/wrappers/python 。
-
-25项测试通过，但本次12张挂脖实拍仍均未解码成功，见 Verification/QrDecoderActualImages.json；不能称实物问题已修复。近处码块模糊、部分照片存在反光。请先固定平整标签，调整距离至黑白格边缘清楚，再重拍；用手机拍清晰照片上传可区分打印问题与挂脖镜头成像问题。
-
-
-## 连续视频扫码与采集服务会话（2026-09-11）
-
-`live_scan.py` 共用现有二维码、场景校验、原图存证和绑定实现。扫码使用原始分辨率的新鲜帧：优先 ZXing 原图快速解码，每秒一次完整补充解码；只处理新的已解码帧，CPU 忙时跳过中间帧以免积压，不承诺逐一处理全部 30 fps 源帧。只要实际处理的一帧成功解码出唯一合规仪器码，即可绑定，不要求多帧一致。预览独立缩放至宽度最多 960 像素、最多 15 fps；断流超过一秒显示等待画面。未命中帧不存图，命中帧保留原始像素、哈希、帧时间与真实解码结果。
-
-每台挂脖相机只有一个连续扫码会话。绑定成功或多码需要选择时结束自动扫码；页面停止、离开或 20 秒不读取状态也会停止。终止返回后，进行中的解码不能补写绑定。已有绑定保存在 SQLite，刷新页面或重启本地 Demo 不会因为内存状态丢失而重复绑定。主动结束仍作为操作人明确发起的退出入口保留。
-
-设备服务边界来自每秒读取 receiver `/api/status` 的目标相机 `status_live`、`media_live` 和 `rgb_ingress_session_id`：两种 live 都为 false，或 RGB ingress 会话改变，结束该相机旧场景与仪器绑定；重新在线设置新的扫码时间界限，旧照片不能再用于进入场景或绑定。`recording_session_id` 不参与判断。接收端 HTTP 失败、Demo 的 GWHP 读取连接重连不直接结束绑定。状态保存在 `camera_service_state`，结束原因留在历史记录中。
-
-**边界：** receiver 的 ingress 会话不是设备进程的启动 UUID；设备重连或 receiver 重启也可能改变它。当前实现按可观测的采集服务可用性/会话边界要求重新扫码，不能严格证明“只在 sender 进程重启时变化”。若需区分全部网络重连与设备服务重启，仍需上游提供稳定的服务运行实例 ID。此项目未修改上游服务。
-
-验证：36 项自动测试（含样张真实解码、单帧命中、幂等绑定、取消竞态、多码暂停、会话续期、设备离线/重新上线与跨相机隔离）通过。真实挂脖视频预览已检查，回执见 `Verification/ContinuousScan20260911/Receipt.json`；隔离浏览器验证见同目录 `BrowserReceipt.json`。这次未启动真实 PaddleOCR、未创建正式测试绑定、未停止设备采集服务。
-
-- PROVEN：隔离环境中的连续扫码及绑定规则；实际挂脖视频预览。
-- PARTIAL_EVIDENCE：接收端采集会话字段已读到，重启失效逻辑已通过模拟测试。
-- NOT_PROVEN：现场仪器标签连续扫码完整绑定、实际设备采集服务停启闭环、真实面板准确率。
-
-
-## 绑定后 OCR 常驻（2026-09-11）
-
-手动绑定、连续扫码自动绑定和 Agent 的 bind_instrument 共用同一实现：绑定事务成功提交后，异步将模型加载任务放入单线程 CPU OCR 队列，绑定接口直接返回。加载和识别共用同一个工作线程及模型锁；并发或重复绑定不会创建多个模型实例，也不阻塞二维码绑定。初始化只加载模型，不会自动读取视频面板。面板预测由该相机新语音照片、网页识别按钮或 Agent 的 read_panel/read_saved_panel 请求触发。
-
-PaddleOCR 加载成功后在本地识别服务进程内持续保留。完成一次识别、主动结束绑定、相机服务离线或重新绑定都不会卸载模型。只有停止/重启本地 `field-recognition-demo.service` 才释放该进程中的模型；如果服务启动时数据库仍有有效绑定，会自动再次后台加载，无需重复绑定。加载失败会保留已有绑定并展示错误；后续绑定请求或面板识别可重试加载。
-
-`GET /api/state` 的 `ocr` 提供 `status`（not_loaded / queued / loading / ready / error）、`resident`、`loaded_at`、`load_count` 和 `load_seconds`。这些字段描述模型进程状态，不表示已识别到面板，也不是准确率。
-
-验证：40 项自动测试通过，覆盖后台加载不阻塞绑定、并发初始化去重、预测复用、结束绑定后保留、失败重试、已有绑定随本地服务启动恢复预加载。测试使用模型替身。真实 CPU PaddleOCR 加载与复用单独在临时数据中检查，回执为 `Verification/OcrResident20260911/Receipt.json`；不修改正式绑定，也不运行面板预测。
-
-
-## NAS 语音照片监控与读数兜底（2026-09-11）
-
-当前配置只读 `/mnt/realityloop-nas/voice_photos/<camera_id>/YYYY-MM-DD/HH-MM-SS/YYYYMMDD_HHMMSS[_序号].jpg`。这是本次读取 NAS 目录后确认的语音拍照布局；同一次语音拍照目录可能包含多张照片，按文件分别去重处理。不监控相机视频分片目录，不重新取视频帧，不修改、移动或删除 NAS 文件。
-
-`photo_watch.py` 每 2 秒检查当前有效绑定相机的目录；没有绑定时不读取 NAS。只考虑文件名拍摄时间在本次绑定开始之后的照片，连续两次观察到大小及修改时间稳定、间隔至少 1 秒后提交。每轮最多提交一张，待处理队列最多四个。读取失败/文件变化、相机不符、时间过旧、二维码与绑定冲突均不输出读数。绑定结束、场景变更或采集服务会话导致绑定失效后，不再接收该绑定的新照片，进行中的结果也会检查绑定是否仍有效。
-
-照片按源相机、源照片编号和内容 SHA-256 导入一次；同一绑定、同一照片、同一选框返回原任务，包括已完成的任务。文件监控回执保存到 SQLite，重启本地服务不会重复处理已经记录的文件。原始 NAS 路径、源图哈希、文件名推导的拍摄时间和本地接收时间分别保留；文件名时间采用 `FIELD_SAVED_PHOTO_TIMEZONE`，默认 Asia/Shanghai，精度只有秒，不等于设备硬件时间认证。原图读取后在本项目保存用于识别和回执的副本，NAS 原件不变。未框选时识别整张照片，尚未自动定位或跟踪物理面板，照片需对准当前绑定仪器。
-
-`panel_readout.py` 将请求调度与 CPU 模型线程分开。每张照片先提交给常驻 PaddleOCR：出现完整数字行候选就立即返回，低模型分数本身不触发兜底。请求实际开始后 5 秒仍没有数字（包括模型仍在执行）时，最多调用一次阿里云 `qwen3.8-max`；同一绑定两次付费尝试至少间隔 30 秒，并持久化间隔。没有自动 HTTP 重试。若多张照片接连失败，间隔内的后续照片只返回本地结果和后台 skipped 回执。云端仍无法看清时保留无读数，不补数字；本地模型晚返回的原始结果另留审计，不改写已交付读数。
-
-默认模型依据阿里云当日模型列表：<https://www.alibabacloud.com/help/zh/model-studio/models>。视觉接口：<https://help.aliyun.com/zh/model-studio/vision>。密钥仅从环境读取，当前保存在忽略提交的 `.env`（0600），由用户服务的 EnvironmentFile 加载。只向阿里云发送本次面板选框（未选框则整张照片）和固定读数提示，不发送实验员、绑定记录或 NAS 路径。原始本地 OCR、视觉请求回执和来源保留在 JSON，网页统一显示读数，不单列云端结果或伪造模型分数/文字坐标。
-
-配置见 `.env.example`：`FIELD_SAVED_PHOTO_ROOT`、`FIELD_SAVED_PHOTO_WATCH_ENABLED`、`DASHSCOPE_API_KEY`、`FIELD_ALIYUN_FALLBACK_ENABLED`、`FIELD_ALIYUN_MODEL`、`FIELD_ALIYUN_NO_DIGITS_SECONDS`。手动启动需显式设置这些环境变量；程序不自动加载 `.env`。
-
-新增 `POST /api/ocr/photo-result` / Agent `read_saved_panel` 可传 `binding_id` 和确切 `image_path`，也可用 `photo` 对象传原图 base64 和拍照回执；不允许两个来源同时传。路径必须属于已配置的语音拍照目录和绑定相机，不支持任意文件、目录、视频或自动挑选最新照片。`GET /api/state` 返回 `photo_watch` 状态，`jobs` 返回统一读数与后端回执。详见 AgentTools.md。
-
-验证材料：`Verification/VoicePhotoWatch20260911/NasSourceReceipt.json` 是一张实际 NAS 语音照片的只读解析；`Verification/AliyunFallback20260911/SyntheticReceipt.json` 是阿里云真实视觉调用的合成面板测试。`Verification/VoicePhotoWatch20260911/SyntheticPipelineReceipt.json` 进一步记录真实 CPU OCR→5.002 秒超时→真实阿里云对合成空白面板返回 unreadable 的完整链路，输入目录是本机临时目录。66 项自动测试通过；自动测试使用临时照片目录、临时数据库和模型/HTTP 替身，不访问真实 NAS、相机或付费模型。NAS 路径与单张照片读取为 PROVEN；真实语音指令→新照片→当前物理仪器读数闭环仍是 NOT_PROVEN，不能以合成面板和服务响应代替现场准确率验收。
+项目介绍的组织方式参考 [JoyAI-VL-Interaction](https://github.com/RealityLoopAI/JoyAI-VL-Interaction)。FieldRecognition 的功能、技术栈和验证结论均以本仓库实现为依据。

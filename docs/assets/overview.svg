@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420" role="img" aria-labelledby="title desc">
+  <title id="title">FieldRecognition workflow</title>
+  <desc id="desc">Live video decodes a scene and instrument QR code to create a binding. The existing Agent saves a voice-triggered photo to NAS. Resident PaddleOCR reads it, with an Aliyun vision fallback after five seconds without a complete numeric candidate, when enabled and permitted. Each result retains its image, timestamp and binding evidence.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#f2f8f7"/>
+      <stop offset="1" stop-color="#e4f0ed"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M1 1 7 4 1 7" fill="none" stroke="#789b99" stroke-width="1.5"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="420" rx="24" fill="url(#background)"/>
+  <g font-family="Arial, Helvetica, sans-serif">
+    <rect x="40" y="34" width="5" height="38" rx="2.5" fill="#22646a"/>
+    <text x="60" y="51" font-size="13" font-weight="700" letter-spacing="2" fill="#3b6b6f">FIELDRECOGNITION</text>
+    <text x="60" y="77" font-size="21" font-weight="700" fill="#163d43">From a camera view to a traceable reading.</text>
+    <text x="1160" y="52" text-anchor="end" font-size="12" font-weight="700" letter-spacing="1" fill="#527977">WORKFLOW OVERVIEW</text>
+    <g fill="#ffffff" stroke="#cddedb">
+      <rect x="40" y="117" width="256" height="178" rx="14"/>
+      <rect x="328" y="117" width="256" height="178" rx="14"/>
+      <rect x="616" y="117" width="256" height="178" rx="14"/>
+      <rect x="904" y="117" width="256" height="178" rx="14"/>
+    </g>
+    <g fill="#e9f3f0">
+      <circle cx="75" cy="152" r="17"/>
+      <circle cx="363" cy="152" r="17"/>
+      <circle cx="651" cy="152" r="17"/>
+      <circle cx="939" cy="152" r="17"/>
+    </g>
+    <g font-size="12" font-weight="700" fill="#22646a" text-anchor="middle">
+      <text x="75" y="156">01</text><text x="363" y="156">02</text>
+      <text x="651" y="156">03</text><text x="939" y="156">04</text>
+    </g>
+    <g stroke="#789b99" stroke-width="1.5" fill="none" marker-end="url(#arrow)">
+      <path d="M301 206H321"/><path d="M589 206H609"/><path d="M877 206H897"/>
+    </g>
+    <g fill="#163d43" font-size="22" font-weight="700">
+      <text x="61" y="202">Live video</text>
+      <text x="349" y="202">Bind once</text>
+      <text x="637" y="202">Voice photo</text>
+      <text x="925" y="202">Read the panel</text>
+    </g>
+    <g fill="#526c70" font-size="14">
+      <text x="61" y="231">Decode scene + instrument QR.</text>
+      <text x="61" y="254">One valid frame can bind.</text>
+      <text x="349" y="231">Reuse the active relationship.</text>
+      <text x="349" y="254">Keep OCR resident on CPU.</text>
+      <text x="637" y="231">Use the Agent's saved image.</text>
+      <text x="637" y="254">Watch stable NAS files.</text>
+      <text x="925" y="231">PaddleOCR first.</text>
+      <text x="925" y="254">Timed Aliyun vision fallback.</text>
+    </g>
+    <rect x="40" y="320" width="1120" height="65" rx="12" fill="#204e55"/>
+    <text x="62" y="346" font-size="13" font-weight="700" fill="#ffffff">Every result stays linked to its photo, time and instrument binding.</text>
+    <text x="62" y="369" font-size="12" fill="#c3deda">Rebind after the capture service session becomes invalid. Fallback: 5 s without digits, when enabled and permitted.</text>
+  </g>
+</svg>
