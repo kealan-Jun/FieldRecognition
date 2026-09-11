@@ -4,13 +4,13 @@ After=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/Projects/FieldRecognitionDemo
-ExecStart=%h/Projects/FieldRecognitionDemo/.venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 8188
+WorkingDirectory=%h/Projects/FieldRecognition
+ExecStart=%h/Projects/FieldRecognition/.venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 8188
 Environment=PYTHONUNBUFFERED=1
 Environment=OMP_NUM_THREADS=2
 Environment=OPENBLAS_NUM_THREADS=2
 Environment=PADDLE_PDX_MODEL_SOURCE=BOS
-EnvironmentFile=-%h/Projects/FieldRecognitionDemo/.env
+EnvironmentFile=-%h/Projects/FieldRecognition/.env
 Nice=10
 CPUQuota=200%
 MemoryMax=3G

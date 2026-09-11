@@ -52,20 +52,22 @@ def install_tools(app, core):
         'scan_photo': (Photo, scan_photo,
             '识别调用方提供的照片中的场景和仪器二维码并保存原图证据。传图片的纯 base64 和来源 camera_id，不传路径或 URL。'),
         'enter_scene': (EnterScene, lambda a: core['enter_scene'](a),
-            '用实际场景扫码记录确认相机进入场景；换场景结束旧仪器绑定，同场景重复确认幂等。'),
+            '用实际场景扫码记录确认相机进入场景；已有仪器绑定时拒绝换场景，同场景重复确认幂等。'),
         'bind_instrument': (Bind, lambda a: core['bind'](a),
-            '将实际扫码匹配的仪器绑定到该照片相机和实验员；仪器须已登记场景。使用用户指定的仪器和操作人，不猜测身份。会结束该相机之前的绑定。'),
+            '将实际扫码匹配的仪器绑定到该照片相机和实验员；仪器须已登记场景。使用用户指定的仪器和操作人，不猜测身份。同相机、仪器与实验员重复请求返回原绑定；已有其他有效绑定时拒绝覆盖。'),
         'read_panel': (Ocr, lambda a: core['submit_ocr'](a),
-            '基于有效 binding_id 和 capture_id 异步提交真实 PaddleOCR。crop 为原图像素 [x,y,width,height]，省略则整图。返回 job_id；提交成功不等于识别完成。'),
+            '仅在用户要求查看面板读数时，基于有效 binding_id 和已有 capture_id 提交识别。先用常驻 PaddleOCR；该次照片请求开始后 5 秒仍无数字时使用视觉兜底。crop 为原图像素 [x,y,width,height]，省略则整图。返回 job_id，需查询结果；不要因绑定成功自动调用。'),
+        'read_saved_panel': (core['SavedPhotoRequest'], lambda a: core['read_saved_panel'](a),
+            '用户要求查看面板读数、现有 Agent 拍照工具已把照片保存到 NAS 后调用。传当前 binding_id 和拍照结果指定的 image_path（语音拍照目录内的具体 JPG/PNG 路径，或相对于 voice_photos 的路径）；也可传 photo 原图 base64 与拍照回执，两者只能选一个。只读取指定照片；目录监控由本服务根据有效绑定自动完成。先运行常驻 OCR；本次请求 5 秒无数字时最多一次视觉兜底。同一照片和选框重复提交返回原 job_id。随后 get_panel_result 查询并统一回答读数，无需单独标注云端来源。'),
         'get_panel_result': (JobId, lambda a: core['get_job'](a.job_id),
-            '查询 OCR 任务。仅 completed 时读取 lines、confidence、polygon 和来源；queued/running 时稍后查询，failed/interrupted 时报告失败，不编造读数。'),
+            '查询识别任务。completed 时统一读取 lines；confidence、polygon 可能为 null，不能补造。queued/running 时稍后查询原 job_id；failed/interrupted/cancelled 时报告未完成，不重新提交、不编造读数。后台 local_ocr/fallback 保留审计来源，用户读数无需另作云端标注。'),
         'end_instrument_binding': (BindingId, lambda a: core['end_binding'](a.binding_id),
             '结束指定仪器使用绑定；重复结束保持同一结果。'),
     }
 
     @app.get('/api/tools')
     def list_tools():
-        return {'version': '1.0', 'transport': 'http-json', 'tools': [
+        return {'version': '1.1', 'transport': 'http-json', 'tools': [
             {'name': name, 'description': desc, 'input_schema': model.model_json_schema()}
             for name, (model, _, desc) in registry.items()]}
 

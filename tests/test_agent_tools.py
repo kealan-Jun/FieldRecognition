@@ -11,7 +11,7 @@ def invoke(client, name, args=None):
 def test_tool_flow_reuses_browser_records_and_async_ocr(app_client, monkeypatch):
     app, client = app_client
     definitions = client.get('/api/tools').json()['tools']
-    assert len(definitions) == 8
+    assert len(definitions) == 9
     assert all(t['input_schema']['additionalProperties'] is False for t in definitions)
     image = Path(__file__).parents[1] / 'static/labels/InstrumentA.png'
     scan = invoke(client, 'scan_photo', {'camera_id': 'ToolCamera',
@@ -23,7 +23,7 @@ def test_tool_flow_reuses_browser_records_and_async_ocr(app_client, monkeypatch)
         'instrument_id': aid, 'operator': 'ToolTester'}).json()['result']
     assert client.get('/api/state').json()['bindings'][0]['binding_id'] == bound['binding_id']
     dispatched = []
-    monkeypatch.setattr(app.ocr_pool, 'submit', lambda fn, doc: dispatched.append((fn, doc)))
+    monkeypatch.setattr(app.readout_pool, 'submit', lambda fn, doc: dispatched.append((fn, doc)))
     job = invoke(client, 'read_panel', {'binding_id': bound['binding_id'],
         'capture_id': scan['capture_id']}).json()['result']
     assert dispatched[0][0] is app.run_ocr

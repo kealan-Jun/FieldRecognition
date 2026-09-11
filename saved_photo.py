@@ -1,0 +1,143 @@
+"""Import an existing Agent photograph and its receipt, without taking another photo."""
+import base64
+import binascii
+import hashlib
+import json
+import os
+import re
+import uuid
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+from fastapi import HTTPException
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+
+
+class PhotoResult(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    capture_id: str = Field(min_length=1, max_length=200)
+    camera_id: str = Field(min_length=1, max_length=100)
+    captured_at: AwareDatetime
+    source_ref: str = Field(min_length=1, max_length=2000)
+    image_base64: str = Field(min_length=1, max_length=16 * 1024 * 1024)
+    sha256: str | None = Field(default=None, pattern=r'^[a-fA-F0-9]{64}$')
+    timestamp_basis: str = Field(default='agent_photo_receipt', max_length=100)
+
+
+class SavedPhotoRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    binding_id: uuid.UUID
+    photo: PhotoResult | None = None
+    image_path: str | None = Field(default=None, min_length=1, max_length=2000)
+    crop: list[int] | None = None
+
+    @model_validator(mode='after')
+    def one_photo(self):
+        if (self.photo is None) == (self.image_path is None):
+            raise ValueError('Provide exactly one of photo or image_path')
+        return self
+
+
+def load_saved_photo(image_path, *, expected_camera, max_bytes):
+    configured = os.environ.get('FIELD_SAVED_PHOTO_ROOT')
+    if not configured:
+        raise HTTPException(409, '尚未配置已有照片目录；可由 Agent 传入 photo 原图与回执')
+    root = Path(configured).resolve()
+    supplied = Path(image_path)
+    candidate = supplied if supplied.is_absolute() else root / supplied
+    try:
+        path = candidate.resolve(strict=True)
+        relative = path.relative_to(root)
+        # Actual voice_photos layout, not a recursive or latest-file search.
+        camera, day, moment, filename = relative.parts
+    except (OSError, ValueError):
+        raise HTTPException(422, '照片路径不存在或不在已配置的语音拍照目录内') from None
+    if camera != expected_camera:
+        raise HTTPException(409, '拍照文件所属相机与当前绑定不一致')
+    match = re.fullmatch(r'(\d{8})_(\d{6})(?:_\d+)?\.(?:jpg|jpeg|png)', filename, re.I)
+    if not match or not path.is_file():
+        raise HTTPException(422, '请提供拍照结果中的具体照片文件，不支持目录或视频')
+    try:
+        captured = datetime.strptime(match[1] + match[2], '%Y%m%d%H%M%S').replace(
+            tzinfo=ZoneInfo(os.environ.get('FIELD_SAVED_PHOTO_TIMEZONE', 'Asia/Shanghai')))
+        if day != captured.strftime('%Y-%m-%d') or moment != captured.strftime('%H-%M-%S'):
+            raise ValueError('Photo date mismatch')
+        before = path.stat()
+        if not 0 < before.st_size <= max_bytes:
+            raise HTTPException(413, '照片为空或超过 12 MB')
+        with path.open('rb') as source:
+            raw = source.read(max_bytes + 1)
+        after = path.stat()
+        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns) or len(raw) != after.st_size:
+            raise HTTPException(409, '照片仍在写入，请等待拍照保存完成')
+    except (OSError, ValueError, KeyError):
+        raise HTTPException(422, '无法读取完整照片或解析其拍摄时间') from None
+    return PhotoResult(capture_id=relative.as_posix(), camera_id=camera, captured_at=captured,
+                       source_ref=str(path), image_base64=base64.b64encode(raw).decode(),
+                       sha256=hashlib.sha256(raw).hexdigest(),
+                       timestamp_basis='nas_filename_local_time_not_hardware_verified')
+
+
+def install(core):
+    with core['db']() as conn:
+        conn.execute('CREATE TABLE IF NOT EXISTS imported_photos(camera_id TEXT, source_capture_id TEXT, '
+                     'sha256 TEXT NOT NULL, capture_id TEXT NOT NULL, PRIMARY KEY(camera_id,source_capture_id))')
+
+    def read_saved_panel(body, *, trigger='explicit_request'):
+        with core['ocr_submit_lock']:
+            if not core['current_readout_binding']({'binding_id': str(body.binding_id)}):
+                raise HTTPException(409, '请先建立有效的仪器绑定')
+            with core['db']() as conn:
+                binding = json.loads(conn.execute('SELECT document FROM bindings WHERE id=?', (str(body.binding_id),)).fetchone()['document'])
+            photo = body.photo or load_saved_photo(body.image_path, expected_camera=binding['camera_id'], max_bytes=core['MAX_BYTES'])
+            if photo.camera_id != binding['camera_id']:
+                raise HTTPException(409, '拍照结果的相机与当前绑定不一致')
+            if (photo.captured_at < datetime.fromisoformat(binding['started_at']) or
+                    photo.captured_at > datetime.now(timezone.utc) + timedelta(seconds=60)):
+                raise HTTPException(409, '拍照时间早于本次绑定或在未来，请核对拍照回执')
+            try:
+                raw = base64.b64decode(photo.image_base64, validate=True)
+            except (ValueError, binascii.Error):
+                raise HTTPException(422, 'image_base64 必须是原照片字节的纯 base64') from None
+            digest = hashlib.sha256(raw).hexdigest()
+            if photo.sha256 and digest != photo.sha256.lower():
+                raise HTTPException(422, '照片内容与拍照回执的 SHA-256 不一致')
+            external = photo.model_dump(mode='json', exclude={'image_base64', 'sha256'}) | {'source_sha256': digest}
+            with core['db']() as conn:
+                existing = conn.execute('SELECT * FROM imported_photos WHERE camera_id=? AND source_capture_id=?',
+                                        (photo.camera_id, photo.capture_id)).fetchone()
+                if existing:
+                    if existing['sha256'] != digest:
+                        raise HTTPException(409, '同一个拍照结果编号对应的照片内容发生变化')
+                    capture = json.loads(conn.execute('SELECT document FROM scans WHERE id=?', (existing['capture_id'],)).fetchone()['document'])
+                    if capture['external_photo'] != external:
+                        raise HTTPException(409, '同一个拍照结果编号的原始回执发生变化')
+                else:
+                    capture = None
+            if capture is None:
+                # The caller resolves NAS access. source_ref is opaque provenance, never
+                # interpreted as a filesystem path or a URL to fetch by this service.
+                capture = core['scan_image'](raw, 'agent_saved_photo', photo.camera_id)
+                capture['external_photo'] = external
+                with core['db']() as conn:
+                    conn.execute('UPDATE scans SET document=? WHERE id=?', (json.dumps(capture), capture['capture_id']))
+                    conn.execute('INSERT INTO imported_photos VALUES(?,?,?,?)',
+                                 (photo.camera_id, photo.capture_id, digest, capture['capture_id']))
+            requested_crop = body.crop if body.crop is not None else [0, 0, capture['width'], capture['height']]
+            # Retransmission of the same saved photograph reuses even a finished job.
+            # A genuinely new photograph or a different crop is a new request.
+            with core['db']() as conn:
+                for row in conn.execute('SELECT status,document FROM jobs ORDER BY rowid DESC'):
+                    job = json.loads(row['document'])
+                    if (job['binding_id'] == str(body.binding_id) and job['capture_id'] == capture['capture_id']
+                            and job['crop'] == requested_crop):
+                        return job | {'status': row['status']}
+            return core['enqueue_ocr'](core['OcrRequest'](binding_id=body.binding_id,
+                                    capture_id=capture['capture_id'], crop=body.crop), trigger=trigger)
+
+    core['SavedPhotoRequest'] = SavedPhotoRequest
+    core['read_saved_panel'] = read_saved_panel
+    @core['app'].post('/api/ocr/photo-result', status_code=202)
+    def endpoint(body: SavedPhotoRequest):
+        return read_saved_panel(body)

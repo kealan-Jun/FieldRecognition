@@ -30,13 +30,14 @@ def install(core):
         with db() as conn:
             return [json.loads(r['document']) for r in conn.execute('SELECT document FROM scene_visits WHERE ended IS NULL')]
 
-    def enter(body: SceneEntry):
+    def enter(body: SceneEntry, *, automatic: bool = False):
         with db() as conn:
             conn.execute('BEGIN IMMEDIATE')
             row = conn.execute('SELECT document FROM scans WHERE id=?', (str(body.scan_id),)).fetchone()
             if not row:
                 raise HTTPException(404, '扫码记录不存在')
             scan = json.loads(row['document'])
+            core['validate_capture_epoch'](conn, scan)
             scene = conn.execute('SELECT * FROM scenes WHERE id=?', (str(body.scene_id),)).fetchone()
             if not scene or not any(s['id'] == str(body.scene_id) for s in scan.get('scene_matches', [])):
                 raise HTTPException(409, '此照片未识别到已登记的场景码')
@@ -45,6 +46,8 @@ def install(core):
                 prior = json.loads(active['document'])
                 if prior['scene']['id'] == str(body.scene_id):
                     return prior
+            if conn.execute('SELECT 1 FROM bindings WHERE camera=? AND ended IS NULL', (scan['camera_id'],)).fetchone():
+                raise HTTPException(409, '当前采集服务已有仪器绑定；服务重启或主动结束后才能切换场景')
             timestamp = now()
             for table in ['scene_visits', 'bindings']:
                 for row in conn.execute(f'SELECT * FROM {table} WHERE camera=? AND ended IS NULL', (scan['camera_id'],)).fetchall():
@@ -52,7 +55,7 @@ def install(core):
                     conn.execute(f'UPDATE {table} SET ended=?,document=? WHERE id=?', (timestamp, json.dumps(doc), row['id']))
             result = {'visit_id': str(uuid.uuid4()), 'camera_id': scan['camera_id'], 'scene': dict(scene),
                       'scan_id': scan['scan_id'], 'image_url': scan['image_url'], 'started_at': timestamp,
-                      'ended_at': None, 'identity_basis': 'unsigned_scene_qr_and_user_confirmation'}
+                      'ended_at': None, 'identity_basis': 'unsigned_scene_qr_and_continuous_scan_opt_in' if automatic else 'unsigned_scene_qr_and_user_confirmation'}
             conn.execute('INSERT INTO scene_visits VALUES(?,?,NULL,?)', (result['visit_id'], result['camera_id'], json.dumps(result)))
             return result
 

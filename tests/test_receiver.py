@@ -1,4 +1,5 @@
 import io
+import json
 import queue
 import struct
 import threading
@@ -85,3 +86,29 @@ def test_encoded_buffer_is_bounded():
     camera.packets.put_nowait(2)
     with pytest.raises(queue.Full):
         camera.packets.put_nowait(3)
+
+
+@pytest.mark.parametrize('document,expected', [
+    ({'cameras': [{'camera_key': 'sender_cam01', 'status_live': True, 'media_live': True,
+                   'rgb_ingress_session_id': 13, 'recording_session_id': 999}]},
+     [{'online': True, 'media_session_id': 13}]),
+    ({'receiver_admin_stale': True, 'cameras': [{'camera_key': 'sender_cam01',
+                                               'status_live': False, 'media_live': False}]}, []),
+    ({'cameras': [{'camera_key': 'sender_cam01', 'media_live': False}]}, []),
+    ({'cameras': []}, []),
+])
+def test_service_monitor_uses_ingress_identity_and_ignores_unknown_status(monkeypatch, document, expected):
+    import urllib.request
+    camera = ReceiverCamera('http://unused.invalid', 'sender_cam01')
+    observations = []
+    camera.on_service_status = observations.append
+
+    class Opener:
+        def open(self, *args, **kwargs):
+            camera.stop.set()  # Exactly one status observation, without a network connection.
+            return io.BytesIO(json.dumps(document).encode())
+
+    monkeypatch.setattr(urllib.request, 'build_opener', lambda *a: Opener())
+    camera._status_loop()
+    assert observations == expected
+    assert camera.snapshot()['service_status_available'] == bool(expected)

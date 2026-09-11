@@ -69,6 +69,7 @@ class ReceiverCamera:
         self.latest = None
         self.response = None
         self.started = False
+        self.on_service_status = None
         self.info = {'configured': True, 'id': target, 'mode': 'gwhp_main', 'status': 'not_started',
                      'decoder': 'PyAV CPU / single-camera demo', 'receiver': self.receiver,
                      'reconnect_count': 0, 'sequence_gaps': 0, 'decode_errors': 0,
@@ -83,6 +84,41 @@ class ReceiverCamera:
         self.decoder = threading.Thread(target=self._decode_loop, name='gwhp-cpu-decoder', daemon=True)
         self.reader.start()
         self.decoder.start()
+        self.monitor = threading.Thread(target=self._status_loop, name='gwhp-status', daemon=True)
+        self.monitor.start()
+
+    def _status_loop(self):
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        while not self.stop.is_set():
+            try:
+                with opener.open(self.receiver+'/api/status', timeout=5) as response:
+                    raw = response.read(4*1024*1024+1)
+                if len(raw) > 4*1024*1024:
+                    raise ValueError('Receiver status too large')
+                status = json.loads(raw)
+                if status.get('receiver_admin_stale'):
+                    raise ValueError('Receiver status is stale')
+                matches = [c for c in status.get('cameras', []) if c.get('camera_key') == self.target
+                           or f"{c.get('sender_id')}_{c.get('camera_id')}" == self.target]
+                if len(matches) == 1:
+                    camera = matches[0]
+                    if not all(isinstance(camera.get(k), bool) for k in ('status_live', 'media_live')):
+                        raise ValueError('Receiver service liveness is unavailable')
+                    # This is the receiver's RGB ingress session, not its recording session.
+                    observation = {'online': bool(camera.get('status_live') or camera.get('media_live')),
+                                   'media_session_id': camera.get('rgb_ingress_session_id')}
+                    if self.on_service_status:
+                        self.on_service_status(observation)
+                    with self.lock:
+                        self.info.update(service_status=observation, service_status_available=True)
+                else:
+                    with self.lock:
+                        self.info['service_status_available'] = False
+            except Exception:
+                # Receiver/API failure is unknown, not proof the device service stopped.
+                with self.lock:
+                    self.info['service_status_available'] = False
+            self.stop.wait(1)
 
     def close(self):
         self.stop.set()
@@ -100,6 +136,8 @@ class ReceiverCamera:
 
     def frame(self):
         with self.lock:
+            if self.info.get('service_status', {}).get('online') is False:
+                raise ValueError('设备采集服务已离线，等待重新启动')
             if not self.latest or time.monotonic()-self.latest[2] > 1:
                 raise ValueError('尚未取得一秒内的新鲜主码流画面，请检查接收端和设备在线状态')
             image, metadata, received = self.latest
@@ -224,6 +262,7 @@ class ReceiverCamera:
                               'height': frame.height, 'rgb_h264_full_range': full_range,
                               'decoder': 'PyAV CPU'}
                     with self.lock:
+                        record['decoded_frame_id'] = self.info['decoded_frames'] + 1
                         self.latest = (pixels, record, received)
                         self.info.update(status='streaming', last_sequence=source.sequence,
                                          clock_sync_valid=source.sync_valid, width=frame.width, height=frame.height)

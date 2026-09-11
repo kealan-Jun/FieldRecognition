@@ -21,7 +21,7 @@ def test_scene_required_and_camera_isolation(app_client):
     assert enter_scene(client,scene_id=str(uuid.uuid4())).status_code==409
 
 
-def test_scene_change_ends_binding_and_invalidates_ocr(app_client):
+def test_scene_change_requires_end_and_invalidates_ocr(app_client):
     app,client=app_client
     picture=scan(client);aid=picture['matches'][0]['id']
     client.put('/api/instruments/'+aid,json={'name':'称量仪器 A','scene':'湿实验实验台'})
@@ -30,6 +30,8 @@ def test_scene_change_ends_binding_and_invalidates_ocr(app_client):
     bound=client.post('/api/bindings',json=args).json()
     second=str(uuid.uuid4())
     with app.db() as conn:conn.execute('INSERT INTO scenes VALUES(?,?)',(second,'其他场景'))
+    assert enter_scene(client,scene_id=second).status_code==409
+    client.post('/api/bindings/' + bound['binding_id'] + '/end')
     assert enter_scene(client,scene_id=second).status_code==200
     assert client.post('/api/bindings',json=args).status_code==409
     assert client.post('/api/ocr',json={'binding_id':bound['binding_id'],'capture_id':picture['capture_id']}).status_code==409

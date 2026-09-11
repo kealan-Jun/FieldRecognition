@@ -13,10 +13,19 @@ from PIL import Image
 @pytest.fixture
 def app_client(tmp_path, monkeypatch):
     monkeypatch.setenv('FIELD_DEMO_DATA', str(tmp_path))
+    monkeypatch.setenv('FIELD_ALIYUN_FALLBACK_ENABLED', '0')
+    monkeypatch.setenv('FIELD_SAVED_PHOTO_WATCH_ENABLED', '0')
+    monkeypatch.delenv('DASHSCOPE_API_KEY', raising=False)
     sys.modules.pop('app', None)
     app = importlib.import_module('app')
+    # Binding preloads OCR now. All automated tests use a model double, never PaddleOCR.
+    class TestOcr:
+        def predict(self, panel):
+            return []
+    monkeypatch.setattr(app, 'create_ocr_model', TestOcr)
     with TestClient(app.app) as client:
         yield app, client
+    app.readout_pool.shutdown(wait=True)
     app.ocr_pool.shutdown(wait=True)
 
 
@@ -59,7 +68,11 @@ def test_real_qr_decode_registration_binding_and_evidence(app_client):
     second_id = second['matches'][0]['id']
     assert second_id != body['instrument_id']
     register(client, second_id)
-    binding2 = client.post('/api/bindings', json=body | {'scan_id': second['scan_id'], 'instrument_id': second_id}).json()
+    assert client.post('/api/bindings', json=body).json()['binding_id'] == binding['binding_id']
+    request2 = body | {'scan_id': second['scan_id'], 'instrument_id': second_id}
+    assert client.post('/api/bindings', json=request2).status_code == 409
+    client.post('/api/bindings/' + binding['binding_id'] + '/end')
+    binding2 = client.post('/api/bindings', json=request2).json()
     exported = client.get('/api/export').json()
     assert next(b for b in exported['bindings'] if b['binding_id'] == binding['binding_id'])['ended_at']
     assert not binding2['ended_at']
@@ -102,7 +115,7 @@ def test_ocr_association_crop_and_async_output(app_client, monkeypatch):
     assert client.post('/api/ocr', json=request | {'capture_id': other_camera['capture_id']}).status_code == 409
     # Only exercise dispatch here; real model validation has a separate receipt.
     submitted = []
-    monkeypatch.setattr(app.ocr_pool, 'submit', lambda fn, doc: submitted.append(doc))
+    monkeypatch.setattr(app.readout_pool, 'submit', lambda fn, doc: submitted.append(doc))
     result = client.post('/api/ocr', json=request | {'crop': [0, 0, 500, 500]})
     assert result.status_code == 202
     assert len(submitted) == 1

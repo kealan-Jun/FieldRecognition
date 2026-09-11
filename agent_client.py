@@ -36,3 +36,10 @@ class FieldTools:
         if not name or any(c not in 'abcdefghijklmnopqrstuvwxyz_' for c in name):
             raise ValueError('Invalid tool name')
         return self._request('/api/tools/' + name, arguments or {})['result']
+
+    def read_saved_panel(self, binding_id, image_path, crop=None):
+        """Pass the exact path returned by the existing photo tool; never recapture."""
+        arguments = {'binding_id': binding_id, 'image_path': image_path}
+        if crop is not None:
+            arguments['crop'] = crop
+        return self.call('read_saved_panel', arguments)
