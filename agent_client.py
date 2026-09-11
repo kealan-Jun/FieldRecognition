@@ -1,0 +1,38 @@
+"""Small standard-library adapter usable from any Agent tool dispatcher."""
+import json
+from urllib.error import HTTPError
+from urllib.request import Request, build_opener, ProxyHandler
+
+
+class FieldToolsError(RuntimeError):
+    def __init__(self, status, detail):
+        self.status = status
+        self.detail = detail
+        super().__init__(f'Field tool HTTP {status}: {detail}')
+
+
+class FieldTools:
+    def __init__(self, base_url='http://127.0.0.1:8188', timeout=20):
+        self.base_url = base_url.rstrip('/')
+        self.timeout = timeout
+        self.opener = build_opener(ProxyHandler({}))
+
+    def _request(self, path, arguments=None):
+        data = None if arguments is None else json.dumps(arguments).encode()
+        request = Request(self.base_url + path, data=data,
+                          headers={'Content-Type': 'application/json'})
+        try:
+            with self.opener.open(request, timeout=self.timeout) as response:
+                return json.load(response)
+        except HTTPError as exc:
+            detail = json.loads(exc.read()).get('detail', 'Request failed')
+            raise FieldToolsError(exc.code, detail) from None
+
+    def definitions(self):
+        return self._request('/api/tools')['tools']
+
+    def call(self, name, arguments=None):
+        # Never turn a model-generated name into an arbitrary URL path.
+        if not name or any(c not in 'abcdefghijklmnopqrstuvwxyz_' for c in name):
+            raise ValueError('Invalid tool name')
+        return self._request('/api/tools/' + name, arguments or {})['result']

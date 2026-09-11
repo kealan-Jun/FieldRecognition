@@ -1,0 +1,401 @@
+"""Independent QR binding + CPU PaddleOCR demo. No NAS or Agent dependency."""
+from __future__ import annotations
+
+import hashlib
+import io
+import json
+import os
+import re
+import sqlite3
+import threading
+import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+
+import cv2
+import httpx
+import numpy as np
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from PIL import Image, UnidentifiedImageError
+from pydantic import BaseModel, Field
+
+BASE = Path(__file__).parent
+DATA = Path(os.environ.get('FIELD_DEMO_DATA', str(BASE / 'Data')))
+DATA.mkdir(parents=True, exist_ok=True)
+(DATA / 'Images').mkdir(exist_ok=True)
+MAX_BYTES = 12 * 1024 * 1024
+Image.MAX_IMAGE_PIXELS = 16_000_000
+
+
+def now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def db():
+    conn = sqlite3.connect(DATA / 'Demo.sqlite3', timeout=15)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+with db() as conn:
+    conn.executescript('''
+    PRAGMA journal_mode=WAL;
+    CREATE TABLE IF NOT EXISTS instruments(id TEXT PRIMARY KEY, name TEXT, scene TEXT, model TEXT);
+    CREATE TABLE IF NOT EXISTS scans(id TEXT PRIMARY KEY, document TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS bindings(id TEXT PRIMARY KEY, camera TEXT, ended TEXT, document TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, status TEXT, document TEXT NOT NULL);
+    ''')
+    for item in json.loads((BASE / 'InstrumentRegistry.json').read_text())['instruments']:
+        conn.execute('INSERT OR IGNORE INTO instruments VALUES(?,?,?,?)',
+                     (item['instrument_id'], item['label'], '', ''))
+    # Interrupted jobs stay explicit and cannot be mistaken for completed OCR.
+    conn.execute("UPDATE jobs SET status='interrupted' WHERE status IN ('queued','running')")
+
+receiver_camera = None
+if os.environ.get('FIELD_RECEIVER_URL'):
+    from receiver import ReceiverCamera
+    receiver_camera = ReceiverCamera(os.environ['FIELD_RECEIVER_URL'],
+                                     os.environ.get('FIELD_CAMERA_ID', 'lubancat-52d2ef0c_cam01'))
+
+
+@asynccontextmanager
+async def lifespan(application):
+    if receiver_camera:
+        receiver_camera.start()
+    yield
+    if receiver_camera:
+        receiver_camera.close()
+
+
+app = FastAPI(title='FieldLink · 现场识别 Demo', version='0.1.0', lifespan=lifespan)
+app.mount('/static', StaticFiles(directory=BASE / 'static'), name='static')
+ocr_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='cpu-ocr')
+ocr_lock = threading.Lock()
+ocr_state = {'status': 'not_loaded', 'device': 'cpu', 'engine': 'PaddleOCR / PP-OCRv5 mobile'}
+ocr_model = None
+
+
+def get_instrument(instrument_id):
+    with db() as conn:
+        row = conn.execute('SELECT * FROM instruments WHERE id=?', (instrument_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def save_image(data, source, camera):
+    if not data or len(data) > MAX_BYTES:
+        raise HTTPException(413, '图片为空或超过 12 MB')
+    try:
+        with Image.open(io.BytesIO(data)) as original:
+            original.load()
+            if original.width * original.height > 16_000_000:
+                raise ValueError('图片像素过大')
+            # EXIF orientation must match what the user sees and crops.
+            from PIL import ImageOps
+            image = ImageOps.exif_transpose(original).convert('RGB')
+    except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as exc:
+        raise HTTPException(422, '无法解码图片，或图片像素超过上限') from exc
+    ident = str(uuid.uuid4())
+    path = DATA / 'Images' / f'{ident}.png'
+    image.save(path)
+    return {'capture_id': ident, 'image_url': f'/api/images/{ident}',
+            'source': source, 'camera_id': camera, 'received_at': now(),
+            'source_sha256': hashlib.sha256(data).hexdigest(),
+            'image_sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
+            'width': image.width, 'height': image.height, 'path': str(path)}
+
+
+def scan_image(data, source, camera):
+    capture = save_image(data, source, camera)
+    frame = cv2.imread(capture['path'])
+    from qr_decode import decode_qr
+    values, points, diagnostics = decode_qr(frame)
+    matches, scene_matches, unknown = [], [], []
+    for ordinal, value in enumerate(values):
+        if not value:
+            continue
+        try:
+            payload = json.loads(value)
+            if not isinstance(payload, dict) or payload.get('v') != 1 or payload.get('type') not in {'instrument', 'scene'}:
+                raise ValueError('unknown schema')
+            instrument_id = str(uuid.UUID(payload['id']))
+        except (ValueError, TypeError, KeyError):
+            unknown.append('不是本系统的仪器码')
+            continue
+        if payload['type'] == 'scene':
+            scene = next((s for s in scene_records() if s['id'] == instrument_id), None)
+            if scene:
+                if not any(s['id'] == instrument_id for s in scene_matches):
+                    scene_matches.append(scene | {'polygon': np.asarray(points[ordinal]).tolist()})
+            else:
+                unknown.append('场景编号尚未登记：' + instrument_id)
+            continue
+        asset = get_instrument(instrument_id)
+        if not asset:
+            unknown.append('仪器编号尚未登记：' + instrument_id)
+            continue
+        if not any(row['id'] == instrument_id for row in matches):
+            matches.append(asset | {'polygon': np.asarray(points[ordinal]).tolist()})
+    result = capture | {'scan_id': capture['capture_id'], 'matches': matches, 'scene_matches': scene_matches, 'unknown': unknown,
+                        'status': 'matched' if matches or scene_matches else 'not_registered' if unknown else 'no_qr',
+                        'signature_status': 'unsigned_demo_label', 'qr_diagnostics': diagnostics}
+    with db() as conn:
+        conn.execute('INSERT INTO scans VALUES(?,?)', (result['scan_id'], json.dumps(result)))
+    return result
+
+
+class InstrumentEdit(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    scene: str = Field(min_length=1, max_length=100)
+    model: str = Field(default='', max_length=100)
+
+
+class BindingRequest(BaseModel):
+    scan_id: uuid.UUID
+    instrument_id: uuid.UUID
+    operator: str = Field(min_length=1, max_length=80)
+
+
+class OcrRequest(BaseModel):
+    binding_id: uuid.UUID
+    capture_id: uuid.UUID
+    crop: list[int] | None = None
+
+
+@app.get('/')
+def index():
+    return FileResponse(BASE / 'static' / 'index.html')
+
+
+@app.get('/api/state')
+def state():
+    with db() as conn:
+        instruments = [dict(row) for row in conn.execute('SELECT * FROM instruments ORDER BY name')]
+        bindings = [json.loads(row['document']) for row in conn.execute('SELECT document FROM bindings ORDER BY rowid DESC LIMIT 30')]
+        jobs = [json.loads(row['document']) | {'status': row['status']} for row in conn.execute('SELECT status,document FROM jobs ORDER BY rowid DESC LIMIT 20')]
+    return {'scenes': scene_records(), 'scene_visits': scene_visits(), 'instruments': instruments, 'bindings': bindings, 'jobs': jobs, 'ocr': dict(ocr_state),
+            'camera': receiver_camera.snapshot() if receiver_camera else {'configured': bool(os.environ.get('FIELD_CAMERA_SNAPSHOT_URL')),
+                       'id': os.environ.get('FIELD_CAMERA_ID', 'UnconfiguredNeckCamera'),
+                       'mode': 'http_snapshot'}, 'demo': True}
+
+
+@app.put('/api/instruments/{instrument_id}')
+def edit_instrument(instrument_id: uuid.UUID, body: InstrumentEdit):
+    if not get_instrument(str(instrument_id)):
+        raise HTTPException(404, '仪器不存在')
+    if not body.name.strip() or not body.scene.strip():
+        raise HTTPException(422, '请填写仪器名称和场景')
+    with db() as conn:
+        conn.execute('UPDATE instruments SET name=?,scene=?,model=? WHERE id=?',
+                     (body.name.strip(), body.scene.strip(), body.model.strip(), str(instrument_id)))
+    return get_instrument(str(instrument_id))
+
+
+@app.post('/api/scans')
+async def scan(file: UploadFile = File(...), camera_id: str = Form('UploadedPhoto')):
+    if not camera_id.strip() or len(camera_id) > 100:
+        raise HTTPException(422, '相机编号无效')
+    data = await file.read(MAX_BYTES + 1)
+    from starlette.concurrency import run_in_threadpool
+    return await run_in_threadpool(scan_image, data, 'uploaded_photo', camera_id)
+
+
+@app.post('/api/camera/capture')
+def camera_capture():
+    if receiver_camera:
+        try:
+            frame, metadata = receiver_camera.frame()
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        ok, encoded = cv2.imencode('.png', frame)
+        if not ok:
+            raise HTTPException(500, '画面编码失败')
+        result = scan_image(encoded.tobytes(), 'neck_camera_gwhp_main', receiver_camera.target)
+        result['frame_metadata'] = metadata
+        with db() as conn:
+            conn.execute('UPDATE scans SET document=? WHERE id=?', (json.dumps(result), result['scan_id']))
+        return result
+    url = os.environ.get('FIELD_CAMERA_SNAPSHOT_URL')
+    camera = os.environ.get('FIELD_CAMERA_ID')
+    if not url or not camera:
+        raise HTTPException(409, '挂脖设备尚未连接：需要设备编号及返回 JPEG/PNG 的取图接口')
+    started = time.monotonic()
+    try:
+        with httpx.stream('GET', url, timeout=12, follow_redirects=False, trust_env=False) as response:
+            response.raise_for_status()
+            data = bytearray()
+            for block in response.iter_bytes(65536):
+                data.extend(block)
+                if len(data) > MAX_BYTES or time.monotonic() - started > 15:
+                    raise ValueError('capture limit')
+        return scan_image(bytes(data), 'neck_camera_http_snapshot', camera)
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(502, '挂脖设备取图失败，请检查连接和取图服务') from exc
+
+
+@app.get('/api/images/{capture_id}')
+def image_file(capture_id: uuid.UUID):
+    path = DATA / 'Images' / f'{capture_id}.png'
+    if not path.is_file():
+        raise HTTPException(404, '图片不存在')
+    return FileResponse(path)
+
+
+@app.post('/api/bindings')
+def bind(body: BindingRequest):
+    with db() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        row = conn.execute('SELECT document FROM scans WHERE id=?', (str(body.scan_id),)).fetchone()
+        if not row:
+            raise HTTPException(404, '扫码记录不存在')
+        scan = json.loads(row['document'])
+        if not any(item['id'] == str(body.instrument_id) for item in scan['matches']):
+            raise HTTPException(409, '该图片没有识别到此仪器码')
+        asset = get_instrument(str(body.instrument_id))
+        if not asset['scene']:
+            raise HTTPException(409, '先在仪器登记中填写所属场景')
+        visit = validate_scene(conn, scan['camera_id'], asset['scene'])
+        timestamp = now()
+        for previous in conn.execute('SELECT * FROM bindings WHERE camera=? AND ended IS NULL', (scan['camera_id'],)).fetchall():
+            document = json.loads(previous['document']) | {'ended_at': timestamp}
+            conn.execute('UPDATE bindings SET ended=?,document=? WHERE id=?', (timestamp, json.dumps(document), previous['id']))
+        result = {'binding_id': str(uuid.uuid4()), 'operator': body.operator.strip(),
+                  'camera_id': scan['camera_id'], 'instrument': asset, 'started_at': timestamp,
+                  'ended_at': None, 'scan_id': scan['scan_id'], 'image_url': scan['image_url'],
+                  'identity_basis': 'unsigned_qr_and_operator_confirmation',
+                  'activity_confirmed': False, 'scene_visit_id': visit['visit_id'], 'scene': visit['scene']}
+        if not result['operator']:
+            raise HTTPException(422, '实验员不能为空')
+        conn.execute('INSERT INTO bindings VALUES(?,?,NULL,?)', (result['binding_id'], result['camera_id'], json.dumps(result)))
+    return result
+
+
+@app.post('/api/bindings/{binding_id}/end')
+def end_binding(binding_id: uuid.UUID):
+    with db() as conn:
+        row = conn.execute('SELECT * FROM bindings WHERE id=?', (str(binding_id),)).fetchone()
+        if not row:
+            raise HTTPException(404, '绑定不存在')
+        result = json.loads(row['document'])
+        if not row['ended']:
+            result['ended_at'] = now()
+            conn.execute('UPDATE bindings SET ended=?,document=? WHERE id=?', (result['ended_at'], json.dumps(result), str(binding_id)))
+    return result
+
+
+def load_ocr():
+    global ocr_model
+    if ocr_model is None:
+        ocr_state.update(status='loading', error=None)
+        from paddleocr import PaddleOCR
+        ocr_model = PaddleOCR(device='cpu', cpu_threads=2, enable_mkldnn=False,
+                             text_detection_model_name='PP-OCRv5_mobile_det',
+                             text_recognition_model_name='PP-OCRv5_mobile_rec',
+                             use_doc_orientation_classify=False, use_doc_unwarping=False,
+                             use_textline_orientation=False)
+        ocr_state.update(status='ready')
+    return ocr_model
+
+
+def run_ocr(document):
+    started = time.monotonic()
+    ident = document['job_id']
+    with db() as conn:
+        conn.execute("UPDATE jobs SET status='running' WHERE id=?", (ident,))
+    try:
+        with ocr_lock:
+            model = load_ocr()
+            image = cv2.imread(str(DATA / 'Images' / f"{document['capture_id']}.png"))
+            x, y, w, h = document['crop']
+            panel = image[y:y+h, x:x+w]
+            cv2.imwrite(str(DATA / 'Images' / f'{ident}.png'), panel)
+            output = list(model.predict(panel))
+            lines = []
+            for result in output:
+                for text, score, polygon in zip(result['rec_texts'], result['rec_scores'], result['rec_polys']):
+                    poly = np.asarray(polygon).astype(float)
+                    poly[:, 0] += x
+                    poly[:, 1] += y
+                    lines.append({'text': text, 'confidence': float(score), 'polygon': poly.tolist(),
+                                  'numeric_candidates': re.findall(r'[-+]?\d+(?:\.\d+)?', text)})
+        document.update(status='completed', lines=lines, finished_at=now(),
+                        wall_seconds=round(time.monotonic()-started, 3), model=ocr_state['engine'],
+                        actual_model_invocation=True, device='cpu', crop_image_url=f'/api/images/{ident}',
+                        accuracy='not_human_verified', panel_selection='user_selected_crop',
+                        outcome='text_detected' if lines else 'no_text_detected')
+    except Exception as exc:
+        ocr_state.update(status='error', error=type(exc).__name__)
+        document.update(status='failed', error=type(exc).__name__, finished_at=now(),
+                        wall_seconds=round(time.monotonic()-started, 3))
+    with db() as conn:
+        conn.execute('UPDATE jobs SET status=?,document=? WHERE id=?', (document['status'], json.dumps(document), ident))
+
+
+@app.post('/api/ocr', status_code=202)
+def submit_ocr(body: OcrRequest):
+    with db() as conn:
+        binding = conn.execute('SELECT * FROM bindings WHERE id=?', (str(body.binding_id),)).fetchone()
+        capture = conn.execute('SELECT document FROM scans WHERE id=?', (str(body.capture_id),)).fetchone()
+        if not binding or binding['ended']:
+            raise HTTPException(409, '请先建立有效的仪器绑定')
+        if not capture:
+            raise HTTPException(404, '图片不存在')
+        capture = json.loads(capture['document'])
+        if binding['camera'] != capture['camera_id']:
+            raise HTTPException(409, '图片来源与绑定相机不一致')
+        linked = json.loads(binding['document'])
+        current_asset = get_instrument(linked['instrument']['id'])
+        if not current_asset or current_asset['scene'] != linked['instrument']['scene']:
+            raise HTTPException(409, '仪器所属场景已更改，请重新绑定')
+        visit = validate_scene(conn, binding['camera'], linked['instrument']['scene'])
+        if linked.get('scene_visit_id') != visit['visit_id']:
+            raise HTTPException(409, '场景已变化，请重新绑定仪器')
+        if capture['received_at'] < linked['started_at'] and capture['scan_id'] != linked['scan_id']:
+            raise HTTPException(409, '图片早于本次绑定，请重新拍照')
+        seen = {item['id'] for item in capture['matches']}
+        if seen and seen != {linked['instrument']['id']}:
+            raise HTTPException(409, '图片仪器二维码与当前绑定冲突，请重新选择仪器')
+        if conn.execute("SELECT count(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0] >= 4:
+            raise HTTPException(429, 'OCR 正在处理，请稍候再提交')
+        crop = body.crop or [0, 0, capture['width'], capture['height']]
+        if len(crop) != 4 or min(crop[:2]) < 0 or min(crop[2:]) < 16 or crop[0]+crop[2] > capture['width'] or crop[1]+crop[3] > capture['height']:
+            raise HTTPException(422, '面板选框超出图片，或区域太小')
+        document = {'job_id': str(uuid.uuid4()), 'binding_id': str(body.binding_id),
+                    'capture_id': str(body.capture_id), 'crop': crop, 'submitted_at': now(),
+                    'status': 'queued', 'image_url': capture['image_url'],
+                    'image_sha256': capture['image_sha256'], 'instrument': linked['instrument'],
+                    'operator': linked['operator'], 'camera_id': capture['camera_id'],
+                    'scene_visit_id': visit['visit_id'], 'scene': visit['scene'],
+                    'instrument_association': 'same_image_qr' if seen else 'operator_selected_current_binding',
+                    'source': capture['source'], 'frame_metadata': capture.get('frame_metadata')}
+        conn.execute('INSERT INTO jobs VALUES(?,?,?)', (document['job_id'], 'queued', json.dumps(document)))
+    ocr_pool.submit(run_ocr, document)
+    return document
+
+
+@app.get('/api/jobs/{job_id}')
+def get_job(job_id: uuid.UUID):
+    with db() as conn:
+        row = conn.execute('SELECT * FROM jobs WHERE id=?', (str(job_id),)).fetchone()
+    if not row:
+        raise HTTPException(404, '任务不存在')
+    return json.loads(row['document']) | {'status': row['status']}
+
+
+@app.get('/api/export')
+def export():
+    result = state()
+    result['exported_at'] = now()
+    return result
+
+
+# Agent and browser share the same capture, QR, binding and OCR implementation.
+from scene_binding import install as install_scenes
+install_scenes(globals())
+
+from agent_tools import install_tools
+install_tools(app, globals())

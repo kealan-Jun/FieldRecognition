@@ -1,0 +1,42 @@
+{
+  "schema": "FieldRecognitionSceneQrLabels/1",
+  "binding_status": "partially_registered",
+  "signature_status": "unsigned",
+  "scenes": [
+    {
+      "label": "场景 01",
+      "scene_id": "18a0cff5-eda6-4363-abe5-f7147e4ab2c1",
+      "scene_name": "湿实验实验台",
+      "encoded_text": "{\"v\":1,\"type\":\"scene\",\"id\":\"18a0cff5-eda6-4363-abe5-f7147e4ab2c1\"}",
+      "registration_status": "registered",
+      "instrument_ids": [
+        "e9434a0a-3319-414a-b988-4cc6884edce4",
+        "eae17924-9fa7-4445-ac45-3987f5687be9"
+      ]
+    },
+    {
+      "label": "场景 02",
+      "scene_id": "6187acf0-5936-44c2-b358-27e5e11b6481",
+      "scene_name": null,
+      "encoded_text": "{\"v\":1,\"type\":\"scene\",\"id\":\"6187acf0-5936-44c2-b358-27e5e11b6481\"}"
+    },
+    {
+      "label": "场景 03",
+      "scene_id": "92366980-f6a2-4d26-8078-6e4b2c68dfaa",
+      "scene_name": null,
+      "encoded_text": "{\"v\":1,\"type\":\"scene\",\"id\":\"92366980-f6a2-4d26-8078-6e4b2c68dfaa\"}"
+    },
+    {
+      "label": "场景 04",
+      "scene_id": "53c934f2-b073-4142-a702-c78fe42f9b57",
+      "scene_name": null,
+      "encoded_text": "{\"v\":1,\"type\":\"scene\",\"id\":\"53c934f2-b073-4142-a702-c78fe42f9b57\"}"
+    },
+    {
+      "label": "场景 05",
+      "scene_id": "e8b503a8-f1cb-467f-ac11-3744605982f2",
+      "scene_name": null,
+      "encoded_text": "{\"v\":1,\"type\":\"scene\",\"id\":\"e8b503a8-f1cb-467f-ac11-3744605982f2\"}"
+    }
+  ]
+}

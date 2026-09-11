@@ -1,0 +1,49 @@
+{
+  "schema": "FieldRecognitionQrLabels/1",
+  "binding_status": "registered",
+  "signature_status": "unsigned",
+  "instruments": [
+    {
+      "label": "仪器 A",
+      "instrument_id": "e9434a0a-3319-414a-b988-4cc6884edce4",
+      "qr_payload": {
+        "v": 1,
+        "type": "instrument",
+        "id": "e9434a0a-3319-414a-b988-4cc6884edce4"
+      },
+      "encoded_text": "{\"v\":1,\"type\":\"instrument\",\"id\":\"e9434a0a-3319-414a-b988-4cc6884edce4\"}",
+      "instrument_name": "称量仪器 A",
+      "model": null,
+      "serial_number": null,
+      "scene_id": "18a0cff5-eda6-4363-abe5-f7147e4ab2c1",
+      "files": [
+        "InstrumentA.png",
+        "InstrumentA.svg"
+      ],
+      "decode_verified": true,
+      "scene_name": "湿实验实验台",
+      "registration_status": "registered"
+    },
+    {
+      "label": "仪器 B",
+      "instrument_id": "eae17924-9fa7-4445-ac45-3987f5687be9",
+      "qr_payload": {
+        "v": 1,
+        "type": "instrument",
+        "id": "eae17924-9fa7-4445-ac45-3987f5687be9"
+      },
+      "encoded_text": "{\"v\":1,\"type\":\"instrument\",\"id\":\"eae17924-9fa7-4445-ac45-3987f5687be9\"}",
+      "instrument_name": "称量仪器 B",
+      "model": null,
+      "serial_number": null,
+      "scene_id": "18a0cff5-eda6-4363-abe5-f7147e4ab2c1",
+      "files": [
+        "InstrumentB.png",
+        "InstrumentB.svg"
+      ],
+      "decode_verified": true,
+      "scene_name": "湿实验实验台",
+      "registration_status": "registered"
+    }
+  ]
+}
