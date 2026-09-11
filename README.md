@@ -110,7 +110,7 @@ voice_photos/
 ## 🛠️ 系统架构
 
 ```mermaid
-flowchart LR
+flowchart TB
     subgraph Identity[视频扫码与绑定]
         Camera[挂脖相机] --> Receiver[现有 Receiver]
         Receiver --> Decode[GWHP / H.264 CPU 解码]
