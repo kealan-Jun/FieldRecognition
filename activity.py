@@ -21,7 +21,7 @@ def readout_event(conn, row, *, related_only=False):
     label = {'queued': '等待识别', 'running': '正在识别', 'failed': '识别失败',
              'interrupted': '识别中断', 'cancelled': '识别取消'}.get(status, status)
     if status == 'completed':
-        label = '数字候选 · 待核对' if lines else '未读出完整数字'
+        label = '自动识别完成' if lines else '未读出完整数字'
     notes = []
     if doc.get('panel_selection')=='user_selected_crop_or_full_photo' and not doc.get('panel_detection'):
         notes.append('历史整图或手动选框识别，面板归属未核验')

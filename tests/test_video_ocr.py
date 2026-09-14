@@ -201,3 +201,18 @@ def test_localized_panel_votes_and_saved_receipts_are_independent(video,monkeypa
     assert [r['text'] for r in result['readings']]==['101']
     assert result['readings'][0]['binding_id']==bindings[0]['binding_id']
     assert reader.state['evidence_saved']==2
+
+
+def test_preview_is_memory_only_and_expires_on_pause_or_session_change(video):
+    app, client, camera, reader, _, tick = video
+    accept(video, None)
+    reader.epoch = 5
+    cached = reader.preview(epoch=5)
+    assert cached and cached[1].startswith(b'\xff\xd8')
+    assert not list((app.DATA/'Images').iterdir())
+    assert reader.preview(epoch=6) is None
+    tick[0] = 1.61
+    assert reader.preview(epoch=5) is None
+    tick[0] = 0.5
+    client.put('/api/video-ocr', json={'enabled': False})
+    assert reader.preview(epoch=5) is None

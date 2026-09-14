@@ -130,7 +130,7 @@ def test_readout_pages_keep_cursor_camera_timing_and_archive(app_client, monkeyp
     item = first['items'][0]
     assert item['timing']['durations_ms']['write_to_result_ms'] == 1250
     assert item['archive']['status'] == 'pending' and item['result_url'] == '/api/jobs/job-4'
-    assert item['detail'] == '12.34 g' and item['status'] == '数字候选 · 待核对'
+    assert item['detail'] == '12.34 g' and item['status'] == '自动识别完成'
     insert('new-after-first-page')
     second = client.get('/api/readouts', params={'limit': 2, 'before': first['next_cursor']}).json()
     last = client.get('/api/readouts', params={'limit': 2, 'before': second['next_cursor']}).json()

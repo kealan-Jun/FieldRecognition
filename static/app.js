@@ -3,7 +3,8 @@ let activeBindings = [], videoState, videoTimer;
 let state, scan, activeBinding, picture, stream, crop = null, drag = null, jobTimer;
 let previewLive = false, scanSession = null, scanTimer, cameraTimer, scanStarting = false, displayedJobKey = null;
 let operatorDirty = false, automationScanId = null, previewInitialized = false, previewRetry;
-let historicalScan = false;
+let historicalScan = false, recognitionPreview = false;
+function previewUrl(){return "/api/camera/preview.mjpg"+(recognitionPreview?"?recognition=true":"");}
 let historyMode='all', historyStack=[null], historyNext=null, historyData=[], historyLoading=false, historyRequest=0;
 let historyRenderedKey=null, workbenchData=null, workbenchLoading=false;
 const pendingButtons = new Set();
@@ -33,6 +34,7 @@ function updateButtons(){
   $('#autoPause').disabled=!state?.automation?.enabled;
   for(const s of ['#neckCapture','#upload','#webcamOpen','#shutter', '[data-sample="A"]','[data-sample="B"]','[data-sample="Scene01"]']) $(s).disabled=manualScanning;
   $('#neckLive').disabled=manualScanning||state?.camera.mode!=='gwhp_main';
+  $('#recognitionPreview').disabled=state?.camera.mode!=='gwhp_main';
   for(const button of pendingButtons)button.disabled=true;
 }
 
@@ -48,7 +50,7 @@ function closePreview(){
 function openPreview(){
   clearTimeout(previewRetry);
   stopWebcam(); previewLive=true; canvas.hidden=true; $('#empty').hidden=true;
-  $('#neckPreview').src='/api/camera/preview.mjpg'; $('#neckPreview').hidden=false;
+  $('#neckPreview').src=previewUrl(); $('#neckPreview').hidden=false;
   $('#liveBadge').hidden=false; $('#neckLive').textContent='关闭实时视频';
   $('#sourceLabel').textContent=`${state.camera.id} · 实时视频`;
   $('#cropHint').textContent='视频持续扫码；只读取已绑定设备的面板。';
@@ -63,12 +65,13 @@ async function pollCamera(){
       $('#liveStatus').textContent=text;message(text);
     }
     const fresh=state.camera.status==='streaming'&&state.camera.frame_age_ms<=1000&&state.camera.service_status?.online!==false;
-    $('#liveBadge').textContent=fresh?'实时视频':'等待相机新画面';
+    $('#liveBadge').textContent=fresh?(recognitionPreview?'识别叠加 · 抽样画面':'实时视频'):'等待相机新画面';
   }catch(e){$('#liveBadge').textContent='连接中断，等待恢复';}
   cameraTimer=setTimeout(pollCamera,2000);
 }
+$('#recognitionPreview').onclick=()=>{recognitionPreview=!recognitionPreview;$('#recognitionPreview').setAttribute('aria-pressed',String(recognitionPreview));$('#recognitionPreview').textContent=recognitionPreview?'返回流畅视频':'查看识别叠加';if(previewLive)$('#neckPreview').src=previewUrl();else openPreview();$('#liveBadge').textContent=recognitionPreview?'识别叠加 · 抽样画面':'实时视频';};
 $('#neckLive').onclick=()=>{if(previewLive){closePreview();draw();}else openPreview();};
-$('#neckPreview').onerror=()=>{if(!previewLive)return;$('#liveBadge').textContent='视频连接中断，正在重连';clearTimeout(previewRetry);previewRetry=setTimeout(()=>{if(previewLive)$('#neckPreview').src='/api/camera/preview.mjpg?retry='+Date.now();},2000);};
+$('#neckPreview').onerror=()=>{if(!previewLive)return;$('#liveBadge').textContent='视频连接中断，正在重连';clearTimeout(previewRetry);previewRetry=setTimeout(()=>{if(previewLive)$('#neckPreview').src=previewUrl()+(recognitionPreview?'&':'?')+'retry='+Date.now();},2000);};
 
 async function handleSession(result){
   $('#liveStatus').textContent=`${result.message}${result.frames_scanned ? ` · 已扫描 ${result.frames_scanned} 帧` : ''}`;
@@ -135,7 +138,7 @@ function renderQrEvidence(){
 function renderScan(){renderQrEvidence(); $('#sceneResults').innerHTML=(scan.scene_matches||[]).map(s=>`<label class="match"><input type="radio" name="scene" value="${esc(s.id)}" ${(scan.scene_matches.length===1)?'checked':''}><strong>${esc(s.name)}</strong></label>`).join(''); $('#scanBadge').textContent=historicalScan?'历史识别':(scan.matches.length||scan.scene_matches?.length)?'已读出二维码':scan.status==='no_qr'?'二维码未能解码':'未登记';$('#scanResults').innerHTML=scan.matches.length?scan.matches.map((a,i)=>`<label class="match">${!historicalScan&&scan.matches.length>1?`<input type="radio" name="instrument" value="${esc(a.id)}">`:''}<div><strong>${esc(a.name)}</strong><small>${esc(a.scene||'尚未登记场景，请在下方填写')}</small><small>${esc(a.id)}</small></div></label>`).join(''):`<p>${esc(scan.unknown.join('；')||(scan.scene_matches?.length?'场景码已识别，请先确认进入场景。':'二维码未能解码。请让标签平整、正对镜头并避开反光；调整距离直到黑白格边缘清晰，再拍照。仅靠放大无法恢复失焦细节。若拍的是面板，可沿用已确认的仪器绑定进行 OCR。'))}</p>`; }
 async function showScan(result,{keepLive=false,historical=false}={}){if(!keepLive)closePreview();historicalScan=historical;scan=result;crop=null;picture=new Image();await new Promise((resolve,reject)=>{picture.onload=resolve;picture.onerror=()=>reject(Error('图片预览失败'));picture.src=result.image_url;});canvas.width=picture.width;canvas.height=picture.height;canvas.hidden=previewLive;$('#empty').hidden=true;stopWebcam();$('#sourceLabel').textContent=previewLive?`${state.camera.id} · 实时视频`:`${result.camera_id} · ${result.width}×${result.height}`;renderScan();draw();selectBindings(scan.camera_id);renderBinding();updateButtons();}
 async function upload(blob,source=activeBinding?.camera_id||'UploadedPhoto'){const form=new FormData();form.append('file',blob,'Capture.png');form.append('camera_id',source);await showScan(await api('/api/scans',{method:'POST',body:form}));}
-$('#upload').onchange=async e=>{const file=e.target.files[0];if(!file)return;try{message('正在解码图片与二维码…');await upload(file);message('图片已留存，请核对身份或框选面板。');}catch(err){message(err.message,true);}e.target.value='';};
+$('#upload').onchange=async e=>{const file=e.target.files[0];if(!file)return;try{message('正在解码图片与二维码…');await upload(file);message('图片已留存，可读取面板。');}catch(err){message(err.message,true);}e.target.value='';};
 document.querySelectorAll('[data-sample]').forEach(b=>b.onclick=busy(b,async()=>{const r=await fetch(`/static/labels/${b.dataset.sample==='Scene01'?'Scene01':'Instrument'+b.dataset.sample}.png`);await upload(await r.blob(),'SampleCamera');message('这是二维码样张解码结果，可用于验证扫码与绑定流程。');}));
 $('#neckCapture').onclick=busy($('#neckCapture'),async()=>{await showScan(await api('/api/camera/capture',{method:'POST'}));message('已取得挂脖设备照片。');});
 function stopWebcam(){if(stream)stream.getTracks().forEach(t=>t.stop());stream=null;$('#webcam').hidden=true;$('#shutter').hidden=true;}
@@ -167,9 +170,9 @@ $('#endBinding').onclick=busy($('#endBinding'),async()=>{await api('/api/camera/
 function renderVideoOcr(v){
   videoState=v;if(!v)return;
   const status={paused:'视频识别已暂停',unconfigured:'等待配置相机',waiting_operator:'等待实验员登记',waiting_binding:'等待扫码绑定设备，暂不识别面板',waiting_camera:'等待新鲜画面',loading_model:'正在加载模型',inferring:'视频持续识别中',watching:'视频持续识别中',yielding_to_photo:'优先处理语音照片',error:'视频识别异常'}[v.status]||'正在准备';
-  $('#videoOcrStatus').textContent=`${status}${v.pending_panels&&['watching','inferring'].includes(v.status)?' · '+v.pending_panels+' 个面板确认中':''} · 已推理 ${v.frames_inferred||0} 帧 · 留存 ${v.evidence_saved||0} 帧${v.last_result_at?' · 更新 '+new Date(v.last_result_at).toLocaleTimeString('zh-CN',{hour12:false}):''}`;
+  $('#videoOcrStatus').textContent=`${status}${v.pending_panels&&['watching','inferring'].includes(v.status)?' · '+v.pending_panels+' 个面板自动校验中':''} · 已推理 ${v.frames_inferred||0} 帧 · 留存 ${v.evidence_saved||0} 帧${v.last_result_at?' · 更新 '+new Date(v.last_result_at).toLocaleTimeString('zh-CN',{hour12:false}):''}`;
   $('#videoOcrToggle').textContent=v.enabled?'暂停视频识别':'开启视频识别';
-  $('#videoReadings').innerHTML=(['waiting_camera','waiting_binding','paused','error'].includes(v.status)?[]:v.latest_lines||[]).map(line=>`<div class="live-reading"><strong>${esc(line.text)}</strong><small>${esc(line.instrument?.name||'归属待确认')} · ${line.temporal_confirmation?.status==='confirmed'?'多帧确认':'实时读数'}</small></div>`).join('')||'<span class="caption">等待画面中出现清晰读数</span>';
+  $('#videoReadings').innerHTML=(['waiting_camera','waiting_binding','paused','error'].includes(v.status)?[]:v.latest_lines||[]).map(line=>`<div class="live-reading"><strong>${esc(line.text)}</strong><small>${esc(line.instrument?.name||'设备未定位')} · 自动读数</small></div>`).join('')||'<span class="caption">等待画面中出现清晰读数</span>';
 }
 async function pollVideo(){try{renderVideoOcr(await api('/api/video-ocr'));}catch(e){$('#videoOcrStatus').textContent='视频识别状态连接中，正在重试';}videoTimer=setTimeout(pollVideo,500);}
 $('#videoOcrToggle').onclick=busy($('#videoOcrToggle'),async()=>{renderVideoOcr(await api('/api/video-ocr',{...json({enabled:!videoState?.enabled}),method:'PUT'}));});
@@ -203,7 +206,7 @@ function renderOcr(job){
   if(job.status!=='completed'){target.innerHTML=readoutPhoto(job)+`<p>${job.status==='cancelled'?'这次识别已取消，原因已保存在回执中。':'识别未完成，请稍后重新拍摄。'}</p>${readoutLatency(job)}${readoutIssue(job)}<a href="/api/jobs/${job.job_id}" target="_blank" rel="noopener">结果 JSON ↗</a>`;return;}
   if(job.recognition_skipped){target.innerHTML=readoutPhoto(job)+`<p>${job.skip_reason==='no_active_instrument_binding'?'拍照时没有有效仪器绑定，已跳过读数识别。':'未检测到已绑定设备的面板，已跳过读数识别。'}</p>`;return;}
   const lines=(job.lines||[]).filter(line=>job.device==='cloud'?line.numeric_candidates?.length:completeReadout.test(line.text));
-  target.innerHTML=readoutPhoto(job)+`<p class="caption">${esc(job.instrument?.name||(job.association_status==='localized_panels'?'A / B 面板分别定位':job.instrument_candidates?.length?'多仪器候选 · 归属待确认':'未绑定仪器'))} · ${esc(stamp(job.external_photo?.captured_at||job.video_observation?.observed_at||job.submitted_at))}<br>识别结果，尚未人工核对</p>${readoutLatency(job)}${lines.length?(job.readings?.length?job.readings:lines).map(line=>`<div class="ocr-line">${line.instrument?`<small>${esc(line.instrument.name)}</small>`:""}<strong>${esc(line.text)}</strong>${line.panel_image_url?`<a href="${esc(line.panel_image_url)}" target="_blank" rel="noopener">本面板照片 ↗</a>`:""}${line.association_basis==='ambiguous'?'<small>多个仪器候选，读数归属待确认</small>':''}${line.quality_issue?`<small>${line.quality_issue==='possible_display_self_test'?'疑似屏幕自检，不作为测量值':'小数点可能缺失，请核对原图'}</small>`:''}</div>`).join(''):'<p>这次照片未读出数字，请调整角度、清晰度或选框后重新拍摄。</p>'}${readoutIssue(job)}<p><a href="${job.crop_image_url}" target="_blank" rel="noopener">查看面板照片 ↗</a> · <a href="/api/jobs/${job.job_id}" target="_blank" rel="noopener">结果 JSON ↗</a></p>`;
+  target.innerHTML=readoutPhoto(job)+`<p class="caption">${esc(job.instrument?.name||(job.association_status==='localized_panels'?'A / B 面板分别定位':job.instrument_candidates?.length?'设备定位中':'未绑定仪器'))} · ${esc(stamp(job.external_photo?.captured_at||job.video_observation?.observed_at||job.submitted_at))}<br>自动识别结果</p>${readoutLatency(job)}${lines.length?(job.readings?.length?job.readings:lines).map(line=>`<div class="ocr-line">${line.instrument?`<small>${esc(line.instrument.name)}</small>`:""}<strong>${esc(line.text)}</strong>${line.panel_image_url?`<a href="${esc(line.panel_image_url)}" target="_blank" rel="noopener">本面板照片 ↗</a>`:""}${line.association_basis==='ambiguous'?'<small>无法确定设备归属，本条未作为设备读数</small>':''}${line.quality_issue?`<small>${line.quality_issue==='possible_display_self_test'?'疑似屏幕自检，不作为测量值':'小数点信息不足，本条未作为有效数值'}</small>`:''}</div>`).join(''):'<p>这次照片未读出数字，请调整角度、清晰度或选框后重新拍摄。</p>'}${readoutIssue(job)}<p><a href="${job.crop_image_url}" target="_blank" rel="noopener">查看面板照片 ↗</a> · <a href="/api/jobs/${job.job_id}" target="_blank" rel="noopener">结果 JSON ↗</a></p>`;
 }
 function watchJob(job){
   renderOcr(job);clearInterval(jobTimer);
@@ -217,11 +220,13 @@ function watchJob(job){
 $('#ocr').onclick=busy($('#ocr'),async()=>{watchJob(await api('/api/ocr',json({binding_id:crop?activeBinding?.binding_id||null:null,auto_associate:true,capture_id:scan.capture_id,crop})));});
 function renderLatestJob(){
   if(jobTimer)return;
-  const latest=state.jobs.find(j=>j.camera_id===(previewLive?state.camera.id:scan?.camera_id||state.camera.id));
-  const key=latest?`${latest.job_id}:${latest.status}:${latest.phase}:${latest.finished_at}`:null;
+  const camera=previewLive?state.camera.id:scan?.camera_id||state.camera.id;
+  const latest=state.jobs.find(j=>j.camera_id===camera&&['queued','running'].includes(j.status))||
+    (state.latest_panel_job?.camera_id===camera?state.latest_panel_job:null);
+  const key=latest?`${latest.job_id}:${latest.status}:${latest.phase}:${latest.finished_at}`:`no-related:${camera}`;
   if(key!==displayedJobKey){
     displayedJobKey=key;
-    if(latest)renderOcr(latest);else $('#ocrResults').textContent='让 Agent 把已保存的拍照结果交给识别工具，或上传照片后点击识别。';
+    if(latest)renderOcr(latest);else $('#ocrResults').textContent='暂无有效面板读数。正在等待已绑定设备的清晰画面或语音照片。';
   }
 }
 function renderPhotoWatch(){
@@ -309,7 +314,7 @@ function renderWorkbenches(){
   $('#historyScope').textContent='最近 200 次相关面板识别 · 每组展示最近 8 条读数；完整记录见“面板读数”';
   const groups=workbenchData?.workbenches||[];
   const key=JSON.stringify(['workbenches',groups]);if(historyRenderedKey===key)return;historyRenderedKey=key;
-  $('#historyRows').innerHTML=groups.length?groups.map(g=>`<section class="bench-group"><h3>${esc(g.name)}</h3><p class="caption">${g.photo_count} 次识别 · ${g.reading_count} 条数字候选 · 按仪器分别记录，不相加</p><div class="bench-grid">${g.instruments.map(i=>`<div class="bench-instrument"><h4>${esc(i.name)} <small>${i.readings.length} 条</small></h4>${benchReadings(i.readings)}</div>`).join('')}${g.unassigned_readings.length?`<div class="bench-instrument"><h4>实验台待归属 <small>${g.unassigned_readings.length} 条</small></h4>${benchReadings(g.unassigned_readings)}</div>`:""}</div></section>`).join(''):'正在读取实验台记录…';
+  $('#historyRows').innerHTML=groups.length?groups.map(g=>`<section class="bench-group"><h3>${esc(g.name)}</h3><p class="caption">${g.photo_count} 次识别 · ${g.reading_count} 条面板读数 · 按仪器分别记录，不相加</p><div class="bench-grid">${g.instruments.map(i=>`<div class="bench-instrument"><h4>${esc(i.name)} <small>${i.readings.length} 条</small></h4>${benchReadings(i.readings)}</div>`).join('')}${g.unassigned_readings.length?`<div class="bench-instrument"><h4>实验台待归属 <small>${g.unassigned_readings.length} 条</small></h4>${benchReadings(g.unassigned_readings)}</div>`:""}</div></section>`).join(''):'正在读取实验台记录…';
 }
 function renderHistory(){
   if(!state)return;

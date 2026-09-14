@@ -248,3 +248,23 @@ def test_fresh_frame_clears_waiting_camera_message_without_saving_blank_frames(l
     assert '等待相机新画面' not in result['message']
     with app.db() as conn:
         assert conn.execute('SELECT COUNT(*) FROM scans').fetchone()[0] == 0
+
+
+def test_expired_overlay_is_removed_even_without_a_new_raw_frame(monkeypatch):
+    from types import SimpleNamespace
+    from live_scan import recognition_part
+    camera = Camera()
+    camera.publish(np.zeros((30, 50, 3), np.uint8))
+    monkeypatch.setattr(camera, 'snapshot', lambda: {'service_status_available': True,
+        'service_status': {'online': True, 'media_session_id': 5}})
+    cached = [(('frame', 1), b'annotated-jpeg')]
+    reader = SimpleNamespace(preview=lambda **kwargs: cached[0])
+    part, token = recognition_part(reader, camera, None)
+    assert b'annotated-jpeg' in part
+    assert recognition_part(reader, camera, token)[0] is None
+    cached[0] = None
+    part, raw_token = recognition_part(reader, camera, token)
+    assert part and b'annotated-jpeg' not in part
+    assert recognition_part(reader, camera, raw_token)[0] is None
+    camera.offline = True
+    assert b'annotated-jpeg' not in recognition_part(reader, camera, raw_token)[0]

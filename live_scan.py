@@ -249,6 +249,23 @@ def preview_part(camera, previous):
     return b'--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ' + str(len(jpeg)).encode() + b'\r\n\r\n' + jpeg + b'\r\n', token
 
 
+def recognition_part(reader, camera, previous):
+    from recognition_preview import multipart
+    info = camera.snapshot()
+    if info.get('service_status_available') and info.get('service_status', {}).get('online'):
+        cached = reader.preview(epoch=info.get('service_status', {}).get('media_session_id'))
+        if cached:
+            frame_token, jpeg = cached
+            token = ('recognition', frame_token)
+            if token == previous:
+                return None, token
+            return multipart(jpeg), token
+    # Expired recognition frames must not keep a stale panel box on screen.
+    raw_previous = previous[1] if isinstance(previous, tuple) and previous[0] == 'raw' else None
+    part, token = preview_part(camera, raw_previous)
+    return part, ('raw', token)
+
+
 def install(core):
     scanner = LiveScanner(core)
     app = core['app']
@@ -271,14 +288,17 @@ def install(core):
             return scanner.read(session_id, cancel=True)
 
     @app.get('/api/camera/preview.mjpg')
-    async def preview(request: Request):
+    async def preview(request: Request, recognition: bool = False):
         camera = scanner.camera()
 
         async def frames():
             previous = None
             while not await request.is_disconnected():
                 started = time.monotonic()
-                part, previous = await run_in_threadpool(preview_part, camera, previous)
+                if recognition:
+                    part, previous = await run_in_threadpool(recognition_part, core['video_ocr'], camera, previous)
+                else:
+                    part, previous = await run_in_threadpool(preview_part, camera, previous)
                 if part:
                     yield part
                 # Select the latest frame after each send; slow clients cannot

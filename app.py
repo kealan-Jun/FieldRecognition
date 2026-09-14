@@ -268,6 +268,7 @@ def index():
 
 @app.get('/api/state')
 def state():
+    from history_records import job_rows, panel_readings
     with db() as conn:
         instruments = [instrument_record(row) for row in conn.execute('SELECT * FROM instruments ORDER BY name')]
         bindings = [json.loads(row['document']) for row in conn.execute('SELECT document FROM bindings WHERE ended IS NULL OR rowid IN (SELECT rowid FROM bindings ORDER BY rowid DESC LIMIT 30) ORDER BY rowid DESC')]
@@ -277,9 +278,15 @@ def state():
                                "AND (json_array_length(document,'$.matches')>0 OR json_array_length(document,'$.scene_matches')>0) "
                                "ORDER BY rowid DESC LIMIT 1", (receiver_camera.target,)).fetchone() if receiver_camera else None
         activity = recent_activity(conn, receiver_camera.target if receiver_camera else os.environ.get('FIELD_CAMERA_ID'))
+        latest_rows = job_rows(conn, receiver_camera.target if receiver_camera else os.environ.get('FIELD_CAMERA_ID'),
+                               limit=1, recent=True)
+        latest_panel_job = (json.loads(latest_rows[0]['document']) | {'status': latest_rows[0]['status']}) if latest_rows else None
+        if latest_panel_job:
+            related = panel_readings(latest_panel_job)
+            latest_panel_job = latest_panel_job | {'readings': related, 'lines': related}
     return {'scenes': scene_records(), 'scene_visits': scene_visits(), 'instruments': instruments, 'bindings': bindings, 'jobs': jobs, 'ocr': dict(ocr_state),
             'last_camera_scan': json.loads(last_hit['document']) if last_hit else None,
-            'activity': activity,
+            'activity': activity, 'latest_panel_job': latest_panel_job,
             'archive': archive_store.snapshot(),
             'vision_fallback': aliyun_vision.public_config(), 'photo_watch': saved_photo_watcher.snapshot(),
             'automation': automatic_runner.snapshot(),

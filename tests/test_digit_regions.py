@@ -64,3 +64,15 @@ def test_conflicting_warp_does_not_overwrite_source_without_a_crop_check():
     json.dumps(out)
     out=refine_digits(lambda *a:{'lines':[line('290',[0,0,60,20])]},image,raw)
     assert out['lines']==[] and out['digit_consistency']['status']=='disagreement'
+
+
+def test_failed_warp_cannot_promote_a_conflicting_wider_crop():
+    raw={'lines':[line('055',[40,30,60,20],.67)]}
+    image=np.zeros((100,120,3),np.uint8)
+    answers=iter([{'lines':[line('06S',[0,0,60,20],.37)]},
+                  {'lines':[line('065',[12,12,60,20],.62)]}])
+    out=refine_digits(lambda *a:next(answers),image,raw,source_image=image)
+    assert out['lines']==[]
+    assert out['digit_consistency']['status']=='disagreement'
+    assert out['digit_consistency']['candidates']==['055','065']
+    assert out['panel_ocr']==raw

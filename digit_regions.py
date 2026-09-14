@@ -95,7 +95,14 @@ def refine_digits(predict, image, initial, x=0, y=0, *, source_image=None, sourc
         output['digit_consistency']={'status':'resolved' if best else 'disagreement',
             'candidates':[selected['text'],lines[0]['text']], 'check_text':alternative and alternative['text']}
     elif not best and alternative:
-        best=alternative
+        # A failed perspective pass does not make the wider crop authoritative.
+        # Keep conflicting complete readings unresolved (e.g. OFF -> 055/065).
+        if original_valid and selected['text'].strip() != alternative['text'].strip():
+            conflict = True
+            output['digit_consistency'] = {'status':'disagreement',
+                'candidates':[selected['text'], alternative['text']], 'check_text':alternative['text']}
+        else:
+            best=alternative
     if best and alternative and best['text'].strip()==alternative['text'].strip():
         # Save the wider source window actually used to resolve the reading,
         # rather than the clipped perspective crop which disagreed with it.

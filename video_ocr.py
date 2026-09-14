@@ -36,6 +36,7 @@ class VideoOcr:
         self.no_digits_since = None
         self.epoch = None
         self.confirmation = PanelConfirmation()
+        self.preview_cache = None
         self.state = {'status': 'starting', 'frames_inferred': 0, 'evidence_saved': 0,
                       'latest_lines': [], 'last_error': None, 'background_frames_skipped': 0}
 
@@ -52,6 +53,15 @@ class VideoOcr:
                 'min_evidence_interval_seconds': 2, 'unreadable_evidence_interval_seconds': 30,
                 'empty_background_saved': False, 'unreadable_requires_visible_instrument_qr': not self.core['panel_detector'].enabled(),
                 'panel_detector': self.core['panel_detector'].snapshot()}
+
+    def preview(self, epoch=None):
+        with self.lock:
+            if (not self.preview_cache or self.clock() - self.preview_cache[0] > 1.6
+                    or (epoch is not None and epoch != self.epoch)
+                    or not self.enabled() or self.state['status'] in
+                    {'paused', 'waiting_camera', 'waiting_binding', 'waiting_operator', 'error'}):
+                return None
+            return self.preview_cache[1:]
 
     def configure(self, body: VideoSettings):
         runner = self.core['automatic_runner']
@@ -104,6 +114,7 @@ class VideoOcr:
         epoch = service.get('media_session_id')
         if epoch != self.epoch:
             self.confirmation.reset()
+            self.preview_cache = None
             self.epoch, self.signature, self.last_saved_signature = epoch, None, None
             self.no_digits_since, self.stable_count = None, 0
         snapshots = self.core['current_panel_bindings'](camera.target) if self.core['panel_detector'].enabled() else None
@@ -163,6 +174,7 @@ class VideoOcr:
             # Discard a result whose binding ended during inference.
             if any(r['instrument_id'] not in allowed for r in local.get('panel_regions', [])):
                 self.confirmation.reset()
+                self.preview_cache = None
                 self.state.update(latest_lines=[], latest_panels=[])
                 self.no_digits_since, self.stable_count, self.signature = None, 0, None
                 return
@@ -192,6 +204,10 @@ class VideoOcr:
             last_ocr_seconds=local.get('wall_seconds'), stable_count=self.stable_count,
             latest_frame_metadata=metadata)
         self.state['latest_panels'] = [{k:r[k] for k in ('panel_id','class_id','instrument_id','bbox','detector_confidence')} for r in panels]
+        from recognition_preview import render
+        preview_panels = [region | {'instrument_name': self.core['get_instrument'](region['instrument_id'])['name']}
+                          for region in panels]
+        self.preview_cache = (current, frame_key(metadata), render(frame, preview_panels))
         for line in lines:
             region = panel_map.get(line.get('panel_id'))
             if region:

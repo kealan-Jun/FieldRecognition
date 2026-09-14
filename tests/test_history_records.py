@@ -58,6 +58,7 @@ def test_filters_before_paging_and_recent_limit_and_does_not_modify_receipts(app
     assert [e['job_id'] for e in second['items']]==['1'] and second['next_cursor'] is None
     events=client.get('/api/state').json()['activity']
     assert {e['job_id'] for e in events}=={'1','3','6'}
+    assert client.get('/api/state').json()['latest_panel_job']['job_id']=='6'
     with app.db() as conn:
         assert {r['id']:r['document'] for r in conn.execute("SELECT * FROM jobs WHERE id!='other'")}==originals
     assert len(client.get('/api/readouts?limit=50').json()['items'])==50  # raw API stays compatible
@@ -86,6 +87,10 @@ def test_mixed_job_excludes_unrelated_line_from_timeline_and_workbench(app_clien
     with app.db() as conn:conn.execute('INSERT INTO jobs VALUES(?,?,?)',(doc['job_id'],'completed',json.dumps(doc)))
     event=client.get('/api/readouts?related_only=true').json()['items'][0]
     assert event['detail']=='12.34' and len(event['readings'])==1
+    latest=client.get('/api/state').json()['latest_panel_job']
+    assert [line['text'] for line in latest['lines']]==['12.34']
+    with app.db() as conn:
+        assert len(json.loads(conn.execute('SELECT document FROM jobs WHERE id=?',(doc['job_id'],)).fetchone()[0])['readings'])==2
     grouped=client.get('/api/workbenches?related_only=true').json()
     assert sum(g['reading_count'] for g in grouped['workbenches'])==1
     assert not any(g['unassigned_readings'] for g in grouped['workbenches'])
@@ -138,4 +143,4 @@ def test_attributable_fallback_reading_keeps_its_display_text(app_client):
     with app.db() as conn:
         conn.execute('INSERT INTO jobs VALUES(?,?,?)',(doc['job_id'],'completed',json.dumps(doc)))
         event=recent_activity(conn,'ActualCamera')[0]
-    assert event['detail']=='温度 179 °C' and event['status']=='数字候选 · 待核对'
+    assert event['detail']=='温度 179 °C' and event['status']=='自动识别完成'
