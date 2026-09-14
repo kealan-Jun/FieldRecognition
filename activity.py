@@ -18,10 +18,15 @@ def readout_event(conn, row):
             'occurred_at': doc.get('finished_at') or doc['submitted_at'],
             'submitted_at': doc['submitted_at'], 'captured_at': (doc.get('external_photo') or {}).get('captured_at'),
             'camera_id': doc['camera_id'], 'operator': doc.get('operator'),
-            'target': (doc.get('instrument') or {}).get('name') or '未绑定仪器 · 照片读数',
+            'target': (doc.get('instrument') or {}).get('name') or ('、'.join(
+                c['instrument']['name'] for c in doc.get('instrument_candidates', [])) + ' · 归属待确认'
+                if doc.get('instrument_candidates') else '未绑定仪器 · 照片读数'),
             'status': label, 'detail': '、'.join(line['text'] for line in lines),
             'image_url': doc.get('image_url') or doc.get('crop_image_url'),
             'result_url': '/api/jobs/' + doc['job_id'], 'timing': doc.get('timing') or {},
+            'readings': doc.get('readings', []), 'binding_ids': doc.get('binding_ids', []),
+            'workbench': doc.get('workbench'), 'workbenches': doc.get('workbenches', []),
+            'input_mode': 'video' if doc.get('request_trigger') == 'video_stream' else 'photo',
             'fallback': doc.get('fallback') and {key: doc['fallback'].get(key) for key in ('status', 'reason', 'error', 'http_status')},
             'archive': receipt_status(conn, 'jobs', doc['job_id'], (doc.get('timing') or {}).get('source_written_at'))}
 
@@ -77,7 +82,7 @@ def recent_activity(conn, camera_id=None, limit=50):
             detail = '已记录场景进入' if visit else '场景二维码已识别'
         else:
             detail = '照片已保存，无已登记二维码匹配'
-        add(doc, 'photo' if doc.get('source') == 'agent_saved_photo' else 'scan',
+        add(doc, 'photo' if doc.get('source') in {'agent_saved_photo', 'neck_camera_video_ocr'} else 'scan',
             (doc.get('external_photo') or {}).get('captured_at') or doc['received_at'], '、'.join(hit['name'] for hit in hits) or '照片',
             '已识别' if hits else '已留存', doc['image_url'], detail)
 

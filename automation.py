@@ -55,6 +55,10 @@ class AutomaticRunner:
             binding = self.scanner.active_binding() if self.core['receiver_camera'] else None
             if binding and (body.enabled or body.operator is not None) and operator != binding['operator']:
                 raise HTTPException(409, '请先结束当前仪器绑定，再登记新的实验员；历史记录会保留')
+            for visit in self.core['scene_visits']():
+                if (visit['camera_id'] == self.target() and visit.get('operator')
+                        and (body.enabled or body.operator is not None) and operator != visit['operator']):
+                    raise HTTPException(409, '请先结束当前场景关联，再登记新的实验员；历史记录会保留')
             self._stop_scan('自动运行设置已更新')
             settings.update(enabled=body.enabled, operator=operator,
                             pause_reason=None if body.enabled else 'user_paused')
@@ -89,6 +93,7 @@ class AutomaticRunner:
             settings = self.settings()
             session = self.scanner.session
             return copy.deepcopy(settings | self.state | {
+                'binding_ids': [b['binding_id'] for b in self.scanner.active_bindings()] if self.core['receiver_camera'] else [],
                 'camera_id': self.target(), 'browser_required': False,
                 'session': session if session and session.get('owner') == 'automation' else None})
 
@@ -116,12 +121,6 @@ class AutomaticRunner:
                 self._stop_scan('等待相机采集服务状态恢复')
                 self.state = {'status': 'waiting_camera', 'message': '等待相机采集服务上线，恢复后自动扫码'}
                 return
-            binding = self.scanner.active_binding()
-            if binding:
-                self._stop_scan('已有有效绑定，继续等待语音照片')
-                self.state = {'status': 'bound', 'message': '已绑定仪器，OCR 后台加载并常驻；等待新的语音照片',
-                              'binding_id': binding['binding_id']}
-                return
             session = self.scanner.session
             if session and session.get('owner') != 'automation' and session['status'] in ACTIVE:
                 self.state = {'status': 'manual_scan', 'message': '当前由手动扫码会话控制'}
@@ -137,7 +136,9 @@ class AutomaticRunner:
                     self.state = {'status': 'retrying', 'message': '扫码暂不可用，30 秒后自动重试'}
                     return
                 if session['status'] in ACTIVE:
-                    self.state = {'status': session['status'], 'message': session['message']}
+                    self.scanner.refresh_bindings()
+                    self.state = {'status': session['status'], 'message': session['message'],
+                                  'binding_ids': [b['binding_id'] for b in session['bindings']]}
                     return
             session = self.scanner.start(settings['operator'], owner='automation')
             self.state = {'status': session['status'], 'message': session['message']}

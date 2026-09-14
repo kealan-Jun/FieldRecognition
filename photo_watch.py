@@ -65,23 +65,25 @@ class SavedPhotoWatcher:
                 self.update(status='watch_error')
             self.stop.wait(POLL_SECONDS)
 
-    def active_binding(self):
+    def active_bindings(self):
         camera = self.core['receiver_camera']
         target = camera.target if camera else os.environ.get('FIELD_CAMERA_ID')
         with self.core['db']() as conn:
-            row = conn.execute('SELECT document FROM bindings WHERE camera=? AND ended IS NULL', (target,)).fetchone()
-        if row:
+            rows = conn.execute('SELECT document FROM bindings WHERE camera=? AND ended IS NULL', (target,)).fetchall()
+        bindings = []
+        for row in rows:
             binding = json.loads(row['document'])
             if self.core['current_readout_binding'](binding):
-                return binding
-        return None
+                bindings.append(binding)
+        return bindings
 
     def step(self):
         if not self.enabled() or self.stop.is_set():
             return
-        binding = self.active_binding()
+        bindings = self.active_bindings()
+        binding = bindings[0] if len(bindings) == 1 else None
         self.binding_id = binding['binding_id'] if binding else None
-        self.update(binding_id=self.binding_id)
+        self.update(binding_id=self.binding_id, binding_ids=[b['binding_id'] for b in bindings])
         configured = os.environ.get('FIELD_SAVED_PHOTO_ROOT')
         if not configured:
             self.update(status='storage_unconfigured')

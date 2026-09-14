@@ -16,6 +16,9 @@ def update_timing(document):
         if document.get(source):
             timing[target] = document[source]
     local = document.get('local_ocr') or {}
+    video = document.get('video_observation') or {}
+    if video.get('observed_at'):
+        timing['frame_observed_at'] = video['observed_at']
     for key in ('ocr_started_at', 'ocr_finished_at'):
         if local.get(key):
             timing[key] = local[key]
@@ -37,6 +40,7 @@ def update_timing(document):
         'write_to_ocr_ms': ('source_written_at', 'ocr_started_at'),
         'write_to_result_ms': ('source_written_at', 'result_finished_at'),
         'detect_to_result_ms': ('first_observed_at', 'result_finished_at'),
+        'frame_to_result_ms': ('frame_observed_at', 'result_finished_at'),
     }
     timing['durations_ms'] = {name: elapsed_ms(timing.get(start), timing.get(end))
                               for name, (start, end) in pairs.items()}

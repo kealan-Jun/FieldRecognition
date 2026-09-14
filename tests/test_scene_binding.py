@@ -37,18 +37,21 @@ def test_direct_instrument_binding_and_scene_evidence_isolation(app_client):
     assert enter_scene(client, scene_id=str(uuid.uuid4())).status_code == 409
 
 
-def test_scene_change_requires_end_and_invalidates_ocr(app_client):
+def test_independent_scene_associations_preserve_bindings_and_end_together(app_client):
     app,client=app_client
     picture=scan(client);aid=picture['matches'][0]['id']
     client.put('/api/instruments/'+aid,json={'name':'称量仪器 A','scene':'湿实验实验台'})
-    enter_scene(client)
     args={'scan_id':picture['scan_id'],'instrument_id':aid,'operator':'Tester'}
     bound=client.post('/api/bindings',json=args).json()
+    assert not bound['scene_qr_verified']
+    first=enter_scene(client).json()
+    assert app.current_readout_binding(bound)
     second=str(uuid.uuid4())
     with app.db() as conn:conn.execute('INSERT INTO scenes VALUES(?,?)',(second,'其他场景'))
-    assert enter_scene(client,scene_id=second).status_code==409
-    client.post('/api/bindings/' + bound['binding_id'] + '/end')
     assert enter_scene(client,scene_id=second).status_code==200
-    assert client.post('/api/bindings',json=args).status_code==409
+    assert len(client.get('/api/state').json()['scene_visits'])==2
+    assert client.post('/api/bindings',json=args).json()['binding_id']==bound['binding_id']
+    assert client.post('/api/camera/relations/end',json={'camera_id':'TestCamera'}).status_code==200
+    assert not client.get('/api/state').json()['scene_visits']
     assert client.post('/api/ocr',json={'binding_id':bound['binding_id'],'capture_id':picture['capture_id']}).status_code==409
     assert client.get('/api/state').json()['bindings'][0]['ended_at']

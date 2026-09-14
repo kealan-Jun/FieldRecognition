@@ -8,6 +8,7 @@ function selectArchive(items, filters) {
   }
   return values.filter(i=>(!filters.operator||(filters.operator==='__missing__'?!i.operator:i.operator===filters.operator))
     &&(!filters.instrument||(filters.instrument==='__missing__'?!i.instruments.length:i.instruments.some(a=>a.id===filters.instrument)))
+    &&(!filters.workbench||i.workbench?.name===filters.workbench||(i.workbenches||[]).some(b=>b.name===filters.workbench))
     &&(!filters.from||i.day>=filters.from)&&(!filters.to||i.day<=filters.to)
     &&(!filters.camera||i.camera_id===filters.camera)&&(!filters.entity||i.entity===filters.entity))
     .sort((a,b)=>Date.parse(b.occurred_at)-Date.parse(a.occurred_at)||b.sequence-a.sequence);
@@ -28,6 +29,7 @@ if(typeof document!=='undefined'){
   const instruments=new Map();for(const i of index.items)for(const a of i.instruments)if(!instruments.has(a.id))instruments.set(a.id,a.name);
   for(const [id,name] of instruments)option('instrument',id,name);
   option('instrument','__missing__','未关联仪器');
+  for(const name of [...new Set(index.items.flatMap(i=>[i.workbench?.name,...(i.workbenches||[]).map(b=>b.name)]).filter(Boolean))].sort())option('workbench',name,name);
   for(const camera of [...new Set(index.items.map(i=>i.camera_id).filter(Boolean))].sort())option('camera',camera,displayCamera(camera));
   $('overview').textContent=`${index.unique_records} 条业务记录 · ${index.listed_receipts} 个留存版本 · 更新于 ${fmt(index.updated_at)}`;
   const integrity=index.integrity||{},report=integrity.last_report;
@@ -42,7 +44,7 @@ if(typeof document!=='undefined'){
   }
   let page=0,selected=[],filters={};const pageSize=50;
   function render(){
-    filters=Object.fromEntries(['operator','instrument','from','to','camera','entity','versions'].map(id=>[id,$(id).value]));
+    filters=Object.fromEntries(['operator','instrument','workbench','from','to','camera','entity','versions'].map(id=>[id,$(id).value]));
     const invalid=filters.from&&filters.to&&filters.from>filters.to;
     $('filterError').hidden=!invalid;selected=invalid?[]:selectArchive(index.items,filters);
     const pages=Math.max(1,Math.ceil(selected.length/pageSize));page=Math.min(page,pages-1);

@@ -1,5 +1,7 @@
 # 现场识别 Agent 工具 v1
 
+2026-09-14 更新：原有九个工具保持兼容，新增多关联、实时视频 OCR 和实验台分类 HTTP 接口，见 [多二维码与实时视频 OCR](docs/多二维码与实时视频OCR.md)。以下单绑定字段是兼容字段；多候选使用 `binding_ids` / `instrument_candidates` / `readings`，不可取第一条作为默认归属。
+
 本机后台自动模式及实验员登记见 [本机自动运行](docs/本机自动运行.md)。`get_field_state` 新增 `automation` 状态；后台自动扫码独立于网页，下面手动连续扫码接口的 20 秒租约只适用于 `owner=browser` 会话。新模式未增加 Agent 工具数量。
 
 这是一组框架无关的 HTTP JSON 小工具，复用网页已有取流、二维码、设备绑定和 PaddleOCR 实现。无需改动挂脖设备 Agent。本版不是 MCP 服务；Agent 适配层将工具名称及参数转发到以下接口即可。
@@ -23,8 +25,8 @@
 ## Agent 调用顺序
 
 1. get_field_state 查看仪器登记和相机状态。仪器所属场景先在网页登记，Agent 不猜测场景或操作人。
-2. capture_and_scan：对准仪器码取图，即可继续绑定。场景码是可选的独立证据；实际扫到时从 scene_matches 调用 enter_scene。matches 为空时不能建立新绑定；多个码时由用户明确选择仪器。
-3. bind_instrument：使用实际扫描所得 instrument_id、scan_id 和用户提供的 operator。同相机、仪器和实验员的重复请求返回原 binding_id；已有其他有效绑定时拒绝覆盖。设备采集服务当前会话内沿用原绑定，无需每次重复扫码。成功绑定后异步预加载 PaddleOCR，绑定接口不等待模型加载完成。
+2. capture_and_scan：对准仪器码取图，即可继续绑定。场景码是可选的独立证据；实际扫到时从 scene_matches 调用 enter_scene。matches 为空时不能建立新绑定；多个码逐项关联，各仪器使用自己的解码 ID。
+3. bind_instrument：使用实际扫描所得 instrument_id、scan_id 和用户提供的 operator。同相机、仪器和实验员的重复请求返回原 binding_id；同一实验员可新增其他仪器关联，已有关系保留。设备采集服务当前会话内沿用原绑定，无需每次重复扫码。成功绑定后异步预加载 PaddleOCR，绑定接口不等待模型加载完成。
 4. 用户对现有 Agent 说“拍照”，沿用该 Agent 的拍照与 NAS 保存流程。本服务监控配置相机的新语音照片，未绑定也执行 OCR 和留存，稳定后自动识别；不用再调用 capture_and_scan。
 5. get_field_state 查看该相机的 jobs；需要直接传递现有拍照回执时，调用 read_saved_panel，传 binding_id、确切 image_path 和可选 crop。已导入的本地 capture_id 继续用 read_panel。重复提交同一源照片与选框沿用原任务。
 6. 每隔约 1 秒 get_panel_result；只有 completed 才展示 lines。调用方设置自己的总等待期限，超时保留 job_id 稍后查询，不重新提交 OCR。
@@ -74,7 +76,7 @@ curl -sS http://127.0.0.1:8188/api/tools/capture_and_scan \
 
 ## 场景进入工具
 
-工具总数现为 9。调用 capture_and_scan 或 scan_photo 后，从 scene_matches 取得已登记的场景；调用 enter_scene，参数 {"scan_id":"扫码记录 UUID","scene_id":"场景 UUID"}，确认该照片相机进入场景。仪器码也可直接调用 bind_instrument；实际已进入场景时，系统校验同相机的当前场景是否冲突。有有效仪器绑定时拒绝切换场景；同场景重复进入不会结束绑定。录入实验员仍由用户指定。get_field_state 返回 scenes 与 scene_visits；所有场景与仪器码仍未签名。
+工具总数现为 9。调用 capture_and_scan 或 scan_photo 后，从 scene_matches 取得已登记的场景；调用 enter_scene，参数 {"scan_id":"扫码记录 UUID","scene_id":"场景 UUID"}，确认该照片相机进入场景。仪器码也可直接调用 bind_instrument；实际已进入场景时，系统校验同相机的当前场景是否冲突。场景可独立追加关联，不覆盖已有场景或仪器记录；同场景重复进入不会结束绑定。录入实验员仍由用户指定。get_field_state 返回 scenes 与 scene_visits；所有场景与仪器码仍未签名。
 
 
 ## 连续视频扫码 HTTP 接口
@@ -86,7 +88,7 @@ curl -sS http://127.0.0.1:8188/api/tools/capture_and_scan \
 - `GET /api/camera/scan-sessions/{session_id}`：约每 0.5 秒查询。`scanning` / `waiting_camera` 继续等待；`bound` 读取原始命中帧 `scan` 和 `binding`；`needs_selection` 暂停供用户选择；`stopped` / `failed` 结束。20 秒未查询自动停止。
 - `DELETE /api/camera/scan-sessions/{session_id}`：停止自动扫码，保留已完成的绑定。
 
-已有有效绑定时 start 直接返回 bound 和原绑定，不重复写入。设备服务离线或 receiver 的 RGB ingress 会话变化后，该相机的旧绑定及场景失效，重新在线后必须使用新照片。HTTP 连接失败本身不代表设备重启。ingress 会话也可能因设备重连/receiver 重启改变，尚不等于设备进程启动标识；详见 README 的证据边界。绑定后自动加载并常驻 OCR 模型；仅新语音照片或明确的照片识别请求才执行面板预测，不逐帧运行视频 OCR。
+已有有效绑定时 start 保留关系并继续 scanning，只为新二维码建立关联，不重复写入。设备服务离线或 receiver 的 RGB ingress 会话变化后，该相机的旧绑定及场景失效，重新在线后必须使用新照片。HTTP 连接失败本身不代表设备重启。ingress 会话也可能因设备重连/receiver 重启改变，尚不等于设备进程启动标识；详见 README 的证据边界。绑定后自动加载并常驻 OCR 模型；启用视频识别时持续抽取新鲜视频帧执行 OCR，并继续处理语音照片；普通视频帧留在内存中。
 
 
 ## OCR 模型生命周期

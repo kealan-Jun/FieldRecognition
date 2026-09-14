@@ -49,7 +49,7 @@ def bind_from_video(app, client, camera, runner):
     camera.publish(label(app, 'Scene01'))
     wait(runner, lambda s: s['session'] and 'scene_visit' in s['session'])
     camera.publish(label(app, 'InstrumentA'))
-    return wait(runner, lambda s: s['status'] == 'bound')['binding_id']
+    return wait(runner, lambda s: bool(s.get('binding_ids')))['binding_ids'][0]
 
 
 def test_first_use_waits_for_human_registration(automatic, monkeypatch):
@@ -76,13 +76,13 @@ def test_unattended_single_frame_binding_and_persistent_registration(automatic):
     wait(runner, lambda s: s['session'] and 'scene_visit' in s['session'])
     assert scanner.session['owner'] == 'automation'
     camera.publish(label(app, 'InstrumentA'))
-    bound = wait(runner, lambda s: s['status'] == 'bound')
+    bound = wait(runner, lambda s: bool(s.get('binding_ids')))
     assert app.ocr_warmup_future.result(timeout=2)
     assert client.get('/api/state').json()['ocr']['resident']
     # No scan-session GET was used: state/registration reads do not renew a browser lease.
     recovered = AutomaticRunner(vars(app))
     recovered.step()
-    assert recovered.snapshot()['binding_id'] == bound['binding_id']
+    assert recovered.snapshot()['binding_ids'][0] == bound['binding_ids'][0]
     assert recovered.snapshot()['operator'] == '登记人员 001'
     assert recovered.snapshot()['registered_at']
     for _ in range(3):
@@ -109,7 +109,7 @@ def test_device_restart_rearms_and_local_restart_preserves_pause(automatic):
     camera.publish(label(app, 'Scene01'))
     wait(runner, lambda s: s['session'] and 'scene_visit' in s['session'])
     camera.publish(label(app, 'InstrumentA'))
-    rebound = wait(runner, lambda s: s['status'] == 'bound')['binding_id']
+    rebound = wait(runner, lambda s: bool(s.get('binding_ids')))['binding_ids'][0]
     assert rebound != binding_id
     assert client.post('/api/bindings/' + rebound + '/end').status_code == 200
     assert runner.snapshot()['pause_reason'] == 'binding_ended'
@@ -137,22 +137,30 @@ def test_status_unknown_blocks_binding_and_does_not_end_existing_binding(automat
     assert next(b for b in bindings if b['binding_id'] == binding_id)['ended_at'] is None
     info['service_status_available'] = True
     runner.step()
-    assert runner.snapshot()['binding_id'] == binding_id
+    assert runner.snapshot()['binding_ids'][0] == binding_id
 
 
-def test_multi_code_requires_review_and_persists_pause(automatic):
+def test_multi_code_binds_independently_and_keeps_scanning(automatic):
     app, client, camera, runner, info = automatic
+    client.put('/api/instruments/eae17924-9fa7-4445-ac45-3987f5687be9',
+               json={'name': '仪器 B', 'scene': '湿实验实验台'})
     enable(client)
-    pixels = np.full((500, 1000, 3), 255, np.uint8)
-    for x, name in [(50, 'InstrumentA'), (550, 'InstrumentB')]:
+    pixels = np.full((500, 1500, 3), 255, np.uint8)
+    for x, name in [(50, 'InstrumentA'), (550, 'InstrumentB'), (1050, 'Scene01')]:
         pixels[50:450, x:x+400] = cv2.resize(label(app, name), (400, 400))
     camera.publish(pixels)
-    result = wait(runner, lambda s: s.get('pause_reason') == 'needs_selection')
-    assert not result['enabled']
+    result = wait(runner, lambda s: len(s.get('binding_ids', [])) == 2 and len(s['session']['scene_visits']) == 1)
+    assert result['enabled'] and result['status'] == 'scanning'
     assert len(result['session']['scan']['matches']) == 2
-    recovered = AutomaticRunner(vars(app))
-    assert recovered.settings()['pause_reason'] == 'needs_selection'
-    assert not client.get('/api/state').json()['bindings']
+    assert len(result['session']['scan']['scene_matches']) == 1
+    camera.publish(pixels)
+    wait(runner, lambda s: s['session']['frames_scanned'] >= 2)
+    with app.db() as conn:
+        assert conn.execute('SELECT COUNT(*) FROM bindings').fetchone()[0] == 2
+        assert conn.execute('SELECT COUNT(*) FROM scans').fetchone()[0] == 1
+    app.live_scanner.observe_service({'online': False, 'media_session_id': 31})
+    assert not [b for b in client.get('/api/state').json()['bindings'] if not b['ended_at']]
+    assert not client.get('/api/state').json()['scene_visits']
 
 
 def test_pause_during_decode_prevents_late_binding(automatic, monkeypatch):
@@ -184,7 +192,7 @@ def test_operator_change_requires_ending_current_binding(automatic):
     app, client, camera, runner, info = automatic
     binding_id = bind_from_video(app, client, camera, runner)
     assert client.put('/api/automation', json={'enabled': True, 'operator': '登记人员 002'}).status_code == 409
-    assert client.post('/api/bindings/' + binding_id + '/end').status_code == 200
+    assert client.post('/api/camera/relations/end', json={'camera_id': runner.target()}).status_code == 200
     assert client.put('/api/automation', json={'enabled': True, 'operator': '登记人员 002'}).status_code == 200
     history = client.get('/api/state').json()['bindings']
     assert history[0]['operator'] == '登记人员 001'

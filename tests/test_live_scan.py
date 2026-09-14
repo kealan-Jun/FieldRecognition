@@ -81,7 +81,7 @@ def test_live_blank_scene_then_single_hit_binds_once_with_original_evidence(live
     camera.publish(label(app, 'Scene01'))
     wait_for(client, sid, lambda r: 'scene_visit' in r)
     camera.publish(label(app, 'InstrumentA'))
-    result = wait_for(client, sid, lambda r: r['status'] == 'bound')
+    result = wait_for(client, sid, lambda r: bool(r.get('bindings')))
     binding = result['binding']
     assert app.ocr_warmup_future.result(timeout=2)
     assert client.get('/api/state').json()['ocr']['resident']
@@ -94,7 +94,8 @@ def test_live_blank_scene_then_single_hit_binds_once_with_original_evidence(live
     assert np.array_equal(pixels, label(app, 'InstrumentA'))
     # The next frame has no QR: a single decoded hit was enough, and only one bind exists.
     camera.publish(np.zeros((300, 400, 3), np.uint8))
-    assert client.post('/api/camera/scan-sessions', json={'operator': '测试员'}).json()['binding']['binding_id'] == binding['binding_id']
+    assert client.post('/api/camera/scan-sessions', json={'operator': '测试员'}).status_code == 409
+    wait_for(client, sid, lambda r: r['frames_scanned'] >= 4)
     body = {'operator': '测试员', 'instrument_id': aid, 'scan_id': result['scan']['scan_id']}
     assert client.post('/api/bindings', json=body).json()['binding_id'] == binding['binding_id']
     with app.db() as conn:
@@ -114,13 +115,13 @@ def test_live_unregistered_instrument_keeps_scanning(live):
     assert client.delete('/api/camera/scan-sessions/' + sid).json()['status'] == 'stopped'
 
 
-def test_multiple_instruments_pause_without_binding(live):
+def test_multiple_unconfigured_instruments_keep_scanning_without_binding(live):
     app, client, camera = live
     frame = np.full((500, 1000, 3), 255, np.uint8)
     for x, name in [(50, 'InstrumentA'), (550, 'InstrumentB')]:
         frame[50:450, x:x+400] = cv2.resize(label(app, name), (400, 400))
     camera.publish(frame)
-    result = wait_for(client, start(client), lambda r: r['status'] == 'needs_selection')
+    result = wait_for(client, start(client), lambda r: bool(r.get('binding_errors')))
     assert len(result['scan']['matches']) == 2
     assert not client.get('/api/state').json()['bindings']
 
@@ -212,7 +213,7 @@ def test_single_instrument_video_frame_binds_without_scene(live):
     client.put('/api/instruments/' + aid, json={'name': '称量仪器 A', 'scene': '湿实验实验台'})
     sid = start(client)
     camera.publish(label(app, 'InstrumentA'))
-    result = wait_for(client, sid, lambda r: r['status'] == 'bound')
+    result = wait_for(client, sid, lambda r: bool(r.get('bindings')))
     assert result['binding']['instrument']['id'] == aid
     assert result['binding']['scene_visit_id'] is None
     assert result['binding']['scene_qr_verified'] is False

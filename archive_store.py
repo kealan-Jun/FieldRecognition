@@ -74,10 +74,11 @@ class ArchiveStore:
         self.stop = threading.Event()
         self.lock = threading.Lock()
         self.worker = None
+        self.browse_digests = {}
         self.status = {'status': 'disabled', 'last_error': None, 'last_archived_at': None}
         base = Path(__file__).parent
         self.index_version = '2:' + hashlib.sha256(b''.join((base / p).read_bytes()
-            for p in ('archive_catalog.py', 'static/archive.html', 'static/archive.js'))).hexdigest()[:16]
+            for p in ('archive_catalog.py', 'archive_browse.py', 'static/archive.html', 'static/archive.js'))).hexdigest()[:16]
         with core['db']() as conn:
             conn.executescript('''
                 CREATE TABLE IF NOT EXISTS archive_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -212,12 +213,18 @@ class ArchiveStore:
 
     def write_index(self):
         from archive_catalog import build_index, render_index
+        from archive_browse import build_views
         root = self._root()
         with self.core['db']() as conn:
             rows = conn.execute('SELECT * FROM archive_outbox WHERE archived_at IS NOT NULL ORDER BY seq DESC').fetchall()
         index = build_index(rows, self.instance, self.core['now'](), self.integrity.snapshot())
         replace_view(root / 'Index.json', canonical(index))
         replace_view(root / 'Readme.html', render_index(index))
+        for relative, content in build_views(rows).items():
+            digest = hashlib.sha256(content).hexdigest()
+            if self.browse_digests.get(relative) != digest or not (root / relative).is_file():
+                replace_view(root / relative, content)
+                self.browse_digests[relative] = digest
         with self.core['db']() as conn:
             conn.execute('INSERT OR REPLACE INTO archive_meta VALUES(?,?)', ('index_count', str(len(rows))))
             conn.execute('INSERT OR REPLACE INTO archive_meta VALUES(?,?)', ('index_version', self.index_version))
@@ -258,7 +265,8 @@ class ArchiveStore:
         root = self._root()
         if (not indexed or int(indexed[0]) != archived or not version or version[0] != self.index_version
                 or not audit or audit[0] != (self.integrity.snapshot()['report_path'] or '')
-                or not (root / 'Readme.html').is_file() or not (root / 'Index.json').is_file()):
+                or not (root / 'Readme.html').is_file() or not (root / 'Index.json').is_file()
+                or not (root / 'Browse/Readme.html').is_file()):
             self.write_index()
         with self.core['db']() as conn:
             failed = conn.execute('SELECT last_error FROM archive_outbox WHERE archived_at IS NULL AND last_error IS NOT NULL LIMIT 1').fetchone()

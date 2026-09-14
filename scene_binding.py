@@ -42,18 +42,18 @@ def install(core):
             scene = conn.execute('SELECT * FROM scenes WHERE id=?', (str(body.scene_id),)).fetchone()
             if not scene or not any(s['id'] == str(body.scene_id) for s in scan.get('scene_matches', [])):
                 raise HTTPException(409, '此照片未识别到已登记的场景码')
-            active = conn.execute('SELECT * FROM scene_visits WHERE camera=? AND ended IS NULL', (scan['camera_id'],)).fetchone()
-            if active:
-                prior = json.loads(active['document'])
+            if body.operator:
+                for binding in conn.execute('SELECT document FROM bindings WHERE camera=? AND ended IS NULL', (scan['camera_id'],)):
+                    if json.loads(binding['document'])['operator'] != body.operator.strip():
+                        raise HTTPException(409, '请先结束该相机的已有绑定，再更换实验员')
+            active = conn.execute('SELECT * FROM scene_visits WHERE camera=? AND ended IS NULL', (scan['camera_id'],)).fetchall()
+            for row in active:
+                prior = json.loads(row['document'])
+                if body.operator and prior.get('operator') and prior['operator'] != body.operator.strip():
+                    raise HTTPException(409, '请先结束已有场景关联，再更换实验员')
                 if prior['scene']['id'] == str(body.scene_id):
                     return prior
-            if conn.execute('SELECT 1 FROM bindings WHERE camera=? AND ended IS NULL', (scan['camera_id'],)).fetchone():
-                raise HTTPException(409, '当前采集服务已有仪器绑定；服务重启或主动结束后才能切换场景')
             timestamp = now()
-            for table in ['scene_visits', 'bindings']:
-                for row in conn.execute(f'SELECT * FROM {table} WHERE camera=? AND ended IS NULL', (scan['camera_id'],)).fetchall():
-                    doc = json.loads(row['document']) | {'ended_at': timestamp, 'end_reason': 'scene_changed'}
-                    conn.execute(f'UPDATE {table} SET ended=?,document=? WHERE id=?', (timestamp, json.dumps(doc), row['id']))
             result = {'visit_id': str(uuid.uuid4()), 'camera_id': scan['camera_id'], 'scene': dict(scene),
                       'scan_id': scan['scan_id'], 'image_url': scan['image_url'], 'started_at': timestamp,
                       'operator': body.operator.strip() if body.operator else None,
@@ -74,9 +74,11 @@ def install(core):
     def optional_scene(conn, camera, scene_name):
         # An instrument QR establishes the instrument identity by itself. A scene
         # name from its registration is not evidence that a scene QR was scanned.
-        if not conn.execute('SELECT 1 FROM scene_visits WHERE camera=? AND ended IS NULL', (camera,)).fetchone():
-            return None
-        return validate(conn, camera, scene_name)
+        for row in conn.execute('SELECT document FROM scene_visits WHERE camera=? AND ended IS NULL', (camera,)):
+            visit = json.loads(row['document'])
+            if visit['scene']['name'] == scene_name:
+                return visit
+        return None
 
     core['app'].post('/api/scene/enter')(enter)
     core.update(scene_records=scenes, scene_visits=visits, enter_scene=enter,

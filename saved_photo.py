@@ -106,13 +106,6 @@ def install(core):
             if ((binding and photo.captured_at < datetime.fromisoformat(binding['started_at'])) or
                     photo.captured_at > datetime.now(timezone.utc) + timedelta(seconds=60)):
                 raise HTTPException(409, '拍照时间早于本次绑定或在未来，请核对拍照回执')
-            if not binding and trigger == 'voice_photo_directory':
-                with core['db']() as conn:
-                    row = conn.execute('SELECT document FROM bindings WHERE camera=? AND ended IS NULL', (target,)).fetchone()
-                candidate = json.loads(row['document']) if row else None
-                if (candidate and photo.captured_at >= datetime.fromisoformat(candidate['started_at'])
-                        and core['current_readout_binding'](candidate)):
-                    binding = candidate
             try:
                 raw = base64.b64decode(photo.image_base64, validate=True)
             except (ValueError, binascii.Error):

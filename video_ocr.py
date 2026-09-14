@@ -1,0 +1,206 @@
+"""Bounded live inference; ordinary frames stay in memory, evidence is event based."""
+import copy
+import json
+import os
+import threading
+import time
+
+from fastapi import HTTPException
+from pydantic import BaseModel
+
+from aliyun_vision import READOUT, fallback_reason, no_digits_seconds
+from live_scan import frame_key
+from qr_decode import decode_qr
+
+
+class VideoSettings(BaseModel):
+    enabled: bool
+
+
+class VideoOcr:
+    interval = .5
+
+    def __init__(self, core, *, clock=time.monotonic):
+        self.core, self.clock = core, clock
+        self.lock = threading.RLock()
+        self.stop = threading.Event()
+        self.worker = None
+        self.pending = None
+        self.previous_frame = None
+        self.next_sample = 0
+        self.signature = None
+        self.stable_count = 0
+        self.last_saved_signature = None
+        self.last_saved = -1000
+        self.no_digits_since = None
+        self.epoch = None
+        self.state = {'status': 'starting', 'frames_inferred': 0, 'evidence_saved': 0,
+                      'latest_lines': [], 'last_error': None, 'background_frames_skipped': 0}
+
+    def enabled(self):
+        settings = self.core['automatic_runner'].settings()
+        default = os.environ.get('FIELD_VIDEO_OCR_ENABLED', '0').lower() in {'1', 'true', 'yes'}
+        return bool(settings.get('video_ocr_enabled', default))
+
+    def snapshot(self):
+        with self.lock:
+            return copy.deepcopy(self.state) | {'enabled': self.enabled(), 'sample_interval_seconds': self.interval,
+                'target_fps': 1 / self.interval, 'saves_every_frame': False, 'stable_samples': 2,
+                'min_evidence_interval_seconds': 2, 'unreadable_evidence_interval_seconds': 30,
+                'empty_background_saved': False, 'unreadable_requires_visible_instrument_qr': True}
+
+    def configure(self, body: VideoSettings):
+        runner = self.core['automatic_runner']
+        with runner.lock:
+            settings = runner.settings()
+            settings['video_ocr_enabled'] = body.enabled
+            runner._save(settings)
+        if body.enabled:
+            self.core['queue_ocr_warmup']()
+        return self.snapshot()
+
+    def start(self):
+        self.worker = threading.Thread(target=self._run, name='video-ocr', daemon=True)
+        self.worker.start()
+
+    def close(self):
+        self.stop.set()
+        if self.worker:
+            self.worker.join(timeout=3)
+
+    def _run(self):
+        while not self.stop.is_set():
+            try:
+                with self.lock:
+                    self.step()
+            except Exception as exc:
+                with self.lock:
+                    self.state.update(status='error', last_error=type(exc).__name__)
+            self.stop.wait(.05)
+
+    def step(self):
+        camera = self.core['receiver_camera']
+        if not self.enabled() or not camera:
+            self.state['status'] = 'paused' if camera else 'unconfigured'
+            if self.pending and self.pending[0].done():
+                self.pending = None
+            return
+        settings = self.core['automatic_runner'].settings()
+        if not settings.get('operator'):
+            self.state['status'] = 'waiting_operator'
+            return
+        info = camera.snapshot()
+        service = info.get('service_status', {})
+        if not info.get('service_status_available') or not service.get('online'):
+            self.state['status'] = 'waiting_camera'
+            self.no_digits_since = None
+            return
+        epoch = service.get('media_session_id')
+        if epoch != self.epoch:
+            self.epoch, self.signature, self.last_saved_signature = epoch, None, None
+            self.no_digits_since, self.stable_count = None, 0
+        if self.pending:
+            future, frame, metadata, observed, old_epoch, sampled = self.pending
+            if not future.done():
+                self.state['status'] = 'inferring'
+                return
+            self.pending = None
+            local = future.result()
+            if old_epoch == epoch and self.clock() - sampled < 3 and not self.stop.is_set():
+                self.accept(frame, metadata, observed, local)
+        if self.clock() < self.next_sample:
+            return
+        # A video worker owns at most one OCR future; saved photographs take priority.
+        with self.core['db']() as conn:
+            priority = conn.execute("SELECT 1 FROM jobs WHERE status='queued' OR (status='running' "
+                "AND json_extract(document,'$.phase')='local_ocr') LIMIT 1").fetchone()
+        if priority or self.core['saved_photo_watcher'].snapshot().get('pending_files', 0):
+            self.state['status'] = 'yielding_to_photo'
+            return
+        if self.core['ocr_state']['status'] != 'ready':
+            self.state['status'] = 'loading_model'
+            self.core['queue_ocr_warmup']()
+            return
+        try:
+            frame, metadata = camera.frame()
+        except ValueError:
+            self.state['status'] = 'waiting_camera'
+            self.no_digits_since, self.stable_count = None, 0
+            return
+        token = frame_key(metadata)
+        if token == self.previous_frame or metadata.get('frame_age_ms', 0) > 1000:
+            return
+        self.previous_frame = token
+        self.next_sample = self.clock() + self.interval
+        observed = self.core['now']()
+        future = self.core['ocr_pool'].submit(self.core['predict_panel'], frame, 0, 0)
+        self.pending = (future, frame, metadata, observed, epoch, self.clock())
+        self.state.update(status='inferring', last_sample_at=observed)
+
+    def accept(self, frame, metadata, observed, local):
+        current = self.clock()
+        lines = [line for line in local.get('lines', []) if READOUT.fullmatch(line.get('text', ''))]
+        decoded = decode_qr(frame, fast=True)
+        hits = self.core['qr_matches'](*decoded[:2])['matches']
+        visible_ids = tuple(sorted(hit['id'] for hit in hits))
+        if not visible_ids:
+            with self.core['db']() as conn:
+                visible_ids = tuple(sorted(json.loads(row['document'])['instrument']['id'] for row in conn.execute(
+                    'SELECT document FROM bindings WHERE camera=? AND ended IS NULL', (self.core['receiver_camera'].target,))))
+        signature = (tuple(sorted(line['text'] for line in lines)), visible_ids)
+        self.stable_count = self.stable_count + 1 if signature == self.signature else 1
+        self.signature = signature
+        self.state.update(status='watching', frames_inferred=self.state['frames_inferred'] + 1,
+            latest_lines=lines, last_result_at=self.core['now'](), last_error=local.get('error'),
+            latest_qr_instruments=[{k: hit[k] for k in ('id', 'name')} for hit in hits],
+            last_ocr_seconds=local.get('wall_seconds'), stable_count=self.stable_count,
+            latest_frame_metadata=metadata)
+        # An absent reading is not itself a reason to store the room, cables or desk.
+        # A session binding alone does not establish that an instrument is in this frame.
+        if not lines and not hits:
+            self.no_digits_since = None
+            self.state['background_frames_skipped'] += 1
+            return
+        reason = fallback_reason(local.get('lines', []), local.get('error'))
+        if reason:
+            if self.no_digits_since is None:
+                self.no_digits_since = current
+        else:
+            self.no_digits_since = None
+        change = bool(lines) and self.stable_count >= 2 and signature != self.last_saved_signature
+        unreadable = (self.no_digits_since is not None and current - self.no_digits_since >= no_digits_seconds()
+                      and current - self.last_saved >= 30 and self.stable_count >= 2
+                      and signature != self.last_saved_signature)
+        if not (change and current - self.last_saved >= 2) and not unreadable:
+            return
+        # Only evidence frames reach disk. No stream frame is stored while waiting for stability.
+        with self.core['ocr_submit_lock']:
+            with self.core['db']() as conn:
+                if conn.execute("SELECT count(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0] >= 4:
+                    return
+            import cv2
+            ok, encoded = cv2.imencode('.png', frame)
+            if not ok:
+                raise ValueError('video evidence encoding failed')
+            capture = self.core['scan_image'](encoded.tobytes(), 'neck_camera_video_ocr',
+                self.core['receiver_camera'].target, decoded=decoded, metadata=metadata,
+                operator=self.core['automatic_runner'].settings()['operator'])
+            elapsed = current - self.no_digits_since if self.no_digits_since is not None else 0
+            capture.update(received_at=observed, video_observation={'observed_at': observed,
+                'evidence_reason': 'reading_changed' if change else 'unreadable_timeout',
+                'stable_samples': self.stable_count, 'no_digits_elapsed_seconds': elapsed,
+                'sample_interval_seconds': self.interval})
+            with self.core['db']() as conn:
+                conn.execute('UPDATE scans SET document=? WHERE id=?', (json.dumps(capture), capture['capture_id']))
+            job = self.core['enqueue_ocr'](self.core['OcrRequest'](capture_id=capture['capture_id'], auto_associate=True),
+                                          trigger='video_stream', precomputed_local=local)
+            self.last_saved, self.last_saved_signature = current, signature
+            self.state.update(last_job_id=job['job_id'], last_evidence_at=self.core['now'](),
+                              evidence_saved=self.state['evidence_saved'] + 1)
+
+
+def install(core):
+    reader = VideoOcr(core)
+    core['app'].get('/api/video-ocr')(reader.snapshot)
+    core['app'].put('/api/video-ocr')(reader.configure)
+    return reader

@@ -42,11 +42,22 @@ class LiveScanner:
             raise HTTPException(409, '连续视频需要配置挂脖相机主码流；当前仍可上传或拍照')
         return camera
 
-    def active_binding(self):
+    def active_bindings(self):
         with self.core['db']() as conn:
-            row = conn.execute('SELECT document FROM bindings WHERE camera=? AND ended IS NULL',
-                               (self.camera().target,)).fetchone()
-        return json.loads(row['document']) if row else None
+            rows = conn.execute('SELECT document FROM bindings WHERE camera=? AND ended IS NULL ORDER BY rowid',
+                                (self.camera().target,)).fetchall()
+        return [json.loads(row['document']) for row in rows]
+
+    def active_binding(self):
+        bindings = self.active_bindings()
+        return bindings[0] if bindings else None
+
+    def refresh_bindings(self):
+        bindings = self.active_bindings()
+        visits = [v for v in self.core['scene_visits']() if v['camera_id'] == self.camera().target]
+        self.session.update(bindings=bindings, binding=bindings[0] if len(bindings) == 1 else None,
+                            scene_visits=visits,
+                            message=f'已关联 {len(bindings)} 台仪器、{len(visits)} 个场景；仅为新二维码建立关联')
 
     def start(self, operator, *, owner='browser'):
         if not operator.strip():
@@ -63,14 +74,10 @@ class LiveScanner:
             if owner == 'automation':
                 self.session['after_frame_id'] = camera.snapshot().get('decoded_frames', 0)
             self.last_seen = time.monotonic()
-            existing = self.active_binding()
-            if existing:
-                self.session.update(status='bound', binding=existing,
-                                    message='当前采集服务已有绑定，继续沿用；不会重复绑定')
-            else:
-                self.worker = threading.Thread(target=self._run, args=(self.session['session_id'],),
-                                               name='continuous-qr', daemon=True)
-                self.worker.start()
+            self.refresh_bindings()
+            self.worker = threading.Thread(target=self._run, args=(self.session['session_id'],),
+                                           name='continuous-qr', daemon=True)
+            self.worker.start()
             return copy.deepcopy(self.session)
 
     def read(self, session_id, *, cancel=False):
@@ -97,10 +104,6 @@ class LiveScanner:
         while not self.shutdown.wait(.015):
             with self.lock:
                 if not self._running(session_id):
-                    return
-                existing = self.active_binding()
-                if existing:
-                    self.session.update(status='bound', binding=existing, message='已有有效绑定，继续沿用')
                     return
             try:
                 frame, metadata = self.camera().frame()
@@ -142,14 +145,15 @@ class LiveScanner:
                         if matches['unknown']:
                             self.session['message'] = '读到了未登记二维码，请对准场景或仪器码'
                         continue
-                    visits = self.core['scene_visits']()
-                    visit = next((v for v in visits if v['camera_id'] == self.camera().target), None)
-                    if (not matches['matches'] and not matches['unknown'] and len(matches['scene_matches']) == 1
-                            and visit and visit['scene']['id'] == matches['scene_matches'][0]['id']):
-                        self.session.update(scene_visit=visit, message=f'已进入 {visit["scene"]["name"]}，请对准仪器二维码')
+                    existing_ids = {b['instrument']['id'] for b in self.active_bindings()}
+                    visits = [v for v in self.core['scene_visits']() if v['camera_id'] == self.camera().target]
+                    scene_ids = {v['scene']['id'] for v in visits}
+                    new_instruments = [m for m in matches['matches'] if m['id'] not in existing_ids]
+                    new_scenes = [m for m in matches['scene_matches'] if m['id'] not in scene_ids]
+                    if not new_instruments and not new_scenes:
+                        self.refresh_bindings()
                         continue
-                    key = (tuple(m['id'] for m in matches['matches']),
-                           tuple(s['id'] for s in matches['scene_matches']), visit['visit_id'] if visit else None)
+                    key = (tuple(m['id'] for m in new_instruments), tuple(m['id'] for m in new_scenes))
                     if key == last_match:
                         continue
                     last_match = key
@@ -165,24 +169,25 @@ class LiveScanner:
         result = self.core['save_camera_scan'](frame, metadata, decoded=decoded,
                                              operator=self.session['operator'], scan_session_id=self.session['session_id'])
         self.session['scan'] = result
-        instruments, scenes = matches['matches'], matches['scene_matches']
-        if len(instruments) > 1 or len(scenes) > 1 or matches['unknown']:
-            self.session.update(status='needs_selection', message='画面有多个候选或未登记码，已暂停；请核对并手动选择')
-            return
-        if instruments and scenes and instruments[0]['scene'] != scenes[0]['name']:
-            self.session.update(status='needs_selection', message='场景码与仪器所属场景不一致，已暂停，请核对')
-            return
-        try:
-            if scenes:
-                visit = self.core['enter_scene'](self.core['SceneEntry'](scan_id=result['scan_id'], scene_id=scenes[0]['id'], operator=self.session['operator']), automatic=True)
-                self.session.update(scene_visit=visit, message=f'已进入 {visit["scene"]["name"]}，请对准仪器二维码')
-            if instruments:
-                binding = self.core['bind'](self.core['BindingRequest'](
-                    scan_id=result['scan_id'], instrument_id=instruments[0]['id'], operator=self.session['operator']), automatic=True)
-                self.session.update(status='bound', binding=binding,
-                                    message=f'已绑定 {binding["instrument"]["name"]}；采集服务运行期间持续有效，扫码已停止')
-        except HTTPException as exc:
-            self.session['message'] = str(exc.detail)
+        errors = []
+        # Every identity comes from this decoded frame; each relation is independent.
+        for scene in matches['scene_matches']:
+            try:
+                visit = self.core['enter_scene'](self.core['SceneEntry'](
+                    scan_id=result['scan_id'], scene_id=scene['id'], operator=self.session['operator']), automatic=True)
+                self.session['scene_visit'] = visit
+            except HTTPException as exc:
+                errors.append(str(exc.detail))
+        for instrument in matches['matches']:
+            try:
+                self.core['bind'](self.core['BindingRequest'](scan_id=result['scan_id'],
+                    instrument_id=instrument['id'], operator=self.session['operator']), automatic=True)
+            except HTTPException as exc:
+                errors.append(str(exc.detail))
+        self.refresh_bindings()
+        self.session.update(status='scanning', binding_errors=errors)
+        if errors:
+            self.session['message'] += ' · ' + '；'.join(dict.fromkeys(errors))
 
     def observe_service(self, observation):
         """Persist upstream session changes across page and local app restarts."""

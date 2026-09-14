@@ -16,6 +16,7 @@ def app_client(tmp_path, monkeypatch):
     monkeypatch.setenv('FIELD_DEMO_DATA', str(tmp_path))
     monkeypatch.setenv('FIELD_ALIYUN_FALLBACK_ENABLED', '0')
     monkeypatch.setenv('FIELD_SAVED_PHOTO_WATCH_ENABLED', '0')
+    monkeypatch.setenv('FIELD_VIDEO_OCR_ENABLED', '0')
     monkeypatch.setenv('FIELD_ARCHIVE_ENABLED', '0')
     monkeypatch.delenv('FIELD_ARCHIVE_ROOT', raising=False)
     monkeypatch.delenv('FIELD_ARCHIVE_MOUNT', raising=False)
@@ -85,7 +86,7 @@ def test_real_qr_decode_registration_binding_and_evidence(app_client):
     register(client, second_id)
     assert client.post('/api/bindings', json=body).json()['binding_id'] == binding['binding_id']
     request2 = body | {'scan_id': second['scan_id'], 'instrument_id': second_id}
-    assert client.post('/api/bindings', json=request2).status_code == 409
+    assert client.post('/api/bindings', json=request2).status_code == 200
     client.post('/api/bindings/' + binding['binding_id'] + '/end')
     binding2 = client.post('/api/bindings', json=request2).json()
     exported = client.get('/api/export').json()

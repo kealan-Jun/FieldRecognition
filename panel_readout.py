@@ -2,6 +2,7 @@
 import hashlib
 import json
 import time
+from concurrent.futures import Future
 
 import cv2
 
@@ -47,9 +48,15 @@ def run(core, document, *, clock=time.monotonic, pause=time.sleep):
         document.update(crop_image_url=f"/api/images/{document['job_id']}",
                         crop_image_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
                         accuracy='not_human_verified', panel_selection='user_selected_crop_or_full_photo')
-        future = core['ocr_pool'].submit(core['predict_panel'], panel, x, y)
+        precomputed = document.pop('precomputed_local', None)
+        if precomputed is not None:
+            future = Future()
+            future.set_result(precomputed)
+        else:
+            future = core['ocr_pool'].submit(core['predict_panel'], panel, x, y)
         configured = vision.public_config()['available']
-        deadline = started + (vision.no_digits_seconds() if configured else 90)
+        video_elapsed = (document.get('video_observation') or {}).get('no_digits_elapsed_seconds', 0)
+        deadline = started + (max(0, vision.no_digits_seconds() - video_elapsed) if configured else 90)
         # A successful numeric result returns immediately. A miss cannot trigger a paid
         # request before the deadline, and slow local inference cannot block the watchdog.
         while True:
@@ -84,7 +91,7 @@ def run(core, document, *, clock=time.monotonic, pause=time.sleep):
                         return
                     if core['reserve_fallback'](fallback_scope):
                         document.update(phase='extended_reading', fallback={'status': 'running', 'trigger': reason,
-                                        'trigger_elapsed_seconds': round(clock() - started, 3), 'attempted_at': core['now']()})
+                                        'trigger_elapsed_seconds': round(clock() - started + video_elapsed, 3), 'attempted_at': core['now']()})
                         save(core, document)
                         cloud = vision.read_panel(panel)
                         document['fallback'].update(cloud)
@@ -106,7 +113,7 @@ def run(core, document, *, clock=time.monotonic, pause=time.sleep):
         local_has_digits = local and vision.fallback_reason(local['lines'], local.get('error')) is None
         if cloud and cloud.get('answer', {}).get('readings') and not local_has_digits:
             document.update(status='completed', model=cloud['model'], device='cloud', actual_model_invocation=True,
-                            lines=[{'text': r['text'], 'numeric_candidates': [r['value']],
+                            lines=[{'text': r['text'], 'value': r['value'], 'unit': r.get('unit'), 'label': r.get('label'), 'numeric_candidates': [r['value']],
                                     'confidence': None, 'polygon': None} for r in cloud['answer']['readings']])
             document.pop('error', None)
         document['outcome'] = ('numeric_readout' if local_has_digits or
@@ -114,6 +121,8 @@ def run(core, document, *, clock=time.monotonic, pause=time.sleep):
     except Exception as exc:
         document.update(status='failed', error=type(exc).__name__, lines=[])
     finally:
+        from reading_results import build_readings
+        document['readings'] = build_readings(document)
         document.update(finished_at=core['now'](), wall_seconds=round(clock() - started, 3))
         if future and not document.get('local_ocr'):
             document['local_ocr'] = result_if_ready() or {'status': 'running', 'lines': []}

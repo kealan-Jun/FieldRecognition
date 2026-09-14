@@ -77,13 +77,15 @@ async def lifespan(application):
         receiver_camera.start()
     with db() as conn:
         has_binding = conn.execute('SELECT 1 FROM bindings WHERE ended IS NULL LIMIT 1').fetchone()
-    if has_binding or saved_photo_watcher.enabled():
+    if has_binding or saved_photo_watcher.enabled() or video_ocr.enabled():
         queue_ocr_warmup()
     saved_photo_watcher.start()
     archive_store.start()
     automatic_runner.start()
+    video_ocr.start()
     yield
     stopping.set()
+    video_ocr.close()
     automatic_runner.close()
     saved_photo_watcher.close()
     archive_store.close()
@@ -226,6 +228,7 @@ class OcrRequest(BaseModel):
     binding_id: uuid.UUID | None = None
     capture_id: uuid.UUID
     crop: list[int] | None = None
+    auto_associate: bool = False
 
 
 @app.get('/')
@@ -250,6 +253,7 @@ def state():
             'archive': archive_store.snapshot(),
             'vision_fallback': aliyun_vision.public_config(), 'photo_watch': saved_photo_watcher.snapshot(),
             'automation': automatic_runner.snapshot(),
+            'video_ocr': video_ocr.snapshot(),
             'camera': receiver_camera.snapshot() if receiver_camera else {'configured': bool(os.environ.get('FIELD_CAMERA_SNAPSHOT_URL')),
                        'id': os.environ.get('FIELD_CAMERA_ID', 'UnconfiguredNeckCamera'),
                        'mode': 'http_snapshot'}, 'product': 'FieldRecognition'}
@@ -333,12 +337,17 @@ def save_binding(body: BindingRequest, *, automatic: bool = False):
         if not asset['scene']:
             raise HTTPException(409, '先在仪器登记中填写所属场景')
         visit = optional_scene(conn, scan['camera_id'], asset['scene'])
-        previous = conn.execute('SELECT document FROM bindings WHERE camera=? AND ended IS NULL', (scan['camera_id'],)).fetchone()
-        if previous:
-            existing = json.loads(previous['document'])
-            if existing['instrument']['id'] == str(body.instrument_id) and existing['operator'] == body.operator.strip():
+        for row in conn.execute('SELECT document FROM scene_visits WHERE camera=? AND ended IS NULL', (scan['camera_id'],)):
+            operator = json.loads(row['document']).get('operator')
+            if operator and operator != body.operator.strip():
+                raise HTTPException(409, '请先结束该相机的已有场景关联，再更换实验员')
+        previous = conn.execute('SELECT document FROM bindings WHERE camera=? AND ended IS NULL', (scan['camera_id'],)).fetchall()
+        for row in previous:
+            existing = json.loads(row['document'])
+            if existing['operator'] != body.operator.strip():
+                raise HTTPException(409, '请先结束该相机的已有绑定，再更换实验员')
+            if existing['instrument']['id'] == str(body.instrument_id):
                 return existing
-            raise HTTPException(409, '这台相机已有有效绑定，本次采集服务会话继续沿用；服务重启或主动结束后才能重新绑定')
         timestamp = now()
         result = {'binding_id': str(uuid.uuid4()), 'operator': body.operator.strip(),
                   'camera_id': scan['camera_id'], 'instrument': asset, 'started_at': timestamp,
@@ -374,6 +383,27 @@ def finish_binding(binding_id):
             result['ended_at'] = now()
             conn.execute('UPDATE bindings SET ended=?,document=? WHERE id=?', (result['ended_at'], json.dumps(result), str(binding_id)))
     return result
+
+
+class EndRelations(BaseModel):
+    camera_id: str = Field(min_length=1, max_length=100)
+
+
+@app.post('/api/camera/relations/end')
+def end_relations(body: EndRelations):
+    with live_scanner.lock:
+        if receiver_camera and body.camera_id == receiver_camera.target:
+            automatic_runner.pause('binding_ended')
+        timestamp = now()
+        ended = []
+        with db() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            for table in ('bindings', 'scene_visits'):
+                for row in conn.execute(f'SELECT * FROM {table} WHERE camera=? AND ended IS NULL', (body.camera_id,)).fetchall():
+                    document = json.loads(row['document']) | {'ended_at': timestamp, 'end_reason': 'operator_ended_session'}
+                    conn.execute(f'UPDATE {table} SET ended=?,document=? WHERE id=?', (timestamp, json.dumps(document), row['id']))
+                    ended.append(row['id'])
+        return {'camera_id': body.camera_id, 'ended_ids': ended, 'ended_at': timestamp}
 
 
 def create_ocr_model():
@@ -460,14 +490,13 @@ def current_readout_binding(document):
     if stopping.is_set():
         return False
     if (document.get('job_id') and document.get('capture_id')
-            and document.get('source') == 'agent_saved_photo'
-            and document.get('request_trigger') == 'voice_photo_directory'):
+            and document.get('request_trigger') in {'voice_photo_directory', 'video_stream'}):
         # The persisted photograph and its binding-at-capture snapshot survive a
         # later device disconnect. Do not discard a requested historical reading.
         return True
     if document.get('binding_id') is None:
         return bool(document.get('job_id') and document.get('capture_id')
-                    and document.get('instrument_association') == 'unbound_photo')
+                    and document.get('instrument_association') in {'unbound_photo', 'multiple_candidates', 'same_image_qr_unbound'})
     with db() as conn:
         row = conn.execute('SELECT * FROM bindings WHERE id=?', (document['binding_id'],)).fetchone()
         if not row or row['ended']:
@@ -476,13 +505,11 @@ def current_readout_binding(document):
         asset = get_instrument(binding['instrument']['id'])
         if not asset or asset['scene'] != binding['instrument']['scene']:
             return False
-        try:
-            visit = optional_scene(conn, binding['camera_id'], binding['instrument']['scene'])
-        except HTTPException:
+        visit_id = binding.get('scene_visit_id')
+        if visit_id and not conn.execute('SELECT 1 FROM scene_visits WHERE id=? AND ended IS NULL', (visit_id,)).fetchone():
             return False
         service = conn.execute('SELECT document FROM camera_service_state WHERE camera=?', (binding['camera_id'],)).fetchone()
-        return ((visit['visit_id'] if visit else None) == binding.get('scene_visit_id')
-                and (not service or json.loads(service['document'])['online']))
+        return not service or json.loads(service['document'])['online']
 
 
 def reserve_fallback(binding_id):
@@ -502,7 +529,7 @@ def submit_ocr(body: OcrRequest):
         return enqueue_ocr(body)
 
 
-def enqueue_ocr(body, *, trigger='explicit_request'):
+def enqueue_ocr(body, *, trigger='explicit_request', precomputed_local=None):
     with db() as conn:
         binding = conn.execute('SELECT * FROM bindings WHERE id=?', (str(body.binding_id),)).fetchone()
         capture = conn.execute('SELECT document FROM scans WHERE id=?', (str(body.capture_id),)).fetchone()
@@ -518,15 +545,19 @@ def enqueue_ocr(body, *, trigger='explicit_request'):
             current_asset = get_instrument(linked['instrument']['id'])
             if not current_asset or current_asset['scene'] != linked['instrument']['scene']:
                 raise HTTPException(409, '仪器所属场景已更改，请重新绑定')
-            visit = optional_scene(conn, binding['camera'], linked['instrument']['scene'])
-            if linked.get('scene_visit_id') != (visit['visit_id'] if visit else None):
+            visit_id = linked.get('scene_visit_id')
+            if visit_id and not conn.execute('SELECT 1 FROM scene_visits WHERE id=? AND ended IS NULL', (visit_id,)).fetchone():
                 raise HTTPException(409, '场景已变化，请重新绑定仪器')
             if capture['received_at'] < linked['started_at'] and capture['scan_id'] != linked['scan_id']:
                 raise HTTPException(409, '图片早于本次绑定，请重新拍照')
         seen = {item['id'] for item in capture['matches']}
-        if linked and seen and seen != {linked['instrument']['id']}:
+        if linked and seen and (linked['instrument']['id'] not in seen or (len(seen) > 1 and body.crop is None)):
             raise HTTPException(409, '图片仪器二维码与当前绑定冲突，请重新选择仪器')
-        binding_id = str(body.binding_id) if body.binding_id else None
+        from readout_context import at_capture
+        context = at_capture(globals(), conn, capture, linked=linked,
+                             automatic=body.auto_associate or trigger in {'voice_photo_directory', 'video_stream'})
+        linked = context.pop('resolved_binding')
+        binding_id = linked['binding_id'] if linked else None
         crop = body.crop if body.crop is not None else [0, 0, capture['width'], capture['height']]
         if len(crop) != 4 or min(crop[:2]) < 0 or min(crop[2:]) < 16 or crop[0]+crop[2] > capture['width'] or crop[1]+crop[3] > capture['height']:
             raise HTTPException(422, '面板选框超出图片，或区域太小')
@@ -551,6 +582,12 @@ def enqueue_ocr(body, *, trigger='explicit_request'):
                     'source': capture['source'], 'frame_metadata': capture.get('frame_metadata'),
                     'timing': dict(capture.get('photo_observation') or {}),
                     'external_photo': capture.get('external_photo'), 'request_trigger': trigger}
+        document['video_observation'] = capture.get('video_observation')
+        document.update(context)
+        if not linked and context['instrument_candidates']:
+            document['instrument_association'] = 'multiple_candidates' if len(context['instrument_candidates']) > 1 else 'same_image_qr_unbound'
+        if precomputed_local is not None:
+            document['precomputed_local'] = precomputed_local
         update_timing(document)
         conn.execute('INSERT INTO jobs VALUES(?,?,?)', (document['job_id'], 'queued', json.dumps(document)))
     readout_pool.submit(run_ocr, dict(document))
@@ -583,13 +620,24 @@ def readouts(limit: int = 20, before: int | None = None):
         return readout_page(conn, camera, limit=limit, before=before)
 
 
+@app.get('/api/workbenches')
+def workbenches(limit: int = 200):
+    if not 1 <= limit <= 500:
+        raise HTTPException(422, '记录范围需为 1–500')
+    from workbench_records import summarize
+    camera = receiver_camera.target if receiver_camera else os.environ.get('FIELD_CAMERA_ID')
+    with db() as conn:
+        return summarize(conn, camera, limit=limit)
+
+
 @app.get('/api/archive/files/{relative:path}')
 def archive_file(relative: str):
     from archive_integrity import relative_file
     if not archive_store.enabled():
         raise HTTPException(404, '未启用 NAS 留存')
     if (relative not in {'Readme.html', 'Index.json'}
-            and not re.fullmatch(r'(?:Receipts|Objects|Integrity)/[A-Za-z0-9_./-]+\.(?:json|png|jpg|jpeg)', relative)):
+            and not re.fullmatch(r'(?:Receipts|Objects|Integrity)/[A-Za-z0-9_./-]+\.(?:json|png|jpg|jpeg|webp|bmp|tiff)', relative)
+            and not re.fullmatch(r'Browse/[A-Za-z0-9_./-]+\.(?:html|json)', relative)):
         raise HTTPException(404, '归档文件不存在')
     try:
         path = relative_file(archive_store._root(create=False), relative)
@@ -615,6 +663,9 @@ saved_photo_watcher = SavedPhotoWatcher(globals())
 
 from automation import install as install_automation
 automatic_runner = install_automation(globals())
+
+from video_ocr import install as install_video_ocr
+video_ocr = install_video_ocr(globals())
 
 from archive_store import ArchiveStore
 archive_store = ArchiveStore(globals())

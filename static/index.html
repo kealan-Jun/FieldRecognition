@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>现场识别 · 设备绑定与面板读数</title>
-<link rel="icon" href="/static/BrandLogo.png"><link rel="stylesheet" href="/static/style.css?v=d7f449d0583f">
+<link rel="icon" href="/static/BrandLogo.png"><link rel="stylesheet" href="/static/style.css?v=22a8146a128b">
 </head>
 <body>
 <aside>
@@ -31,7 +31,7 @@
     <section class="card capture-card">
       <div class="card-title"><h2>现场画面</h2><span class="small" id="sourceLabel">等待相机画面</span></div>
       <div class="capture-box" id="captureBox"><div id="empty"><div class="viewfinder">⌗</div><h3>让仪器二维码进入画面</h3><p>登记实验员后，自动扫码绑定</p></div><canvas id="imageCanvas" hidden aria-label="图片预览；拖动框选面板"></canvas><video id="webcam" autoplay playsinline hidden></video><img id="neckPreview" hidden alt="挂脖相机实时视频"><span id="liveBadge" class="live-badge" hidden>实时视频</span></div>
-      <p id="liveStatus" class="live-status" role="status" aria-live="polite">唯一仪器码成功解码即自动绑定，无需手动确认。</p>
+      <p id="liveStatus" class="live-status" role="status" aria-live="polite">场景和仪器可同时或独立扫码；同一会话内不会重复绑定。</p>
       <div class="capture-actions"><button id="neckLive" class="secondary">打开实时视频</button><label class="button secondary">上传照片<input id="upload" type="file" accept="image/jpeg,image/png,image/webp" hidden></label><button id="stopScan" class="secondary" hidden>停止扫码</button></div>
       <div class="caption" id="cropHint">对 Agent 说“拍照”，照片保存后自动读数。</div><button id="resetCrop" class="quiet small" hidden>取消选框，使用整张照片</button>
       <details class="capture-tools"><summary>拍照与扫码工具</summary><div class="capture-actions"><button id="continuousScan" class="secondary">连续扫码绑定</button><button id="neckCapture" class="secondary">拍摄单张照片</button><button id="webcamOpen" class="quiet">本机摄像头</button><button id="shutter" class="secondary" hidden>拍摄</button></div><div class="samples"><span>二维码样张</span><button data-sample="Scene01">场景 01 ↗</button><button data-sample="A">仪器 A ↗</button><button data-sample="B">仪器 B ↗</button><small>样张仅供扫码验证。</small></div></details>
@@ -41,13 +41,16 @@
         <div class="card-title"><h2>当前绑定</h2><span class="pill muted" id="scanBadge">等待扫码</span></div>
         <div class="binding" id="bindingInfo">等待自动绑定</div>
         <div id="sceneInfo" class="caption"></div><button id="enterScene" class="secondary" hidden disabled>确认进入场景</button><div id="sceneResults"></div><div id="scanResults" class="empty-text">仪器码入镜后自动识别。</div>
-        <button id="bind" class="primary full" hidden disabled>绑定所选仪器</button><button class="quiet" id="endBinding" hidden>结束本次绑定</button>
+        <button id="bind" class="primary full" hidden disabled>绑定所选仪器</button><button class="quiet" id="endBinding" hidden>结束本轮全部关联</button>
         <details class="binding-evidence"><summary>最近二维码命中帧</summary><figure id="qrEvidence" class="qr-evidence" hidden><a id="qrEvidenceLink" class="qr-evidence-media" target="_blank" rel="noopener"><img id="qrEvidenceImage" alt="二维码成功解码时保存的原始画面"><svg id="qrEvidenceOverlay" aria-hidden="true"></svg></a><figcaption><strong id="qrEvidenceTitle">二维码命中帧</strong><span id="qrEvidenceTime"></span><span>点击图片查看原始画面与解码位置</span></figcaption></figure></details>
         <p class="caption binding-note">设备服务停启后重新扫码。</p>
       </section>
       <section class="card ocr-card">
-        <div class="card-title"><h2>最新照片与读数</h2></div><p class="small" id="ocrState">PaddleOCR</p><p id="photoWatchState" class="caption"></p>
+        <div class="card-title"><h2>实时读数与留存</h2><button id="videoOcrToggle" class="quiet">开启视频识别</button></div><p class="small" id="ocrState">PaddleOCR</p>
+        <div id="videoOcrStatus" class="caption" role="status"></div><div id="videoReadings" class="video-readings"></div>
+        <details class="readout-record" open><summary>最近保存的识别结果</summary><p id="photoWatchState" class="caption"></p>
         <div id="ocrResults" class="empty-text">语音照片保存后自动识别；未绑定时照常读数和留存。</div>
+        <a href="#history" class="caption">查看全部识别记录 ↗</a></details>
         <button id="ocr" class="secondary full" disabled>识别当前照片中的面板</button>
       </section>
     </div>
@@ -55,9 +58,9 @@
 </div>
 <section class="card page-view" id="registry" hidden><div class="card-title"><div><h2>仪器登记</h2><p class="caption">管理名称、型号与所属场景，查看对应二维码。</p></div></div><div id="instrumentForms" class="registry-grid"></div></section>
 <section class="card page-view" id="history" hidden><div class="card-title"><div><h2>操作记录</h2><p class="caption">查看照片、识别过程与 NAS 留存，数字候选需结合原图核对。</p></div><button id="export" class="secondary">导出状态 JSON</button></div>
-<div class="history-toolbar"><label>记录范围 <select id="historyMode"><option value="all">最近操作</option><option value="readouts">全部读数</option></select></label><span id="historyScope" class="caption"></span><div id="historyPager" hidden><button id="historyPrevious" class="secondary">上一页</button><button id="historyNext" class="secondary">下一页</button></div></div>
-<p id="archiveStatus" class="caption" role="status">正在检查 NAS 留存</p><p class="caption"><a href="/api/archive/files/Readme.html" target="_blank" rel="noopener">打开 NAS 全量索引 ↗</a> · <span id="integrityStatus">正在读取巡检状态</span></p><div id="historyRows" class="empty-text">正在读取记录</div></section>
+<div class="history-toolbar"><label>记录范围 <select id="historyMode"><option value="all">最近操作</option><option value="readouts">全部读数</option><option value="workbenches">按实验台与仪器分类</option></select></label><span id="historyScope" class="caption"></span><div id="historyPager" hidden><button id="historyPrevious" class="secondary">上一页</button><button id="historyNext" class="secondary">下一页</button></div></div>
+<p id="archiveStatus" class="caption" role="status">正在检查 NAS 留存</p><p class="caption"><a href="/api/archive/files/Readme.html" target="_blank" rel="noopener">打开 NAS 全量索引 ↗</a> · <a href="/api/archive/files/Browse/Readme.html" target="_blank" rel="noopener">文件夹查阅指南 ↗</a> · <span id="integrityStatus">正在读取巡检状态</span></p><div id="historyRows" class="empty-text">正在读取记录</div></section>
 <footer>FieldRecognition <span>现场设备识别与面板读数</span></footer>
 </main>
-<script src="/static/app.js?v=68d9e9abf456"></script>
+<script src="/static/app.js?v=71445de91eba"></script>
 </body></html>

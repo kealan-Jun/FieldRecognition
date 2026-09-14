@@ -68,3 +68,12 @@ def test_read_only_archive_routes_restrict_scope(archive, tmp_path):
     for relative in ['Objects/escape.json', 'Objects/%2e%2e/%2e%2e/private.json', '.env', 'unknown.json']:
         result = client.get('/api/archive/files/' + relative)
         assert result.status_code == 404 and 'private' not in result.text
+
+
+def test_workbench_filter_keeps_multi_candidate_records():
+    items = [{'entity': 'jobs', 'entity_id': 'one', 'is_latest': True, 'sequence': 1,
+              'occurred_at': '2026-09-14T01:00:00+00:00', 'local_date': '2026-09-14',
+              'instruments': [], 'workbench': None,
+              'workbenches': [{'name': '实验台甲'}, {'name': '实验台乙'}]}]
+    assert select(items, {'workbench': '实验台乙'}) == items
+    assert select(items, {'workbench': '实验台丙'}) == []

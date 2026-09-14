@@ -6,11 +6,13 @@
 @media(max-width:900px){main{padding:18px}.filters{grid-template-columns:repeat(2,minmax(120px,1fr))}header{align-items:flex-start;flex-direction:column}}[hidden]{display:none!important}
 </style></head><body><main>
 <header><div><p>FIELD RECOGNITION / ARCHIVE</p><h1>NAS 留存索引</h1><p id="overview"></p></div><div class="links"><a href="Index.json">完整索引 JSON ↗</a><button id="reload">刷新索引</button></div></header>
+<section class="card"><h2><a href="Browse/Readme.html">按文件夹查看绑定、仪器读数、语音照片与实验台记录 ↗</a></h2><p>绑定记录在 Browse/Bindings，仪器读数在 Browse/InstrumentReadings，语音照片读数在 Browse/VoicePhotos，实验台汇总在 Browse/WorkbenchReadings，照片入口在 Browse/Photos。每条记录均链接留存原图与完整回执。</p></section>
 <section class="card check" id="integrity"><div><h2>完整性巡检</h2><p id="checkSummary"></p><p id="checkSchedule"></p><details id="checkIssues" hidden><summary>异常文件（最多展示 50 项，完整列表见报告）</summary><ul id="issueList"></ul></details></div><a id="checkReport" hidden>查看巡检报告 ↗</a></section>
 <section class="card"><h2>查询历史留存</h2><p>默认显示每条记录的最新版本；切换“全部版本”可查看当时的人员、状态和识别过程。</p>
 <form id="filters" class="filters">
 <label>实验员<select id="operator"><option value="">全部实验员</option></select></label>
 <label>仪器（绑定或二维码解码关联）<select id="instrument"><option value="">全部仪器</option></select></label>
+<label>实验台<select id="workbench"><option value="">全部实验台</option></select></label>
 <label>事件起始日期 · 北京时间<input type="date" id="from"></label>
 <label>事件结束日期 · 北京时间<input type="date" id="to"></label>
 <label>相机<select id="camera"><option value="">全部相机</option></select></label>
