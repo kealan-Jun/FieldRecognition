@@ -17,7 +17,7 @@
 - `Readme.html`：可读记录页、照片预览，以及原始文件、面板图和完整回执的相对链接。
 - `Record.json`：可供程序读取的分类记录；包含 `event_at`、`camera_id`、`operator`、`binding_id` / `binding_ids`、`capture_id`、`job_id`、`readings`、`photos`、`receipt_versions` 等。语音照片额外保存 `source_ref`、`external_capture_id`、`captured_at`、`source_written_at`。
 
-仪器 A 的编号为 `e9434a0a-3319-414a-b988-4cc6884edce4`，仪器 B 为 `eae17924-9fa7-4445-ac45-3987f5687be9`；二者登记在湿实验实验台。分类以实际记录中的身份为准，不根据显示屏文字猜测。旧系统记录中的错误或未确认归属不会被自动改写。
+仪器 A 的编号为 `e9434a0a-3319-414a-b988-4cc6884edce4`，仪器 B 为 `eae17924-9fa7-4445-ac45-3987f5687be9`；二者登记在湿实验实验台。分类以实际记录中的身份为准，不根据显示屏文字猜测。新照片解出唯一已登记的仪器码时，按该仪器归类，不以存在会话绑定为前提；登记关系不会替代多面板的空间定位。旧系统记录中的错误或未确认归属不会被自动改写。
 
 ## 照片实际保存在哪里
 

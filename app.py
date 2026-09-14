@@ -555,7 +555,7 @@ def enqueue_ocr(body, *, trigger='explicit_request', precomputed_local=None):
             raise HTTPException(409, '图片仪器二维码与当前绑定冲突，请重新选择仪器')
         from readout_context import at_capture
         context = at_capture(globals(), conn, capture, linked=linked,
-                             automatic=body.auto_associate or trigger in {'voice_photo_directory', 'video_stream'})
+                             automatic=body.auto_associate or bool(capture['matches']) or trigger in {'voice_photo_directory', 'video_stream'})
         linked = context.pop('resolved_binding')
         binding_id = linked['binding_id'] if linked else None
         crop = body.crop if body.crop is not None else [0, 0, capture['width'], capture['height']]
@@ -586,6 +586,14 @@ def enqueue_ocr(body, *, trigger='explicit_request', precomputed_local=None):
         document.update(context)
         if not linked and context['instrument_candidates']:
             document['instrument_association'] = 'multiple_candidates' if len(context['instrument_candidates']) > 1 else 'same_image_qr_unbound'
+            if len(context['instrument_candidates']) == 1:
+                # A decoded registered QR establishes identity without fabricating
+                # a new session binding for this photograph.
+                document['instrument'] = context['instrument_candidates'][0]['instrument']
+                document['scene'] = context['workbench']
+                document['scene_basis'] = (context['workbench'] or {}).get('basis', 'instrument_registration')
+        document['instrument_identity_basis'] = ('decoded_photo_qr' if seen and document['instrument'] else
+                                                'session_binding' if linked else 'multiple_candidates' if context['instrument_candidates'] else 'not_observed')
         if precomputed_local is not None:
             document['precomputed_local'] = precomputed_local
         update_timing(document)

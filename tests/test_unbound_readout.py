@@ -64,7 +64,9 @@ def test_optional_conflicting_binding_does_not_prevent_photo_readout(app_client,
     bind(app, client)
     other = photo(app, raw=(app.BASE/'static/labels/InstrumentB.png').read_bytes())
     job = app.read_saved_panel(app.SavedPhotoRequest(photo=other), trigger='voice_photo_directory')
-    assert job['binding_id'] is None and job['instrument'] is None
+    assert job['binding_id'] is None
+    assert job['instrument']['id'] == 'eae17924-9fa7-4445-ac45-3987f5687be9'
+    assert job['instrument_identity_basis'] == 'decoded_photo_qr'
     app.run_ocr(job)
     assert app.get_job(job['job_id'])['status'] == 'completed'
 

@@ -21,7 +21,10 @@ def build_index(rows, instance, timestamp, integrity):
         target = '、'.join(i['name'] for i in instruments) or (doc.get('scene') or {}).get('name') or '、'.join(
             i['name'] for i in doc.get('scene_matches', []))
         if row['entity'] == 'jobs' and not doc.get('binding_id'):
-            target = target + ' · 归属待确认' if instruments else '未绑定仪器 · 照片读数'
+            if not instruments:
+                target = '未识别仪器 · 照片读数'
+            elif not doc.get('instrument') and len(instruments) > 1:
+                target += ' · 归属待确认'
         image_hash = doc.get('image_sha256')
         image = f'Objects/{image_hash[:2]}/{image_hash}.png' if re.fullmatch('[a-f0-9]{64}', image_hash or '') else None
         items.append({'sequence': row['seq'], 'entity': row['entity'], 'entity_id': row['entity_id'],
