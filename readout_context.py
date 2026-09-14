@@ -35,7 +35,7 @@ def at_capture(core, conn, capture, *, linked=None, automatic=False):
         workbenches.append({'id': scene['id'] if scene else None, 'name': name,
             'basis': 'decoded_scene_qr' if visit else 'instrument_registration',
             'scene_visit_id': visit['visit_id'] if visit else None})
-    return {'binding_snapshots': selected, 'binding_ids': [b['binding_id'] for b in selected],
+    return {'all_binding_snapshots': snapshots, 'binding_snapshots': selected, 'binding_ids': [b['binding_id'] for b in selected],
             'instrument_candidates': candidates, 'scene_snapshots': visits,
             'qr_matches': hits, 'qr_scene_matches': capture.get('scene_matches', []),
             'workbenches': workbenches, 'workbench': workbenches[0] if len(workbenches) == 1 else None,

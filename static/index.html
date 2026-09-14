@@ -43,13 +43,13 @@
         <div id="sceneInfo" class="caption"></div><button id="enterScene" class="secondary" hidden disabled>确认进入场景</button><div id="sceneResults"></div><div id="scanResults" class="empty-text">仪器码入镜后自动识别。</div>
         <button id="bind" class="primary full" hidden disabled>绑定所选仪器</button><button class="quiet" id="endBinding" hidden>结束本轮全部关联</button>
         <details class="binding-evidence"><summary>最近二维码命中帧</summary><figure id="qrEvidence" class="qr-evidence" hidden><a id="qrEvidenceLink" class="qr-evidence-media" target="_blank" rel="noopener"><img id="qrEvidenceImage" alt="二维码成功解码时保存的原始画面"><svg id="qrEvidenceOverlay" aria-hidden="true"></svg></a><figcaption><strong id="qrEvidenceTitle">二维码命中帧</strong><span id="qrEvidenceTime"></span><span>点击图片查看原始画面与解码位置</span></figcaption></figure></details>
-        <p class="caption binding-note">设备服务停启后重新扫码。</p>
+        <p class="caption binding-note">短暂断流保留绑定；设备采集会话变化后重新扫码。</p>
       </section>
       <section class="card ocr-card">
         <div class="card-title"><h2>实时读数与留存</h2><button id="videoOcrToggle" class="quiet">开启视频识别</button></div><p class="small" id="ocrState">PaddleOCR</p>
         <div id="videoOcrStatus" class="caption" role="status"></div><div id="videoReadings" class="video-readings"></div>
         <details class="readout-record" open><summary>最近保存的识别结果</summary><p id="photoWatchState" class="caption"></p>
-        <div id="ocrResults" class="empty-text">语音照片保存后自动识别；未绑定时照常读数和留存。</div>
+        <div id="ocrResults" class="empty-text">扫码绑定后，自动定位对应设备面板并读取数字。</div>
         <a href="#history" class="caption">查看全部识别记录 ↗</a></details>
         <button id="ocr" class="secondary full" disabled>识别当前照片中的面板</button>
       </section>

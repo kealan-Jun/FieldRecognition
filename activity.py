@@ -19,7 +19,7 @@ def readout_event(conn, row):
             'submitted_at': doc['submitted_at'], 'captured_at': (doc.get('external_photo') or {}).get('captured_at'),
             'camera_id': doc['camera_id'], 'operator': doc.get('operator'),
             'target': (doc.get('instrument') or {}).get('name') or ('、'.join(
-                c['instrument']['name'] for c in doc.get('instrument_candidates', [])) + ' · 归属待确认'
+                c['instrument']['name'] for c in doc.get('instrument_candidates', [])) + (' · 面板分别定位' if doc.get('association_status') == 'localized_panels' else ' · 归属待确认')
                 if doc.get('instrument_candidates') else '未绑定仪器 · 照片读数'),
             'status': label, 'detail': '、'.join(line['text'] for line in lines),
             'image_url': doc.get('image_url') or doc.get('crop_image_url'),
@@ -89,6 +89,11 @@ def recent_activity(conn, camera_id=None, limit=50):
     for row in rows('bindings', 'started_at'):
         doc = json.loads(row['document'])
         add(doc, 'binding_started', doc['started_at'], doc['instrument']['name'], '绑定成功', doc['image_url'])
+        for correction in doc.get('lifecycle_corrections', []):
+            add(doc, 'binding_end_corrected', correction['previous_ended_at'], doc['instrument']['name'],
+                '原结束判定已撤销', doc['image_url'], correction['detail'])
+            add(doc, 'binding_restored', correction['corrected_at'], doc['instrument']['name'],
+                '原绑定已恢复', doc['image_url'], correction['detail'])
     for row in rows('bindings', 'ended_at'):
         doc = json.loads(row['document'])
         if doc.get('ended_at'):
@@ -97,6 +102,11 @@ def recent_activity(conn, camera_id=None, limit=50):
     for row in rows('scene_visits', 'started_at'):
         doc = json.loads(row['document'])
         add(doc, 'scene_entered', doc['started_at'], doc['scene']['name'], '已进入场景', doc['image_url'])
+        for correction in doc.get('lifecycle_corrections', []):
+            add(doc, 'scene_end_corrected', correction['previous_ended_at'], doc['scene']['name'],
+                '原结束判定已撤销', doc['image_url'], correction['detail'])
+            add(doc, 'scene_restored', correction['corrected_at'], doc['scene']['name'],
+                '原场景关联已恢复', doc['image_url'], correction['detail'])
     for row in rows('scene_visits', 'ended_at'):
         doc = json.loads(row['document'])
         if doc.get('ended_at'):

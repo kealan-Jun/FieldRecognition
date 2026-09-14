@@ -3,10 +3,12 @@ import hashlib
 import json
 import time
 from concurrent.futures import Future
+from functools import partial
 
 import cv2
 
 import aliyun_vision as vision
+from panel_regions import needs_fallback, finish as finish_regions
 from readout_timing import update_timing
 
 
@@ -53,7 +55,8 @@ def run(core, document, *, clock=time.monotonic, pause=time.sleep):
             future = Future()
             future.set_result(precomputed)
         else:
-            future = core['ocr_pool'].submit(core['predict_panel'], panel, x, y)
+            predictor = partial(core['predict_readout'], binding_snapshots=document.get('all_binding_snapshots', document.get('binding_snapshots', []))) if 'predict_readout' in core else core['predict_panel']
+            future = core['ocr_pool'].submit(predictor, panel, x, y)
         configured = vision.public_config()['available']
         video_elapsed = (document.get('video_observation') or {}).get('no_digits_elapsed_seconds', 0)
         deadline = started + (max(0, vision.no_digits_seconds() - video_elapsed) if configured else 90)
@@ -64,7 +67,9 @@ def run(core, document, *, clock=time.monotonic, pause=time.sleep):
                 cancelled()
                 return
             local = result_if_ready()
-            if local and (not configured or vision.fallback_reason(local['lines'], local.get('error')) is None):
+            if local and local.get('recognition_skipped'):
+                break
+            if local and (not configured or needs_fallback(local) is None):
                 break
             remaining = deadline - clock()
             if remaining <= 0:
@@ -74,6 +79,20 @@ def run(core, document, *, clock=time.monotonic, pause=time.sleep):
                 save(core, document)
             pause(min(.1, remaining))
         local = result_if_ready()
+        if local and local.get('recognition_skipped'):
+            document.update(local)
+            document.update(local_ocr=local, outcome='skipped_unbound_or_unlocalized_panel', phase='completed')
+            return
+        if local and local.get('panel_regions'):
+            finish_regions(core, document, local, image, valid=valid, clock=clock, started=started)
+            return
+        if core.get('panel_detector') and core['panel_detector'].enabled():
+            # Missing/slow localization must never fall back to reading the entire
+            # frame: that could include an unbound laptop or another instrument.
+            document.update(status='failed', error='bound_panel_localization_unavailable', lines=[],
+                fallback={'status':'skipped', 'reason':'no_verified_bound_panel'},
+                panel_detection={'status':'unavailable'}, panel_regions=[])
+            return
         reason = vision.fallback_reason(local['lines'], local.get('error')) if local else 'local_ocr_timeout'
         if reason and configured:
             if not valid():
@@ -121,6 +140,10 @@ def run(core, document, *, clock=time.monotonic, pause=time.sleep):
     except Exception as exc:
         document.update(status='failed', error=type(exc).__name__, lines=[])
     finally:
+        if document.get('panel_detection') and not document.get('panel_regions'):
+            document['capture_association'] = {k:document.get(k) for k in ('instrument','binding_id','instrument_candidates','workbench')}
+            document.update(instrument=None, binding_id=None, instrument_candidates=[], binding_ids=[],
+                instrument_association='unbound_photo', instrument_identity_basis='not_localized', association_status='unlocalized')
         from reading_results import build_readings
         document['readings'] = build_readings(document)
         document.update(finished_at=core['now'](), wall_seconds=round(clock() - started, 3))

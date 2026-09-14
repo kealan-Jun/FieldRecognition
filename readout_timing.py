@@ -16,6 +16,10 @@ def update_timing(document):
         if document.get(source):
             timing[target] = document[source]
     local = document.get('local_ocr') or {}
+    detection = local.get('panel_detection') or document.get('panel_detection') or {}
+    for key in ('started_at', 'finished_at'):
+        if detection.get(key):
+            timing['panel_detection_' + key] = detection[key]
     video = document.get('video_observation') or {}
     if video.get('observed_at'):
         timing['frame_observed_at'] = video['observed_at']
@@ -28,6 +32,7 @@ def update_timing(document):
     if fallback.get('finished_at'):
         timing['vision_finished_at'] = fallback['finished_at']
     pairs = {
+        'panel_detection_ms': ('panel_detection_started_at', 'panel_detection_finished_at'),
         'write_to_detect_ms': ('source_written_at', 'first_observed_at'),
         'file_stability_ms': ('first_observed_at', 'stable_at'),
         'ingest_wait_ms': ('stable_at', 'read_started_at'),

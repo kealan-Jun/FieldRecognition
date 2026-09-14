@@ -98,7 +98,7 @@ def test_background_without_reading_or_instrument_never_reaches_storage(video):
 def test_one_inflight_frame_and_saved_photo_priority(video, monkeypatch):
     app, _, camera, reader, frame, tick = video
     calls, future = [], Future()
-    monkeypatch.setattr(app.ocr_pool, 'submit', lambda *args: calls.append(args) or future)
+    monkeypatch.setattr(app.ocr_pool, 'submit', lambda *args, **kwargs: calls.append(args) or future)
     camera.publish(frame)
     reader.step()
     assert len(calls) == 1
@@ -116,7 +116,7 @@ def test_one_inflight_frame_and_saved_photo_priority(video, monkeypatch):
 def test_stale_inference_and_device_epoch_are_not_saved(video, monkeypatch):
     app, _, camera, reader, frame, tick = video
     future = Future()
-    monkeypatch.setattr(app.ocr_pool, 'submit', lambda *args: future)
+    monkeypatch.setattr(app.ocr_pool, 'submit', lambda *args, **kwargs: future)
     camera.publish(frame)
     reader.step()
     tick[0] = 4
@@ -133,6 +133,28 @@ def test_paused_video_status_persists_without_pausing_photos(video):
     assert app.saved_photo_watcher.snapshot()['enabled'] is False  # Unchanged fixture setting.
     reader.step()
     assert reader.state['status'] == 'paused'
+
+
+def test_panel_video_without_binding_never_schedules_inference(video,monkeypatch):
+    app,_,camera,reader,frame,tick=video
+    monkeypatch.setenv('FIELD_PANEL_DETECTOR_ENABLED','1')
+    monkeypatch.setattr(app.ocr_pool,'submit',lambda *a,**kw:pytest.fail('No binding'))
+    camera.publish(frame)
+    reader.step()
+    assert reader.state['status']=='waiting_binding'
+    assert reader.state['frames_inferred']==reader.state['evidence_saved']==0
+
+
+def test_binding_ended_during_panel_inference_discards_result(video,monkeypatch):
+    app,_,_,reader,frame,tick=video
+    monkeypatch.setenv('FIELD_PANEL_DETECTOR_ENABLED','1')
+    result=local()
+    result.update(panel_detection={},panel_regions=[{'instrument_id':'ended-instrument'}])
+    for moment in (0,.5,5):
+        tick[0]=moment
+        reader.accept(frame,{},app.now(),result)
+    assert reader.state['evidence_saved']==0
+    assert not list((app.DATA/'Images').iterdir())
 
 
 def test_same_value_on_another_decoded_instrument_is_new_evidence(video):

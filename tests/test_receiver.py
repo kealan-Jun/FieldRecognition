@@ -63,6 +63,7 @@ def test_real_cpu_decoder_preserves_packet_timestamp_and_staleness():
     thread.start()
     try:
         packet = Packet(payload, 7, 128, 96, 123456789, 88, 123456999, 2)
+        camera.packets.put((1, packet, time.monotonic()-1, {'sender_id': 'sender', 'camera_id': 'cam01'}))
         camera.packets.put((1, packet, time.monotonic(), {'sender_id': 'sender', 'camera_id': 'cam01'}))
         deadline = time.monotonic()+3
         while camera.latest is None and time.monotonic() < deadline:
@@ -71,6 +72,8 @@ def test_real_cpu_decoder_preserves_packet_timestamp_and_staleness():
         assert pixels.shape == (96, 128, 3)
         assert metadata['effective_timestamp_us'] == 123456999
         assert metadata['sequence'] == 88
+        assert camera.snapshot()['dropped_packets'] == 1
+        assert metadata['receive_to_decode_ms'] < 250
         with camera.lock:
             camera.latest = (camera.latest[0], camera.latest[1], time.monotonic()-2)
         with pytest.raises(ValueError):
@@ -82,8 +85,8 @@ def test_real_cpu_decoder_preserves_packet_timestamp_and_staleness():
 
 def test_encoded_buffer_is_bounded():
     camera = ReceiverCamera('http://unused.invalid', 'sender_cam01')
-    camera.packets.put_nowait(1)
-    camera.packets.put_nowait(2)
+    for i in range(16):
+        camera.packets.put_nowait(i)
     with pytest.raises(queue.Full):
         camera.packets.put_nowait(3)
 

@@ -23,7 +23,7 @@ def build_index(rows, instance, timestamp, integrity):
         if row['entity'] == 'jobs' and not doc.get('binding_id'):
             if not instruments:
                 target = '未识别仪器 · 照片读数'
-            elif not doc.get('instrument') and len(instruments) > 1:
+            elif not doc.get('instrument') and len(instruments) > 1 and doc.get('association_status') != 'localized_panels':
                 target += ' · 归属待确认'
         image_hash = doc.get('image_sha256')
         image = f'Objects/{image_hash[:2]}/{image_hash}.png' if re.fullmatch('[a-f0-9]{64}', image_hash or '') else None

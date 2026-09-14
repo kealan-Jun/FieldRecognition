@@ -65,7 +65,9 @@ class ReceiverCamera:
         self.target = target
         self.stop = threading.Event()
         self.lock = threading.Lock()
-        self.packets = queue.Queue(maxsize=2)
+        # H.264 packets may arrive in bursts. Two slots discarded reference frames
+        # during normal jitter, freezing the preview until the next keyframe.
+        self.packets = queue.Queue(maxsize=16)
         self.latest = None
         self.response = None
         self.started = False
@@ -223,6 +225,12 @@ class ReceiverCamera:
                 generation, packet, received, camera = self.packets.get(timeout=.5)
             except queue.Empty:
                 continue
+            if time.monotonic() - received > .25:
+                # Never turn the burst allowance into a delayed playback queue.
+                decoder, context_key, metadata = None, None, {}
+                with self.lock:
+                    self.info['dropped_packets'] += 1
+                continue
             key = (generation, packet.width, packet.height)
             if key != context_key or (last_pts is not None and packet.pts < last_pts-1_000_000):
                 decoder, metadata = None, {}
@@ -261,11 +269,13 @@ class ReceiverCamera:
                               'gwhp_version': source.version, 'stream': 'main', 'width': frame.width,
                               'height': frame.height, 'rgb_h264_full_range': full_range,
                               'decoder': 'PyAV CPU'}
+                    record['receive_to_decode_ms'] = round((time.monotonic()-received)*1000, 1)
                     with self.lock:
                         record['decoded_frame_id'] = self.info['decoded_frames'] + 1
                         self.latest = (pixels, record, received)
                         self.info.update(status='streaming', last_sequence=source.sequence,
-                                         clock_sync_valid=source.sync_valid, width=frame.width, height=frame.height)
+                                         clock_sync_valid=source.sync_valid, width=frame.width, height=frame.height,
+                                         receive_to_decode_ms=record['receive_to_decode_ms'])
                         self.info['decoded_frames'] += 1
             except Exception:
                 decoder = None

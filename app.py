@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 from ocr_runtime import configured_device, create_model, OcrDeviceUnavailable
 from activity import recent_activity, readout_page
 from readout_timing import update_timing
+from panel_detector import PanelDetector
 
 BASE = Path(__file__).parent
 OCR_DEVICE = configured_device()
@@ -94,6 +95,7 @@ async def lifespan(application):
         receiver_camera.close()
     ocr_pool.shutdown(wait=False, cancel_futures=True)
     readout_pool.shutdown(wait=False, cancel_futures=True)
+    panel_detector.close()
 
 
 app = FastAPI(title='FieldRecognition · 现场识别', version='0.1.0', lifespan=lifespan)
@@ -109,6 +111,7 @@ ocr_warmup_future = None
 ocr_state = {'status': 'not_loaded', 'device': OCR_DEVICE, 'engine': 'PaddleOCR / PP-OCRv5 mobile',
              'resident': False, 'load_count': 0, 'loaded_at': None}
 ocr_model = None
+panel_detector = PanelDetector()
 
 
 def get_instrument(instrument_id):
@@ -254,6 +257,7 @@ def state():
             'vision_fallback': aliyun_vision.public_config(), 'photo_watch': saved_photo_watcher.snapshot(),
             'automation': automatic_runner.snapshot(),
             'video_ocr': video_ocr.snapshot(),
+            'panel_detector': panel_detector.snapshot(),
             'camera': receiver_camera.snapshot() if receiver_camera else {'configured': bool(os.environ.get('FIELD_CAMERA_SNAPSHOT_URL')),
                        'id': os.environ.get('FIELD_CAMERA_ID', 'UnconfiguredNeckCamera'),
                        'mode': 'http_snapshot'}, 'product': 'FieldRecognition'}
@@ -431,6 +435,7 @@ def load_ocr():
 def warm_ocr():
     try:
         load_ocr()
+        panel_detector.warmup()
     except Exception:
         # load_ocr exposes the failure in /api/state; the successful binding is retained.
         return False
@@ -484,6 +489,20 @@ def predict_panel(panel, x=0, y=0):
 def run_ocr(document):
     from panel_readout import run
     run(globals(), document)
+
+
+def current_panel_bindings(camera_id):
+    with db() as conn:
+        rows = conn.execute('SELECT document FROM bindings WHERE camera=? AND ended IS NULL', (camera_id,)).fetchall()
+    return [b for row in rows if current_readout_binding(b := json.loads(row['document']))]
+
+
+def predict_readout(panel, x=0, y=0, *, video=False, binding_snapshots=None):
+    from panel_regions import predict
+    if binding_snapshots is None:
+        binding_snapshots = current_panel_bindings(receiver_camera.target) if video and receiver_camera else []
+    return predict(globals(), panel, x, y, video=video,
+                   allowed_instrument_ids={b['instrument']['id'] for b in binding_snapshots})
 
 
 def current_readout_binding(document):

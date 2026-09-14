@@ -191,6 +191,10 @@ class ArchiveStore:
         if doc.get('crop_image_sha256'):
             ident = str(uuid.UUID(doc['job_id']))
             artifacts['panel'] = self._artifact(root, Path('Images') / (ident + '.png'), doc['crop_image_sha256'])
+        for region in doc.get('panel_regions', []):
+            if region.get('image_sha256'):
+                ident = str(uuid.UUID(region['evidence_id']))
+                artifacts['panel_' + ident] = self._artifact(root, Path('Images') / (ident + '.png'), region['image_sha256'])
         receipt = {'schema': 'field-recognition-receipt/1', 'source_instance': self.instance,
                    'sequence': row['seq'], 'entity': row['entity'], 'entity_id': row['entity_id'],
                    'recorded_at': row['recorded_at'], 'document': doc, 'artifacts': artifacts,

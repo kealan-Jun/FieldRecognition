@@ -201,9 +201,11 @@ class LiveScanner:
                 old_id = previous.get('media_session_id') if previous else None
                 new_id = observation.get('media_session_id')
                 changed = old_id not in (None, 0) and new_id not in (None, 0) and old_id != new_id
-                transition = (previous is not None and previous['online'] != observation['online']) or (previous is None and not observation['online'])
-                if changed or transition:
-                    reason = 'device_media_session_changed' if changed else 'device_service_online' if observation['online'] else 'device_service_offline'
+                # Liveness is transient: a missed heartbeat is not a device stop.
+                # Suspend inference while offline, retaining the same bindings when
+                # the same acquisition session returns. A new session invalidates.
+                if changed:
+                    reason = 'device_media_session_changed'
                     for table in ('bindings', 'scene_visits'):
                         for record in conn.execute(f'SELECT * FROM {table} WHERE camera=? AND ended IS NULL', (camera.target,)).fetchall():
                             doc = json.loads(record['document']) | {'ended_at': timestamp, 'end_reason': reason,
@@ -212,9 +214,11 @@ class LiveScanner:
                     conn.execute('INSERT OR REPLACE INTO camera_resets VALUES(?,?)', (camera.target, timestamp))
                     if self.session and self.session['status'] in ACTIVE | {'bound'}:
                         self.session.update(status='stopped', binding=None,
-                                            message='设备采集服务已离线或会话已变化，重新启动后请重新扫码绑定')
+                                            message='设备采集会话已变化，请重新扫码绑定')
                 # Preserve a known session marker through an offline status with a zero marker.
                 stored = observation | {'media_session_id': new_id or old_id}
+                if not observation['online']:
+                    stored['offline_since'] = (previous or {}).get('offline_since') or timestamp
                 conn.execute('INSERT OR REPLACE INTO camera_service_state VALUES(?,?)', (camera.target, json.dumps(stored)))
 
     def close(self):
@@ -273,10 +277,13 @@ def install(core):
         async def frames():
             previous = None
             while not await request.is_disconnected():
+                started = time.monotonic()
                 part, previous = await run_in_threadpool(preview_part, camera, previous)
                 if part:
                     yield part
-                await asyncio.sleep(1 / 15)
+                # Select the latest frame after each send; slow clients cannot
+                # accumulate an application queue. Encoding time is in the budget.
+                await asyncio.sleep(max(0, 1 / 30 - (time.monotonic() - started)))
 
         return StreamingResponse(frames(), media_type='multipart/x-mixed-replace; boundary=frame',
                                  headers={'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no'})

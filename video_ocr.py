@@ -47,7 +47,8 @@ class VideoOcr:
             return copy.deepcopy(self.state) | {'enabled': self.enabled(), 'sample_interval_seconds': self.interval,
                 'target_fps': 1 / self.interval, 'saves_every_frame': False, 'stable_samples': 2,
                 'min_evidence_interval_seconds': 2, 'unreadable_evidence_interval_seconds': 30,
-                'empty_background_saved': False, 'unreadable_requires_visible_instrument_qr': True}
+                'empty_background_saved': False, 'unreadable_requires_visible_instrument_qr': not self.core['panel_detector'].enabled(),
+                'panel_detector': self.core['panel_detector'].snapshot()}
 
     def configure(self, body: VideoSettings):
         runner = self.core['automatic_runner']
@@ -99,6 +100,15 @@ class VideoOcr:
         if epoch != self.epoch:
             self.epoch, self.signature, self.last_saved_signature = epoch, None, None
             self.no_digits_since, self.stable_count = None, 0
+        snapshots = self.core['current_panel_bindings'](camera.target) if self.core['panel_detector'].enabled() else None
+        if snapshots == []:
+            if self.pending:
+                self.pending[0].cancel()
+                if self.pending[0].done():
+                    self.pending = None
+            self.state.update(status='waiting_binding', latest_lines=[], latest_panels=[])
+            self.no_digits_since, self.stable_count, self.signature = None, 0, None
+            return
         if self.pending:
             future, frame, metadata, observed, old_epoch, sampled = self.pending
             if not future.done():
@@ -133,35 +143,53 @@ class VideoOcr:
         self.previous_frame = token
         self.next_sample = self.clock() + self.interval
         observed = self.core['now']()
-        future = self.core['ocr_pool'].submit(self.core['predict_panel'], frame, 0, 0)
+        future = self.core['ocr_pool'].submit(self.core['predict_readout'], frame, 0, 0, video=True, binding_snapshots=snapshots)
         self.pending = (future, frame, metadata, observed, epoch, self.clock())
         self.state.update(status='inferring', last_sample_at=observed)
 
     def accept(self, frame, metadata, observed, local):
         current = self.clock()
+        if 'panel_detection' in local:
+            allowed = {b['instrument']['id'] for b in self.core['current_panel_bindings'](self.core['receiver_camera'].target)}
+            # Discard a result whose binding ended during inference.
+            if any(r['instrument_id'] not in allowed for r in local.get('panel_regions', [])):
+                self.state.update(latest_lines=[], latest_panels=[])
+                self.no_digits_since, self.stable_count, self.signature = None, 0, None
+                return
         lines = [line for line in local.get('lines', []) if READOUT.fullmatch(line.get('text', ''))]
         decoded = decode_qr(frame, fast=True)
         hits = self.core['qr_matches'](*decoded[:2])['matches']
+        panels = local.get('panel_regions', [])
+        localized = 'panel_detection' in local
         visible_ids = tuple(sorted(hit['id'] for hit in hits))
-        if not visible_ids:
+        if localized:
+            visible_ids = tuple(sorted({r['instrument_id'] for r in panels}))
+        elif not visible_ids:
             with self.core['db']() as conn:
                 visible_ids = tuple(sorted(json.loads(row['document'])['instrument']['id'] for row in conn.execute(
                     'SELECT document FROM bindings WHERE camera=? AND ended IS NULL', (self.core['receiver_camera'].target,))))
-        signature = (tuple(sorted(line['text'] for line in lines)), visible_ids)
+        panel_map = {r['panel_id']:r for r in panels}
+        signature = (tuple(sorted((panel_map.get(line.get('panel_id'), {}).get('instrument_id', ''), line['text']) for line in lines)), visible_ids)
         self.stable_count = self.stable_count + 1 if signature == self.signature else 1
         self.signature = signature
         self.state.update(status='watching', frames_inferred=self.state['frames_inferred'] + 1,
-            latest_lines=lines, last_result_at=self.core['now'](), last_error=local.get('error'),
+            latest_lines=lines, last_result_at=self.core['now'](), last_error=local.get('detector_error') or local.get('error'),
             latest_qr_instruments=[{k: hit[k] for k in ('id', 'name')} for hit in hits],
             last_ocr_seconds=local.get('wall_seconds'), stable_count=self.stable_count,
             latest_frame_metadata=metadata)
+        self.state['latest_panels'] = [{k:r[k] for k in ('panel_id','class_id','instrument_id','bbox','detector_confidence')} for r in panels]
+        for line in lines:
+            region = panel_map.get(line.get('panel_id'))
+            if region:
+                line['instrument'] = self.core['get_instrument'](region['instrument_id'])
         # An absent reading is not itself a reason to store the room, cables or desk.
         # A session binding alone does not establish that an instrument is in this frame.
-        if not lines and not hits:
+        if not lines and not (panels if localized else hits):
             self.no_digits_since = None
             self.state['background_frames_skipped'] += 1
             return
-        reason = fallback_reason(local.get('lines', []), local.get('error'))
+        from panel_regions import needs_fallback
+        reason = needs_fallback(local)
         if reason:
             if self.no_digits_since is None:
                 self.no_digits_since = current

@@ -18,6 +18,7 @@ def app_client(tmp_path, monkeypatch):
     monkeypatch.setenv('FIELD_SAVED_PHOTO_WATCH_ENABLED', '0')
     monkeypatch.setenv('FIELD_VIDEO_OCR_ENABLED', '0')
     monkeypatch.setenv('FIELD_ARCHIVE_ENABLED', '0')
+    monkeypatch.setenv('FIELD_PANEL_DETECTOR_ENABLED', '0')
     monkeypatch.delenv('FIELD_ARCHIVE_ROOT', raising=False)
     monkeypatch.delenv('FIELD_ARCHIVE_MOUNT', raising=False)
     monkeypatch.delenv('DASHSCOPE_API_KEY', raising=False)

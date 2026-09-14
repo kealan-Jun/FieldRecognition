@@ -185,6 +185,16 @@ def test_service_session_lifetime_survives_app_recreation_then_invalidates_evide
     enter_scene(client, camera='OtherCamera')
     other_bound = client.post('/api/bindings', json=args | {'scan_id': other['scan_id']}).json()
     recreated.observe_service({'online': False, 'media_session_id': 13})
+    preserved=next(b for b in client.get('/api/state').json()['bindings'] if b['binding_id']==bound['binding_id'])
+    assert not preserved['ended_at']
+    assert not app.current_readout_binding(preserved)  # Suspended, not unbound.
+    recreated.observe_service({'online': True, 'media_session_id': 13})
+    assert app.current_readout_binding(preserved)
+    assert client.post('/api/bindings',json=args).json()['binding_id']==bound['binding_id']
+    recreated.observe_service({'online': False, 'media_session_id': 0})
+    recreated=LiveScanner(vars(app))  # Persists across a local service restart.
+    recreated.observe_service({'online': True, 'media_session_id': 13})
+    assert app.current_readout_binding(preserved)
     recreated.observe_service({'online': True, 'media_session_id': 14})
     bindings = client.get('/api/state').json()['bindings']
     assert next(b for b in bindings if b['binding_id'] == bound['binding_id'])['ended_at']

@@ -53,6 +53,22 @@ def test_readout_history_uses_persisted_status_and_reading(app_client):
     assert event['image_url'] == doc['crop_image_url']
 
 
+def test_corrected_liveness_end_keeps_original_event_and_recovery(app_client):
+    app,client=app_client
+    first=scan(client)
+    aid=first['matches'][0]['id']
+    client.put('/api/instruments/'+aid,json={'name':'仪器 A','scene':'湿实验实验台'})
+    bound=client.post('/api/bindings',json={'scan_id':first['scan_id'],'instrument_id':aid,'operator':'测试员'}).json()
+    ended=app.now()
+    bound['lifecycle_corrections']=[{'previous_ended_at':ended,'corrected_at':app.now(),'detail':'同一采集会话恢复'}]
+    with app.db() as conn:
+        conn.execute('UPDATE bindings SET document=? WHERE id=?',(json.dumps(bound),bound['binding_id']))
+        events=recent_activity(conn)
+    assert next(e for e in events if e['kind']=='binding_end_corrected')['occurred_at']==ended
+    assert next(e for e in events if e['kind']=='binding_restored')['detail']=='同一采集会话恢复'
+    assert next(e for e in events if e['kind']=='binding_started')['occurred_at']==bound['started_at']
+
+
 def test_scene_scan_is_distinct_from_instrument_binding(app_client):
     _, client = app_client
     capture = scan(client, 'Scene01')

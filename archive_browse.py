@@ -99,12 +99,16 @@ def build_views(rows):
             if path:
                 photos[name] = {'path': path, 'sha256': digest}
         from reading_results import build_readings
+        for region in doc.get('panel_regions', []):
+            path = artifact_path(region.get('image_sha256'), '.png')
+            if path:
+                photos['面板 ' + (region.get('instrument') or {}).get('name', region['panel_id']) + ' ' + region['panel_id']] = {'path':path, 'sha256':region['image_sha256']}
         readings = doc.get('readings')
         if readings is None:
             readings = build_readings(doc) if entity == 'jobs' else []
         asset = doc.get('instrument') or {}
         workbench = doc.get('workbench') or {'name': asset.get('scene') or (doc.get('scene') or {}).get('name')}
-        target = asset.get('name') or (doc.get('scene') or {}).get('name') or '归属待确认'
+        target = asset.get('name') or ('、'.join(c['instrument']['name'] for c in doc.get('instrument_candidates', [])) if doc.get('association_status') == 'localized_panels' else '') or (doc.get('scene') or {}).get('name') or '归属待确认'
         common = {'entity': entity, 'entity_id': ident, 'camera_id': camera, 'operator': doc.get('operator'),
             'event_at': moment, 'local_time': local.strftime('%Y-%m-%d %H:%M:%S'), 'target': target,
             'started_at': doc.get('started_at'), 'ended_at': doc.get('ended_at'), 'finished_at': doc.get('finished_at'),
@@ -112,7 +116,7 @@ def build_views(rows):
             'capture_id': capture.get('capture_id'), 'job_id': doc.get('job_id'), 'binding_id': doc.get('binding_id'),
             'binding_ids': doc.get('binding_ids', []), 'instrument': doc.get('instrument'),
             'instrument_candidates': doc.get('instrument_candidates', []), 'workbench': workbench,
-            'readings': readings, 'source_ref': external.get('source_ref'), 'external_capture_id': external.get('capture_id'),
+            'readings': readings, 'panel_regions':doc.get('panel_regions', []), 'panel_detection':doc.get('panel_detection'), 'source_ref': external.get('source_ref'), 'external_capture_id': external.get('capture_id'),
             'captured_at': external.get('captured_at'), 'source_written_at': external.get('source_written_at'),
             'input_mode': 'voice_photo' if external else 'video' if doc.get('request_trigger') == 'video_stream' else 'other',
             'timing': doc.get('timing'), 'photos': photos, 'receipt_versions': sorted(versions[(entity, ident)], key=lambda v:v['sequence'])}
@@ -128,7 +132,8 @@ def build_views(rows):
                 sole = asset.get('id') or (candidates[0]['instrument']['id'] if len(candidates) == 1 else 'Unassigned')
                 groups[sole] = []
             for instrument_id, values in groups.items():
-                record('InstrumentReadings', [instrument_id, day, ident], title, common | {'readings': values, 'folder_instrument_id': instrument_id})
+                name = next(((v.get('instrument') or {}).get('name') for v in values if (v.get('instrument') or {}).get('name')), target)
+                record('InstrumentReadings', [instrument_id, day, ident], common['local_time']+' · '+name, common | {'target':name, 'readings': values, 'folder_instrument_id': instrument_id})
             if external:
                 filename = PurePosixPath(external.get('source_ref') or external.get('capture_id') or ident).name
                 record('VoicePhotos', [camera, day, local.strftime('%H-%M-%S')+'_'+ident], title+' · '+filename, common)
