@@ -15,8 +15,8 @@
 | capture_and_scan | 无，传 `{}` | 最新主码流照片、capture_id、scan_id、二维码 matches、帧时间戳 |
 | scan_photo | camera_id、image_base64 | 对 Agent 已有照片进行同样的扫码和存证 |
 | bind_instrument | scan_id、instrument_id、operator | binding_id 和仪器/场景/相机绑定快照 |
-| read_panel | binding_id、capture_id | 异步 job_id；可选 crop=[x,y,width,height] |
-| read_saved_panel | binding_id、image_path（或 photo） | 复用 NAS 已拍照片，异步 job_id |
+| read_panel | capture_id | 异步 job_id；binding_id、crop=[x,y,width,height] 可选 |
+| read_saved_panel | image_path（或 photo） | binding_id 可选；复用 NAS 已拍照片，异步 job_id |
 | get_panel_result | job_id | 任务状态及完成后的原文、分数、坐标、来源 |
 | end_instrument_binding | binding_id | 结束本次使用绑定 |
 
@@ -25,12 +25,12 @@
 1. get_field_state 查看仪器登记和相机状态。仪器所属场景先在网页登记，Agent 不猜测场景或操作人。
 2. capture_and_scan：对准仪器码取图，即可继续绑定。场景码是可选的独立证据；实际扫到时从 scene_matches 调用 enter_scene。matches 为空时不能建立新绑定；多个码时由用户明确选择仪器。
 3. bind_instrument：使用实际扫描所得 instrument_id、scan_id 和用户提供的 operator。同相机、仪器和实验员的重复请求返回原 binding_id；已有其他有效绑定时拒绝覆盖。设备采集服务当前会话内沿用原绑定，无需每次重复扫码。成功绑定后异步预加载 PaddleOCR，绑定接口不等待模型加载完成。
-4. 用户对现有 Agent 说“拍照”，沿用该 Agent 的拍照与 NAS 保存流程。本服务监控当前绑定相机的新语音照片，稳定后自动识别；不用再调用 capture_and_scan。
-5. get_field_state 查看该 binding_id 的 jobs；需要直接传递现有拍照回执时，调用 read_saved_panel，传 binding_id、确切 image_path 和可选 crop。已导入的本地 capture_id 继续用 read_panel。重复提交同一源照片与选框沿用原任务。
+4. 用户对现有 Agent 说“拍照”，沿用该 Agent 的拍照与 NAS 保存流程。本服务监控配置相机的新语音照片，未绑定也执行 OCR 和留存，稳定后自动识别；不用再调用 capture_and_scan。
+5. get_field_state 查看该相机的 jobs；需要直接传递现有拍照回执时，调用 read_saved_panel，传 binding_id、确切 image_path 和可选 crop。已导入的本地 capture_id 继续用 read_panel。重复提交同一源照片与选框沿用原任务。
 6. 每隔约 1 秒 get_panel_result；只有 completed 才展示 lines。调用方设置自己的总等待期限，超时保留 job_id 稍后查询，不重新提交 OCR。
 7. 使用结束时 end_instrument_binding。
 
-没有绑定、相机不符、照片过旧或仪器码冲突会拒绝 OCR。crop 不传表示整图识别，不代表已自动定位面板。上传照片的 camera_id 为调用方声明，不等于硬件身份认证。
+不传 binding_id 时，按未绑定照片识别，仪器/场景为空；自动目录导入可关联拍摄时已存在的有效绑定。显式传入 binding_id 后仍检查相机、时间、场景和二维码冲突，校验失败拒绝关联请求。crop 不传表示整图识别，不代表已自动定位面板。上传照片的 camera_id 为调用方声明，不等于硬件身份认证。
 
 ## Python 接入
 
@@ -74,7 +74,7 @@ curl -sS http://127.0.0.1:8188/api/tools/capture_and_scan \
 
 ## 场景进入工具
 
-工具总数现为 9。调用 capture_and_scan 或 scan_photo 后，从 scene_matches 取得已登记的场景；调用 enter_scene，参数 {"scan_id":"扫码记录 UUID","scene_id":"场景 UUID"}，确认该照片相机进入场景。之后扫描仪器码并调用 bind_instrument，系统校验同相机的当前场景。有有效仪器绑定时拒绝切换场景；同场景重复进入不会结束绑定。录入实验员仍由用户指定。get_field_state 返回 scenes 与 scene_visits；所有场景与仪器码仍未签名。
+工具总数现为 9。调用 capture_and_scan 或 scan_photo 后，从 scene_matches 取得已登记的场景；调用 enter_scene，参数 {"scan_id":"扫码记录 UUID","scene_id":"场景 UUID"}，确认该照片相机进入场景。仪器码也可直接调用 bind_instrument；实际已进入场景时，系统校验同相机的当前场景是否冲突。有有效仪器绑定时拒绝切换场景；同场景重复进入不会结束绑定。录入实验员仍由用户指定。get_field_state 返回 scenes 与 scene_visits；所有场景与仪器码仍未签名。
 
 
 ## 连续视频扫码 HTTP 接口
@@ -82,7 +82,7 @@ curl -sS http://127.0.0.1:8188/api/tools/capture_and_scan \
 原有八个 Agent 工具保持兼容，新增 read_saved_panel；网页使用新增 HTTP 接口，无需逐张调用 capture_and_scan：
 
 - `GET /api/camera/preview.mjpg`：MJPEG 实时预览，无绑定副作用。
-- `POST /api/camera/scan-sessions`：参数 `{"operator":"用户指定实验员"}`。调用即选择自动进入唯一场景、自动绑定唯一且场景匹配的仪器。
+- `POST /api/camera/scan-sessions`：参数 `{"operator":"用户指定实验员"}`。调用即选择自动进入唯一场景、自动绑定唯一已登记仪器（已有场景扫码关系时校验匹配）。
 - `GET /api/camera/scan-sessions/{session_id}`：约每 0.5 秒查询。`scanning` / `waiting_camera` 继续等待；`bound` 读取原始命中帧 `scan` 和 `binding`；`needs_selection` 暂停供用户选择；`stopped` / `failed` 结束。20 秒未查询自动停止。
 - `DELETE /api/camera/scan-sessions/{session_id}`：停止自动扫码，保留已完成的绑定。
 
@@ -91,29 +91,29 @@ curl -sS http://127.0.0.1:8188/api/tools/capture_and_scan \
 
 ## OCR 模型生命周期
 
-get_field_state 的 `ocr.status` 为 queued/loading 时表示绑定后的后台加载正在进行，ready 且 resident=true 表示模型已常驻。`loaded_at`、`load_count`、`load_seconds` 可供核对。后续 read_panel 复用此实例；加载期间提交的任务在同一个 OCR 工作队列中等待。绑定结束、设备采集服务离线均不卸载模型；本地识别服务重启后，如仍有有效绑定，会自动重新加载。
+get_field_state 的 `ocr.status` 为 queued/loading 时表示后台预加载正在进行，ready 且 resident=true 表示模型已常驻。`loaded_at`、`load_count`、`load_seconds` 可供核对。后续 read_panel 复用此实例；加载期间提交的任务在同一个 OCR 工作队列中等待。绑定结束、设备采集服务离线均不卸载模型；本地识别服务重启后，启用了照片监控或仍有有效绑定时会自动重新加载。
 
 模型加载失败不撤销成功绑定，状态显示 error，后续 bind_instrument 或 read_panel 可重试。模型常驻不等于连续执行 OCR，也不等于物理仪器准确率已经验证。
 
 
 ## 已有语音照片与自动识别
 
-当前服务监控 `/mnt/realityloop-nas/voice_photos/<绑定相机>/日期/时间/照片.jpg`。绑定后只加载 OCR 并等待文件；现有 Agent 执行拍照、写完照片后，本服务才执行识别。轮询 2 秒，稳定至少 1 秒；不重拍、不修改源照片、不因相机视频不断变化而触发读数。目录和导入回执的持久化去重跨本地服务重启有效。设备采集服务停启导致绑定失效后，重新扫码才能处理之后的新照片。
+当前服务监控 `/mnt/realityloop-nas/voice_photos/<配置相机>/日期/时间/照片.jpg`，不要求先绑定。启动照片监控时预加载 OCR；现有 Agent 写完照片后才执行预测。轮询间隔 0.5 秒，文件稳定至少 0.5 秒；不重拍、不修改源照片、不逐帧做 OCR。照片去重跨重启、重新绑定有效。设备离线后，已导入语音照片仍完成读数；新 NAS 照片仍可识别，无法确认的仪器关联保持 null。
 
 直接传递拍照结果的标准库调用：
 
 ```python
-# binding_id 来自当前有效绑定；image_path 必须来自现有拍照工具返回结果。
+# 没有有效绑定时 binding_id=None；image_path 必须来自现有拍照工具返回结果。
 job = tools.read_saved_panel(binding_id, image_path)
 result = tools.call('get_panel_result', {'job_id': job['job_id']})
 ```
 
 `read_saved_panel` / `POST /api/ocr/photo-result` 接受以下两种输入之一：
 
-- `binding_id`、`image_path`、可选 `crop=[x,y,w,h]`。image_path 是已配置 voice_photos 内的具体照片绝对路径或相对路径。文件名日期/时间和相机目录均校验；无目录自动搜索、无“最新图”猜测。
-- `binding_id`、`photo`、可选 crop。photo 包含源 `capture_id`、`camera_id`、带时区 `captured_at`、`source_ref`、纯 `image_base64`，可选原字节 `sha256`。source_ref 只作回执保留，不解释为任意下载 URL。照片相机、绑定时间、原图哈希不符则拒绝。
+- `image_path`、可选 `binding_id` 和 `crop=[x,y,w,h]`。image_path 是已配置 voice_photos 内的具体照片绝对路径或相对路径。文件名日期/时间和相机目录均校验；无目录自动搜索、无“最新图”猜测。
+- `photo`、可选 `binding_id` 和 crop。photo 包含源 `capture_id`、`camera_id`、带时区 `captured_at`、`source_ref`、纯 `image_base64`，可选原字节 `sha256`。source_ref 只作回执保留，不解释为任意下载 URL。照片相机、绑定时间、原图哈希不符则拒绝。
 
-同一照片和选框已有任务时返回原 job_id；不要通过重发来等待结果。识别先用常驻 OCR，从任务真正运行开始计时，5 秒没有完整数字才用视觉兜底。每次最多一个云端请求，同一绑定两次尝试至少隔 30 秒。收到 `completed` 后统一展示 `lines`；没有数字时如实回答看不清。`confidence`、`polygon` 允许 null，不要生成分数、坐标或额外读数。界面无需单列云端来源，后端 `local_ocr`、`fallback`、`external_photo` 保存过程和原图回执。
+同一照片和选框已有任务时返回原 job_id；不要通过重发来等待结果。识别先用常驻 OCR，从任务真正运行开始计时，5 秒没有完整数字才用视觉兜底。每次最多一个云端请求，同一绑定（未绑定时同一相机）两次尝试至少隔 30 秒。收到 `completed` 后统一展示 `lines`；没有数字时如实回答看不清。`confidence`、`polygon` 允许 null，不要生成分数、坐标或额外读数。界面无需单列云端来源，后端 `local_ocr`、`fallback`、`external_photo` 保存过程和原图回执。
 
 `get_field_state.photo_watch` 提供监控状态、待处理文件数和最近 job_id；自动识别结果位于同一状态的 jobs。此项目没有更改现有 Agent 的聊天或拍照服务，Agent 若要在对话中主动报出读数，需通过 get_field_state/get_panel_result 获取结果。网页会自动刷新显示。
 
@@ -127,3 +127,5 @@ result = tools.call('get_panel_result', {'job_id': job['job_id']})
 `get_field_state.activity` 返回配置相机最近 50 条操作记录，包括扫码、场景进入／结束、仪器绑定／结束与面板读数。每条含 `event_id`、`kind`、`occurred_at`、`camera_id`、`operator`、`target`、`status`、`detail`、`image_url`。扫码成功但没有绑定也会出现；人员缺失保持 null，不能用当前登记者代填历史操作人。
 
 `get_field_state.archive` 返回 NAS 留存状态：`enabled`、`status`（disabled/ready/retrying）、`pending_receipts`、`archived_receipts`、`last_error`、`last_archived_at`、`root` 和 `source_instance`。服务仍在本机运行，后台向独立 NAS 目录归档，Agent 不需要新增调用。`ready` 表示归档目标可用；确认当前全部记录归档还需 `pending_receipts=0`。不把存储成功说成读数正确或物理操作完成。目录结构与回执见 [本机运行与 NAS 留存](docs/本机运行与NAS留存.md)。
+
+任务的 `timing` 保存源写入、首次发现、稳定、读取、导入、排队、OCR、视觉模型、最终结果时间和毫秒差值；`get_panel_result.archive` 保存最新回执的归档确认与耗时。缺失时间为 null，NAS mtime 未独立校时，补处理标记为 `is_backfill=true`。完整字段、近实时目标与边界见 [识别时延与未绑定照片](docs/识别时延与未绑定照片.md)。

@@ -64,3 +64,16 @@ def test_scene_scan_is_distinct_from_instrument_binding(app_client):
     assert hit['detail'] == '已记录场景进入'
     visit = next(e for e in events if e['kind'] == 'scene_entered')
     assert visit['operator'] == '测试员'
+
+
+def test_photo_local_timezone_does_not_sort_ahead_of_later_utc_readout(app_client):
+    app, client = app_client
+    capture = scan(client)
+    capture.update(source='agent_saved_photo', external_photo={'captured_at': '2026-09-14T11:53:00+08:00'})
+    job = {'job_id': 'time-order', 'camera_id': capture['camera_id'], 'instrument': None,
+           'submitted_at': '2026-09-14T04:00:00+00:00', 'status': 'completed', 'lines': []}
+    with app.db() as conn:
+        conn.execute('UPDATE scans SET document=? WHERE id=?', (json.dumps(capture), capture['scan_id']))
+        conn.execute('INSERT INTO jobs VALUES(?,?,?)', (job['job_id'], 'completed', json.dumps(job)))
+        events = recent_activity(conn)
+    assert [e['kind'] for e in events] == ['readout', 'photo']

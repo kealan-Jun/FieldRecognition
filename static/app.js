@@ -22,7 +22,7 @@ function updateButtons(){
   $('#bind').textContent=scan?.matches?.length>1?'绑定所选仪器':'绑定这台仪器';
   $('#enterScene').disabled=scanning||!scan?.scene_matches?.length;
   $('#bind').disabled=scanning||Boolean(activeBinding)||!scan?.matches?.length;
-  $('#ocr').disabled=scanning||historicalScan||previewLive||!scan||!activeBinding||Boolean(jobTimer);
+  $('#ocr').disabled=historicalScan||previewLive||!scan||Boolean(jobTimer);
   $('#endBinding').hidden=!activeBinding; $('#endBinding').disabled=scanning;
   $('#continuousScan').disabled=scanning||state?.automation?.enabled||state?.camera.mode!=='gwhp_main';
   $('#stopScan').hidden=!scanSession; $('#operator').disabled=scanning||Boolean(activeBinding);
@@ -48,7 +48,7 @@ function openPreview(){
   $('#neckPreview').src='/api/camera/preview.mjpg'; $('#neckPreview').hidden=false;
   $('#liveBadge').hidden=false; $('#neckLive').textContent='关闭实时视频';
   $('#sourceLabel').textContent=`${state.camera.id} · 实时视频`;
-  $('#cropHint').textContent='实时画面持续扫描二维码；绑定后对 Agent 说“拍照”，再识别保存照片中的面板读数。';
+  $('#cropHint').textContent='视频用于扫码；语音照片自动读数，未绑定也会保存结果。';
   updateButtons();
 }
 async function pollCamera(){
@@ -106,7 +106,7 @@ $('#stopScan').onclick=busy($('#stopScan'),async()=>{
   const result=await api(`/api/camera/scan-sessions/${id}`,{method:'DELETE'});
   await handleSession(result);
 });
-function draw(){if(!picture)return;ctx.clearRect(0,0,canvas.width,canvas.height);ctx.drawImage(picture,0,0);if(crop){ctx.fillStyle='#1e4a5222';ctx.fillRect(...crop);ctx.strokeStyle='#cf8337';ctx.lineWidth=Math.max(3,canvas.width/350);ctx.strokeRect(...crop);}$('#resetCrop').hidden=!crop;$('#cropHint').textContent=previewLive?'实时画面持续扫描二维码；绑定后对 Agent 说“拍照”，再识别保存照片中的面板读数。':crop?`已选面板区域：${crop[2]} × ${crop[3]} 像素。识别结果保留对应原图位置。`:'拖动框选面板；未选框时会识别整张照片。';}
+function draw(){if(!picture)return;ctx.clearRect(0,0,canvas.width,canvas.height);ctx.drawImage(picture,0,0);if(crop){ctx.fillStyle='#1e4a5222';ctx.fillRect(...crop);ctx.strokeStyle='#cf8337';ctx.lineWidth=Math.max(3,canvas.width/350);ctx.strokeRect(...crop);}$('#resetCrop').hidden=!crop;$('#cropHint').textContent=previewLive?'视频用于扫码；语音照片自动读数，未绑定也会保存结果。':crop?`已选面板区域：${crop[2]} × ${crop[3]} 像素。识别结果保留对应原图位置。`:'拖动框选面板；未选框时会识别整张照片。';}
 function point(e){const r=canvas.getBoundingClientRect();return [Math.max(0,Math.min(canvas.width,Math.round((e.clientX-r.left)*canvas.width/r.width))),Math.max(0,Math.min(canvas.height,Math.round((e.clientY-r.top)*canvas.height/r.height)))];}
 canvas.onpointerdown=e=>{drag=point(e);canvas.setPointerCapture(e.pointerId);};
 canvas.onpointermove=e=>{if(!drag)return;const p=point(e);crop=[Math.min(drag[0],p[0]),Math.min(drag[1],p[1]),Math.abs(p[0]-drag[0]),Math.abs(p[1]-drag[1])];draw();};
@@ -150,29 +150,49 @@ function waitingBindingText(){
 function renderBinding(){ const visit=state?.scene_visits?.find(v=>v.camera_id===(previewLive?state.camera.id:scan?.camera_id||state.camera.id));$('#sceneInfo').textContent=visit?`当前场景：${visit.scene.name} · ${visit.camera_id}`:'';$('#sceneInfo').hidden=!visit; $('#bindingInfo').innerHTML=activeBinding?`<b>当前：${esc(activeBinding.instrument.name)}</b><br>${esc(activeBinding.instrument.scene)} · ${esc(activeBinding.operator)}<br>${esc(activeBinding.camera_id)}<br>开始于 ${esc(stamp(activeBinding.started_at))}`:waitingBindingText();$('#scanResults').hidden=historicalScan||Boolean(activeBinding);if(historicalScan)$('#scanBadge').textContent=activeBinding?'已绑定':'等待新码';if(scan)renderQrEvidence();updateButtons();}
 $('#bind').onclick=busy($('#bind'),async()=>{const selected=scan?.matches?.length===1?{value:scan.matches[0].id}:$('input[name="instrument"]:checked');if(!selected)throw Error('请选择本次使用的仪器');const operator=$('#operator').value.trim();if(!operator)throw Error('请填写实验员姓名或编号');activeBinding=await api('/api/bindings',json({scan_id:scan.scan_id,instrument_id:selected.value,operator}));localStorage.setItem('fieldOperator',operator);await refresh(false);renderBinding();message('绑定已保存。现在可拍摄面板并框选识别区域。');});
 $('#endBinding').onclick=busy($('#endBinding'),async()=>{await api(`/api/bindings/${activeBinding.binding_id}/end`,{method:'POST'});activeBinding=null;renderBinding();await refresh(false);message('本次绑定已结束。');});
+function readoutPhoto(job){
+  const url=job.image_url||job.crop_image_url;
+  return url?`<a class="readout-photo" href="${esc(url)}" target="_blank" rel="noopener"><img src="${esc(url)}" alt="本次语音拍照原图"><span>本次照片 ↗</span></a>`:'';
+}
+function readoutLatency(job){
+  const timing=job.timing||{},d=timing.durations_ms||{};
+  const seconds=value=>value===null||value===undefined?'—':(value/1000).toFixed(2)+' 秒';
+  const label=timing.is_backfill?'补处理 · 发现至结果':'写入至结果';
+  const total=timing.is_backfill?d.detect_to_result_ms:d.write_to_result_ms;
+  return `<div class="readout-latency" title="NAS 写入时间取自文件修改时间，尚未独立校准时钟；完整阶段时间保存在结果 JSON"><b>${label} ${seconds(total)}</b><span>${timing.is_backfill?'历史照片补处理，不代表实时延迟':'写入至发现 '+seconds(d.write_to_detect_ms)} · OCR ${seconds(d.ocr_ms)}${d.vision_ms!==null&&d.vision_ms!==undefined?' · 进一步识别 '+seconds(d.vision_ms):''}</span></div>`;
+}
+function readoutIssue(job){
+  const fallback=job.fallback||{};
+  if(fallback.status==='skipped')return '<p class="caption">进一步识别处于调用间隔内，本次未调用。原因已留存。</p>';
+  if(fallback.status!=='failed')return '';
+  const reason=fallback.error==='account_arrearage'?'阿里云账户欠费或余额状态受限，请恢复账户后重试。':`进一步识别未完成${fallback.http_status?'（HTTP '+fallback.http_status+'）':''}，具体原因已留存。`;
+  return `<p class="readout-issue">${esc(reason)}</p>`;
+}
+// Match complete number + optional unit, consistent with the server's readout rule.
+const completeReadout=/^\s*[+-]?(?:\d+(?:[.,]\d+)?|[.,]\d+)(?:[eE][+-]?\d+)?\s*(?:%|°?[CF]|℃|℉|[μµu]?g|kg|mg|ml|mL|L|rpm|r\/min|[mkM]?[AVW]|[kM]?Hz|Pa|kPa|MPa|bar|mm|cm|m|s|min|h|pH|ppm)?\s*$/i;
 function renderOcr(job){
   const target=$('#ocrResults');
   if(['queued','running'].includes(job.status)){
     const phase={local_ocr:'正在识别面板',waiting_readout:'暂未读到数字，继续等待识别结果',extended_reading:'正在进一步识别面板'}[job.phase]||'任务已入队';
-    target.innerHTML=`<p>◌ ${phase}…</p><p class="caption">正在处理这次拍下的照片，请稍候。</p>`;return;
+    target.innerHTML=readoutPhoto(job)+`<p>◌ ${phase}…</p>`;return;
   }
-  if(job.status!=='completed'){target.textContent=job.status==='cancelled'?'绑定已结束或发生变化，这次识别已取消。':`识别未完成，请稍后重新拍摄。`;return;}
-  const lines=job.lines||[];
-  target.innerHTML=`<p class="caption">${esc(job.instrument.name)} · ${esc(stamp(job.external_photo?.captured_at||job.submitted_at))}<br>照片识别结果，尚未人工核对</p>${lines.length?lines.map(line=>`<div class="ocr-line"><strong>${esc(line.text)}</strong></div>`).join(''):'<p>这次照片未读出数字，请调整角度、清晰度或选框后重新拍摄。</p>'}${job.outcome==='no_numeric_readout'&&lines.length?'<p class="caption">识别到了文字，但还没有完整的数字读数。</p>':''}<p><a href="${job.crop_image_url}" target="_blank" rel="noopener">查看面板照片 ↗</a> · <a href="/api/jobs/${job.job_id}" target="_blank" rel="noopener">结果 JSON ↗</a></p>`;
+  if(job.status!=='completed'){target.innerHTML=readoutPhoto(job)+`<p>${job.status==='cancelled'?'这次识别已取消，原因已保存在回执中。':'识别未完成，请稍后重新拍摄。'}</p>${readoutLatency(job)}${readoutIssue(job)}<a href="/api/jobs/${job.job_id}" target="_blank" rel="noopener">结果 JSON ↗</a>`;return;}
+  const lines=(job.lines||[]).filter(line=>job.device==='cloud'?line.numeric_candidates?.length:completeReadout.test(line.text));
+  target.innerHTML=readoutPhoto(job)+`<p class="caption">${esc(job.instrument?.name||'未绑定仪器')} · ${esc(stamp(job.external_photo?.captured_at||job.submitted_at))}<br>照片识别结果，尚未人工核对</p>${readoutLatency(job)}${lines.length?lines.map(line=>`<div class="ocr-line"><strong>${esc(line.text)}</strong></div>`).join(''):'<p>这次照片未读出数字，请调整角度、清晰度或选框后重新拍摄。</p>'}${readoutIssue(job)}<p><a href="${job.crop_image_url}" target="_blank" rel="noopener">查看面板照片 ↗</a> · <a href="/api/jobs/${job.job_id}" target="_blank" rel="noopener">结果 JSON ↗</a></p>`;
 }
 function watchJob(job){
   renderOcr(job);clearInterval(jobTimer);
   jobTimer=setInterval(async()=>{try{
     const result=await api(`/api/jobs/${job.job_id}`);
-    if(activeBinding?.binding_id===result.binding_id)renderOcr(result);
+    renderOcr(result);
     if(!['queued','running'].includes(result.status)){clearInterval(jobTimer);jobTimer=null;updateButtons();await refresh(false);}
   }catch(e){clearInterval(jobTimer);jobTimer=null;message(e.message,true);updateButtons();}},1000);
   updateButtons();
 }
-$('#ocr').onclick=busy($('#ocr'),async()=>{watchJob(await api('/api/ocr',json({binding_id:activeBinding.binding_id,capture_id:scan.capture_id,crop})));});
+$('#ocr').onclick=busy($('#ocr'),async()=>{watchJob(await api('/api/ocr',json({binding_id:activeBinding?.binding_id||null,capture_id:scan.capture_id,crop})));});
 function renderLatestJob(){
   if(jobTimer)return;
-  const latest=state.jobs.find(j=>j.binding_id===activeBinding?.binding_id);
+  const latest=state.jobs.find(j=>j.camera_id===(previewLive?state.camera.id:scan?.camera_id||state.camera.id));
   const key=latest?`${latest.job_id}:${latest.status}:${latest.phase}:${latest.finished_at}`:null;
   if(key!==displayedJobKey){
     displayedJobKey=key;
@@ -182,8 +202,8 @@ function renderLatestJob(){
 function renderPhotoWatch(){
   const watch=state.photo_watch;
   if(!watch){$('#photoWatchState').textContent='';return;}
-  const labels={disabled:'照片监控未开启',waiting_binding:'绑定后开始等待这台相机的语音照片',watching:'正在等待新的语音拍照文件',waiting_photo:'等待这台相机的第一张语音照片',waiting_queue:'已有照片正在识别，稍后处理新照片',storage_unavailable:'拍照存储暂不可用，正在等待恢复',storage_unconfigured:'尚未配置拍照存储',watch_error:'照片监控暂不可用',invalid_camera_directory:'相机照片目录不可用'};
-  $('#photoWatchState').textContent=watch.last_photo_status==='rejected'?`照片未能处理：${watch.detail}`:labels[watch.status]||'等待语音拍照';
+  const labels={disabled:'照片监控未开启',waiting_binding:'正在准备照片监控',watching:'正在等待新的语音拍照文件',waiting_photo:'等待这台相机的第一张语音照片',waiting_queue:'已有照片正在识别，稍后处理新照片',storage_unavailable:'拍照存储暂不可用，正在等待恢复',storage_unconfigured:'尚未配置拍照存储',watch_error:'照片监控暂不可用',invalid_camera_directory:'相机照片目录不可用'};
+  $('#photoWatchState').textContent=watch.last_photo_status==='rejected'?`照片未能处理：${watch.detail}`:`${labels[watch.status]||'等待语音拍照'}${watch.submitted_files!==undefined?' · 已接收 '+watch.submitted_files+' 张':''}${watch.pending_files?' · 待处理 '+watch.pending_files+' 张':''}`;
 }
 function renderAutomation(){
   const automatic=state.automation;
@@ -214,7 +234,7 @@ $('#autoPause').onclick=busy($('#autoPause'),async()=>{
   await refresh(false);message('自动扫码已暂停。已有绑定和语音照片监控仍保留；结束使用请点击结束绑定。');
 });
 function forms(){ $('#instrumentForms').innerHTML=state.instruments.map((a,i)=>`<form class="instrument-form" data-id="${esc(a.id)}"><strong>${esc(a.name)}</strong><div class="id">${esc(a.id)}</div><div class="row"><label class="field">仪器名称<input name="name" value="${esc(a.name)}" required maxlength="80"></label><label class="field">所属场景 / 实验区域<input name="scene" value="${esc(a.scene)}" placeholder="例如：A 实验室 / 离心区" required maxlength="100"></label></div><label class="field">型号（可选）<input name="model" value="${esc(a.model)}" maxlength="100"></label><button class="secondary" type="submit">保存登记</button> <a href="/static/labels/Instrument${a.id==='e9434a0a-3319-414a-b988-4cc6884edce4'?'A':'B'}.png" target="_blank" rel="noopener">查看标签 ↗</a></form>`).join('');document.querySelectorAll('.instrument-form').forEach(form=>form.onsubmit=async e=>{e.preventDefault();const button=form.querySelector('button');button.disabled=true;try{const values=Object.fromEntries(new FormData(form));await api(`/api/instruments/${form.dataset.id}`,{...json(values),method:'PUT'});await refresh(false);if(scan){scan.matches=scan.matches.map(m=>({...m,...state.instruments.find(a=>a.id===m.id)}));renderScan();}message('仪器与场景登记已保存。');}catch(err){message(err.message,true);}finally{button.disabled=false;}}); }
-async function refresh(renderForms=true){state=await api('/api/state');if(!previewInitialized&&state.camera.mode==='gwhp_main'){previewInitialized=true;if(!picture&&!stream)openPreview();}$('#cameraState').className='pill'+(state.camera.status==='streaming'?'':' warning');$('#cameraState').title=state.camera.id;$('#cameraState').textContent=state.camera.configured?`${{streaming:'主码流在线',discovering:'正在发现',reconnecting:'接收端连接失败',camera_offline:'设备离线',waiting_keyframe:'等待关键帧',not_started:'正在连接'}[state.camera.status]||'已配置取图'}`:`${state.camera.id} · 等待连接`;$('#ocrState').textContent=`PaddleOCR · ${(state.ocr.device||'cpu').toUpperCase()} · ${{not_loaded:'绑定后自动加载',queued:'等待后台加载',loading:'模型加载中',ready:'模型常驻 · 已就绪',error:'加载/识别失败'}[state.ocr.status]||state.ocr.status}`;activeBinding=state.bindings.find(b=>!b.ended_at&&b.camera_id===(previewLive?state.camera.id:scan?.camera_id||state.camera.id))||null;renderBinding();renderLatestJob();renderPhotoWatch();renderAutomation();const autoScan=state.automation?.session?.scan||state.last_camera_scan;if(autoScan && automationScanId!==autoScan.scan_id){automationScanId=autoScan.scan_id;await showScan(autoScan,{keepLive:state.automation?.session?.status!=='needs_selection',historical:!state.automation?.session?.scan});}if(renderForms)forms();renderHistory();}
+async function refresh(renderForms=true){state=await api('/api/state');if(!previewInitialized&&state.camera.mode==='gwhp_main'){previewInitialized=true;if(!picture&&!stream)openPreview();}$('#cameraState').className='pill'+(state.camera.status==='streaming'?'':' warning');$('#cameraState').title=state.camera.id;$('#cameraState').textContent=state.camera.configured?`${{streaming:'主码流在线',discovering:'正在发现',reconnecting:'接收端连接失败',camera_offline:'设备离线',waiting_keyframe:'等待关键帧',not_started:'正在连接'}[state.camera.status]||'已配置取图'}`:`${state.camera.id} · 等待连接`;$('#ocrState').textContent=`PaddleOCR · ${(state.ocr.device||'cpu').toUpperCase()} · ${{not_loaded:'等待加载',queued:'等待后台加载',loading:'模型加载中',ready:'模型常驻 · 已就绪',error:'加载/识别失败'}[state.ocr.status]||state.ocr.status}`;activeBinding=state.bindings.find(b=>!b.ended_at&&b.camera_id===(previewLive?state.camera.id:scan?.camera_id||state.camera.id))||null;renderBinding();renderLatestJob();renderPhotoWatch();renderAutomation();const autoScan=state.automation?.session?.scan||state.last_camera_scan;if(autoScan && automationScanId!==autoScan.scan_id){automationScanId=autoScan.scan_id;await showScan(autoScan,{keepLive:state.automation?.session?.status!=='needs_selection',historical:!state.automation?.session?.scan});}if(renderForms)forms();renderHistory();}
 
 $('#refresh').onclick=busy($('#refresh'),()=>refresh());
 $('#export').onclick=busy($('#export'),async()=>{const data=await api('/api/export');const url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='FieldRecognitionSession.json';a.click();URL.revokeObjectURL(url);});
@@ -229,7 +249,7 @@ function renderHistory(){
   $('#archiveStatus').textContent=archive.enabled?`NAS 留存：${archive.status==='ready'?'已连接':archive.status==='retrying'?'等待重试，记录保留在本机':'正在连接'} · 已归档 ${archive.archived_receipts||0} 条 · 待同步 ${archive.pending_receipts||0} 条`:'NAS 留存未启用，记录保存在本机。';
   $('#archiveStatus').title=archive.root||'';
   const events=state.activity||[];
-  const labels={scan:'扫码识别',binding_started:'仪器绑定',binding_ended:'结束绑定',scene_entered:'进入场景',scene_left:'结束场景',readout:'面板读数'};
+  const labels={photo:'语音照片',scan:'扫码识别',binding_started:'仪器绑定',binding_ended:'结束绑定',scene_entered:'进入场景',scene_left:'结束场景',readout:'面板读数'};
   $('#historyRows').innerHTML=events.length?`<div class="table-scroll"><table><thead><tr><th>时间</th><th>事件</th><th>对象与结果</th><th>实验员 / 相机</th><th>凭证</th></tr></thead><tbody>${events.map(event=>`<tr><td>${esc(stamp(event.occurred_at))}</td><td>${esc(labels[event.kind]||event.kind)}</td><td><strong>${esc(event.target)}</strong><small>${esc(event.status)}${event.detail?' · '+esc(event.detail):''}</small></td><td>${esc(displayOperator(event.operator)||'当时未记录')}<small>${esc(displayCamera(event.camera_id))}</small></td><td>${event.image_url?`<a href="${esc(event.image_url)}" target="_blank" rel="noopener">查看原图 ↗</a>`:'—'}</td></tr>`).join('')}</tbody></table></div>`:'当前相机尚无操作记录。成功解码、绑定和照片读数会按实际发生时间显示在这里。';
 }
 function showPage(){

@@ -1,4 +1,4 @@
-"""Read-only watch of the bound camera's existing voice photographs."""
+"""Read-only watch of the configured camera's photographs, with optional binding."""
 import copy
 import json
 import os
@@ -10,6 +10,9 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
+
+POLL_SECONDS = .5
+STABLE_SECONDS = .5
 
 
 class SavedPhotoWatcher:
@@ -24,6 +27,9 @@ class SavedPhotoWatcher:
         with core['db']() as conn:
             conn.execute('CREATE TABLE IF NOT EXISTS photo_watch_seen(binding_id TEXT, path TEXT, signature TEXT, '
                          'status TEXT, job_id TEXT, detail TEXT, observed_at TEXT, PRIMARY KEY(binding_id,path))')
+            conn.execute('CREATE TABLE IF NOT EXISTS photo_watch_files(camera TEXT, path TEXT, signature TEXT, '
+                         'status TEXT, job_id TEXT, detail TEXT, observed_at TEXT, PRIMARY KEY(camera,path))')
+            conn.execute('CREATE TABLE IF NOT EXISTS photo_watch_windows(camera TEXT PRIMARY KEY, started_at TEXT NOT NULL)')
 
     def enabled(self):
         return os.environ.get('FIELD_SAVED_PHOTO_WATCH_ENABLED', '0').lower() in {'1', 'true', 'yes'}
@@ -32,7 +38,7 @@ class SavedPhotoWatcher:
         with self.lock:
             result = copy.deepcopy(self.state)
         return result | {'enabled': self.enabled(), 'configured': bool(os.environ.get('FIELD_SAVED_PHOTO_ROOT')),
-                         'poll_seconds': 2, 'reads_existing_photos_only': True}
+                         'poll_seconds': POLL_SECONDS, 'stable_seconds': STABLE_SECONDS, 'reads_existing_photos_only': True}
 
     def start(self):
         if not self.enabled():
@@ -57,7 +63,7 @@ class SavedPhotoWatcher:
                 self.update(status='storage_unavailable')
             except Exception:
                 self.update(status='watch_error')
-            self.stop.wait(2)
+            self.stop.wait(POLL_SECONDS)
 
     def active_binding(self):
         camera = self.core['receiver_camera']
@@ -74,28 +80,25 @@ class SavedPhotoWatcher:
         if not self.enabled() or self.stop.is_set():
             return
         binding = self.active_binding()
-        if not binding:
-            self.binding_id = None
-            self.pending.clear()
-            self.update(status='waiting_binding', binding_id=None, last_job_id=None,
-                        last_photo=None, last_photo_status=None, detail=None)
-            return
-        if self.binding_id != binding['binding_id']:
-            self.pending.clear()
-            self.binding_id = binding['binding_id']
-            self.update(binding_id=self.binding_id, last_job_id=None,
-                        last_photo=None, last_photo_status=None, detail=None)
+        self.binding_id = binding['binding_id'] if binding else None
+        self.update(binding_id=self.binding_id)
         configured = os.environ.get('FIELD_SAVED_PHOTO_ROOT')
         if not configured:
             self.update(status='storage_unconfigured')
             return
         root = Path(configured)
-        camera = binding['camera_id']
-        if not re.fullmatch(r'[a-zA-Z0-9_-]+', camera):
+        receiver = self.core['receiver_camera']
+        camera = receiver.target if receiver else os.environ.get('FIELD_CAMERA_ID')
+        if not camera or not re.fullmatch(r'[a-zA-Z0-9_-]+', camera):
             self.update(status='invalid_camera_directory')
             return
-        # Never walk the NAS root or other cameras; only voice_photos/<bound camera>.
+        # Never walk the NAS root or other cameras; only voice_photos/<configured camera>.
         camera_root = root / camera
+        with self.core['db']() as conn:
+            settings = conn.execute('SELECT document FROM automation_settings WHERE camera=?', (camera,)).fetchone()
+            registered = json.loads(settings['document']).get('registered_at') if settings else None
+            conn.execute('INSERT OR IGNORE INTO photo_watch_windows VALUES(?,?)', (camera, registered or self.core['now']()))
+            window_start = conn.execute('SELECT started_at FROM photo_watch_windows WHERE camera=?', (camera,)).fetchone()[0]
         if not root.is_dir():
             self.update(status='storage_unavailable')
             return
@@ -106,14 +109,15 @@ class SavedPhotoWatcher:
             self.update(status='invalid_camera_directory')
             return
         zone = ZoneInfo(os.environ.get('FIELD_SAVED_PHOTO_TIMEZONE', 'Asia/Shanghai'))
-        started = datetime.fromisoformat(binding['started_at']).astimezone(zone)
+        started = datetime.fromisoformat(window_start).astimezone(zone)
         today = datetime.now(timezone.utc).astimezone(zone).strftime('%Y-%m-%d')
         with self.core['db']() as conn:
+            prefix = camera + '/'
             seen = {row['path']: row['signature'] for row in conn.execute(
-                'SELECT path,signature FROM photo_watch_seen WHERE binding_id=?', (self.binding_id,))}
-            if conn.execute("SELECT count(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0] >= 4:
-                self.update(status='waiting_queue')
-                return
+                'SELECT path,signature FROM photo_watch_seen WHERE substr(path,1,?)=?', (len(prefix), prefix))}
+            seen.update({row['path']: row['signature'] for row in conn.execute(
+                'SELECT path,signature FROM photo_watch_files WHERE camera=?', (camera,))})
+            queue_full = conn.execute("SELECT count(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0] >= 4
         candidates = []
         for day in sorted(camera_root.iterdir()):
             if (not re.fullmatch(r'\d{4}-\d{2}-\d{2}', day.name) or day.name < started.strftime('%Y-%m-%d')
@@ -139,22 +143,36 @@ class SavedPhotoWatcher:
                     relative = photo.relative_to(root).as_posix()
                     if seen.get(relative) == signature:
                         continue
-                    candidates.append((relative, signature))
-        waiting = set(path for path, _ in candidates)
+                    candidates.append((relative, signature, info.st_mtime))
+        waiting = {item[0] for item in candidates}
         self.pending = {path: value for path, value in self.pending.items() if path in waiting}
-        self.update(status='watching', last_checked_at=self.core['now'](), pending_files=len(candidates))
-        for relative, signature in candidates:
+        with self.core['db']() as conn:
+            processed = conn.execute("SELECT count(*) FROM photo_watch_files WHERE camera=? AND status='submitted'", (camera,)).fetchone()[0]
+        self.update(status='watching', camera_id=camera, watch_started_at=window_start,
+                    last_checked_at=self.core['now'](), pending_files=len(candidates), submitted_files=processed)
+        for relative, signature, written in candidates:
             prior = self.pending.get(relative)
             if not prior or prior[0] != signature:
-                self.pending[relative] = (signature, self.clock())
+                self.pending[relative] = (signature, self.clock(), self.core['now'](),
+                                          time.time() - written > 30, None)
+            prior = self.pending[relative]
+            if self.clock() - prior[1] >= STABLE_SECONDS and prior[4] is None:
+                self.pending[relative] = prior[:4] + (self.core['now'](),)
+        if queue_full:
+            self.update(status='waiting_queue')
+            return
+        for relative, signature, written in candidates:
+            prior = self.pending[relative]
+            if self.clock() - prior[1] < STABLE_SECONDS:
                 continue
-            if self.clock() - prior[1] < 1:
-                continue
-            if self.stop.is_set() or not self.core['current_readout_binding'](binding):
+            if self.stop.is_set():
                 return
             try:
-                body = self.core['SavedPhotoRequest'](binding_id=self.binding_id, image_path=relative)
-                job = self.core['read_saved_panel'](body, trigger='voice_photo_directory')
+                body = self.core['SavedPhotoRequest'](image_path=relative)
+                job = self.core['read_saved_panel'](body, trigger='voice_photo_directory',
+                    observation={'first_observed_at': prior[2], 'stable_at': prior[4],
+                                 'is_backfill': prior[3], 'watch_poll_seconds': POLL_SECONDS,
+                                 'file_stable_seconds': STABLE_SECONDS})
                 status, detail, job_id = 'submitted', None, job['job_id']
             except HTTPException as exc:
                 if exc.status_code == 429:
@@ -162,8 +180,8 @@ class SavedPhotoWatcher:
                     return
                 status, detail, job_id = 'rejected', str(exc.detail), None
             with self.core['db']() as conn:
-                conn.execute('INSERT OR REPLACE INTO photo_watch_seen VALUES(?,?,?,?,?,?,?)',
-                             (self.binding_id, relative, signature, status, job_id, detail, self.core['now']()))
+                conn.execute('INSERT OR REPLACE INTO photo_watch_files VALUES(?,?,?,?,?,?,?)',
+                             (camera, relative, signature, status, job_id, detail, self.core['now']()))
             self.pending.pop(relative, None)
             self.update(last_photo=relative, last_job_id=job_id, last_photo_status=status, detail=detail)
             # At most one new photo per poll, with the existing global queue bound.

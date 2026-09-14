@@ -10,6 +10,7 @@ import time
 import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from readout_timing import elapsed_ms
 
 
 TABLES = {'scans': 'id', 'bindings': 'id', 'scene_visits': 'id', 'jobs': 'id', 'automation_settings': 'camera'}
@@ -58,6 +59,7 @@ class ArchiveStore:
                     seq INTEGER PRIMARY KEY AUTOINCREMENT, entity TEXT NOT NULL, entity_id TEXT NOT NULL,
                     document TEXT NOT NULL, recorded_at TEXT NOT NULL, archived_at TEXT, receipt_path TEXT,
                     retry_after REAL NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT);
+                CREATE INDEX IF NOT EXISTS archive_entity_version ON archive_outbox(entity,entity_id,seq);
             ''')
             columns = {row[1] for row in conn.execute('PRAGMA table_info(archive_outbox)')}
             for name, declaration in [('retry_after', 'REAL NOT NULL DEFAULT 0'),
@@ -83,6 +85,17 @@ class ArchiveStore:
 
     def enabled(self):
         return os.environ.get('FIELD_ARCHIVE_ENABLED', '0').lower() in {'1', 'true', 'yes'}
+
+    def job_receipt(self, document):
+        with self.core['db']() as conn:
+            row = conn.execute("SELECT * FROM archive_outbox WHERE entity='jobs' AND entity_id=? ORDER BY seq DESC LIMIT 1",
+                               (document['job_id'],)).fetchone()
+        if not row:
+            return {'status': 'not_queued'}
+        return {'status': 'archived' if row['archived_at'] else 'pending', 'sequence': row['seq'],
+                'queued_at': row['recorded_at'], 'archived_at': row['archived_at'], 'receipt_path': row['receipt_path'],
+                'archive_queue_ms': elapsed_ms(row['recorded_at'], row['archived_at']),
+                'write_to_archive_ms': elapsed_ms((document.get('timing') or {}).get('source_written_at'), row['archived_at'])}
 
     def snapshot(self):
         with self.core['db']() as conn:
@@ -181,14 +194,19 @@ class ArchiveStore:
                   'jobs': '面板读数', 'automation_settings': '实验员登记 / 运行设置'}
         for row in rows:
             doc = json.loads(row['document'])
-            target = doc.get('instrument', {}).get('name') or doc.get('scene', {}).get('name') or '、'.join(
+            target = (doc.get('instrument') or {}).get('name') or (doc.get('scene') or {}).get('name') or '、'.join(
                 value['name'] for value in doc.get('matches', []) + doc.get('scene_matches', []))
+            if row['entity'] == 'jobs' and not doc.get('binding_id'):
+                target = '未绑定仪器 · 照片读数'
             state = doc.get('status') or ('已结束' if doc.get('ended_at') else '使用中' if row['entity'] in {'bindings','scene_visits'} else '已记录')
             readings = '、'.join(str(value['text']) for value in doc.get('lines', []) if value.get('text'))
             item = {'sequence': row['seq'], 'entity': row['entity'], 'entity_id': row['entity_id'],
                     'camera_id': doc.get('camera_id') or (row['entity_id'] if row['entity'] == 'automation_settings' else None),
                     'occurred_at': self.event_time(doc, row['recorded_at']), 'operator': doc.get('operator'),
-                    'target': target, 'status': state, 'readings': readings, 'receipt': row['receipt_path']}
+                    'target': target, 'status': state, 'readings': readings, 'receipt': row['receipt_path'],
+                    'archived_at': row['archived_at'],
+                    'archive_queue_ms': elapsed_ms(row['recorded_at'], row['archived_at']),
+                    'write_to_archive_ms': elapsed_ms((doc.get('timing') or {}).get('source_written_at'), row['archived_at'])}
             items.append(item)
             shown_time = datetime.fromisoformat(item['occurred_at']).astimezone(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M:%S')
             values = [shown_time, labels[row['entity']], item['camera_id'], item['operator'] or '当时未记录', target, state, readings]

@@ -26,6 +26,7 @@ from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field
 from ocr_runtime import configured_device, create_model, OcrDeviceUnavailable
 from activity import recent_activity
+from readout_timing import update_timing
 
 BASE = Path(__file__).parent
 OCR_DEVICE = configured_device()
@@ -76,7 +77,7 @@ async def lifespan(application):
         receiver_camera.start()
     with db() as conn:
         has_binding = conn.execute('SELECT 1 FROM bindings WHERE ended IS NULL LIMIT 1').fetchone()
-    if has_binding:
+    if has_binding or saved_photo_watcher.enabled():
         queue_ocr_warmup()
     saved_photo_watcher.start()
     archive_store.start()
@@ -221,7 +222,7 @@ class BindingRequest(BaseModel):
 
 
 class OcrRequest(BaseModel):
-    binding_id: uuid.UUID
+    binding_id: uuid.UUID | None = None
     capture_id: uuid.UUID
     crop: list[int] | None = None
 
@@ -422,6 +423,7 @@ def queue_ocr_warmup():
 def predict_panel(panel, x=0, y=0):
     """Manual requests and saved-photo events share the resident model."""
     started = time.monotonic()
+    ocr_started_at = now()
     invoked = False
     try:
         with ocr_lock:
@@ -437,11 +439,13 @@ def predict_panel(panel, x=0, y=0):
                     lines.append({'text': text, 'confidence': float(score), 'polygon': poly.tolist(),
                                   'numeric_candidates': re.findall(r'[-+]?\d+(?:\.\d+)?', text)})
         return {'status': 'completed', 'lines': lines, 'model': ocr_state['engine'],
+                'ocr_started_at': ocr_started_at, 'ocr_finished_at': now(),
                 'actual_model_invocation': True, 'device': OCR_DEVICE,
                 'wall_seconds': round(time.monotonic() - started, 3)}
     except Exception as exc:
         ocr_state.update(status='error', error=type(exc).__name__)
         return {'status': 'failed', 'lines': [], 'error': type(exc).__name__,
+                'ocr_started_at': ocr_started_at, 'ocr_finished_at': now(),
                 'model': ocr_state['engine'], 'device': OCR_DEVICE, 'actual_model_invocation': invoked,
                 'wall_seconds': round(time.monotonic() - started, 3)}
 
@@ -454,6 +458,15 @@ def run_ocr(document):
 def current_readout_binding(document):
     if stopping.is_set():
         return False
+    if (document.get('job_id') and document.get('capture_id')
+            and document.get('source') == 'agent_saved_photo'
+            and document.get('request_trigger') == 'voice_photo_directory'):
+        # The persisted photograph and its binding-at-capture snapshot survive a
+        # later device disconnect. Do not discard a requested historical reading.
+        return True
+    if document.get('binding_id') is None:
+        return bool(document.get('job_id') and document.get('capture_id')
+                    and document.get('instrument_association') == 'unbound_photo')
     with db() as conn:
         row = conn.execute('SELECT * FROM bindings WHERE id=?', (document['binding_id'],)).fetchone()
         if not row or row['ended']:
@@ -492,46 +505,52 @@ def enqueue_ocr(body, *, trigger='explicit_request'):
     with db() as conn:
         binding = conn.execute('SELECT * FROM bindings WHERE id=?', (str(body.binding_id),)).fetchone()
         capture = conn.execute('SELECT document FROM scans WHERE id=?', (str(body.capture_id),)).fetchone()
-        if not binding or binding['ended']:
+        if body.binding_id is not None and (not binding or binding['ended']):
             raise HTTPException(409, '请先建立有效的仪器绑定')
         if not capture:
             raise HTTPException(404, '图片不存在')
         capture = json.loads(capture['document'])
-        if binding['camera'] != capture['camera_id']:
+        if binding and binding['camera'] != capture['camera_id']:
             raise HTTPException(409, '图片来源与绑定相机不一致')
-        linked = json.loads(binding['document'])
-        current_asset = get_instrument(linked['instrument']['id'])
-        if not current_asset or current_asset['scene'] != linked['instrument']['scene']:
-            raise HTTPException(409, '仪器所属场景已更改，请重新绑定')
-        visit = optional_scene(conn, binding['camera'], linked['instrument']['scene'])
-        if linked.get('scene_visit_id') != (visit['visit_id'] if visit else None):
-            raise HTTPException(409, '场景已变化，请重新绑定仪器')
-        if capture['received_at'] < linked['started_at'] and capture['scan_id'] != linked['scan_id']:
-            raise HTTPException(409, '图片早于本次绑定，请重新拍照')
+        linked = json.loads(binding['document']) if binding else None
+        if linked:
+            current_asset = get_instrument(linked['instrument']['id'])
+            if not current_asset or current_asset['scene'] != linked['instrument']['scene']:
+                raise HTTPException(409, '仪器所属场景已更改，请重新绑定')
+            visit = optional_scene(conn, binding['camera'], linked['instrument']['scene'])
+            if linked.get('scene_visit_id') != (visit['visit_id'] if visit else None):
+                raise HTTPException(409, '场景已变化，请重新绑定仪器')
+            if capture['received_at'] < linked['started_at'] and capture['scan_id'] != linked['scan_id']:
+                raise HTTPException(409, '图片早于本次绑定，请重新拍照')
         seen = {item['id'] for item in capture['matches']}
-        if seen and seen != {linked['instrument']['id']}:
+        if linked and seen and seen != {linked['instrument']['id']}:
             raise HTTPException(409, '图片仪器二维码与当前绑定冲突，请重新选择仪器')
+        binding_id = str(body.binding_id) if body.binding_id else None
         crop = body.crop if body.crop is not None else [0, 0, capture['width'], capture['height']]
         if len(crop) != 4 or min(crop[:2]) < 0 or min(crop[2:]) < 16 or crop[0]+crop[2] > capture['width'] or crop[1]+crop[3] > capture['height']:
             raise HTTPException(422, '面板选框超出图片，或区域太小')
         for pending in conn.execute("SELECT document FROM jobs WHERE status IN ('queued','running')"):
             existing = json.loads(pending['document'])
-            if (existing['binding_id'] == str(body.binding_id) and existing['capture_id'] == str(body.capture_id)
+            if (existing['binding_id'] == binding_id and existing['capture_id'] == str(body.capture_id)
                     and existing['crop'] == crop):
                 return existing
         if conn.execute("SELECT count(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0] >= 4:
             raise HTTPException(429, 'OCR 正在处理，请稍候再提交')
-        document = {'job_id': str(uuid.uuid4()), 'binding_id': str(body.binding_id),
+        document = {'job_id': str(uuid.uuid4()), 'binding_id': binding_id,
                     'capture_id': str(body.capture_id), 'crop': crop, 'submitted_at': now(),
                     'status': 'queued', 'image_url': capture['image_url'],
-                    'image_sha256': capture['image_sha256'], 'instrument': linked['instrument'],
-                    'operator': linked['operator'], 'camera_id': capture['camera_id'],
-                    'scene_visit_id': linked.get('scene_visit_id'), 'scene': linked['scene'],
-                    'scene_basis': linked.get('scene_basis', 'decoded_scene_qr'),
-                    'scene_qr_verified': linked.get('scene_qr_verified', bool(linked.get('scene_visit_id'))),
-                    'instrument_association': 'same_image_qr' if seen else 'operator_selected_current_binding',
+                    'image_sha256': capture['image_sha256'], 'instrument': linked['instrument'] if linked else None,
+                    'operator': linked['operator'] if linked else capture.get('operator'), 'camera_id': capture['camera_id'],
+                    'operator_basis': 'binding_snapshot' if linked else capture.get('operator_basis', 'not_recorded'),
+                    'operator_registration': capture.get('operator_registration'),
+                    'scene_visit_id': linked.get('scene_visit_id') if linked else None, 'scene': linked['scene'] if linked else None,
+                    'scene_basis': linked.get('scene_basis', 'decoded_scene_qr') if linked else 'unbound',
+                    'scene_qr_verified': linked.get('scene_qr_verified', bool(linked.get('scene_visit_id'))) if linked else False,
+                    'instrument_association': ('same_image_qr' if seen else 'operator_selected_current_binding') if linked else 'unbound_photo',
                     'source': capture['source'], 'frame_metadata': capture.get('frame_metadata'),
+                    'timing': dict(capture.get('photo_observation') or {}),
                     'external_photo': capture.get('external_photo'), 'request_trigger': trigger}
+        update_timing(document)
         conn.execute('INSERT INTO jobs VALUES(?,?,?)', (document['job_id'], 'queued', json.dumps(document)))
     readout_pool.submit(run_ocr, dict(document))
     return document
@@ -543,7 +562,8 @@ def get_job(job_id: uuid.UUID):
         row = conn.execute('SELECT * FROM jobs WHERE id=?', (str(job_id),)).fetchone()
     if not row:
         raise HTTPException(404, '任务不存在')
-    return json.loads(row['document']) | {'status': row['status']}
+    document = json.loads(row['document']) | {'status': row['status']}
+    return document | {'archive': archive_store.job_receipt(document)}
 
 
 @app.get('/api/export')

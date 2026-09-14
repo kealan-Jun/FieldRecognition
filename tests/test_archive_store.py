@@ -164,3 +164,6 @@ def test_binding_lifecycle_and_ocr_result_retain_linked_photo_and_crop(archive, 
     for artifact in output['artifacts'].values():
         assert hashlib.sha256((root / artifact['path']).read_bytes()).hexdigest() == artifact['sha256']
     assert app.archive_store.snapshot()['pending_receipts'] == 0
+    stored = app.get_job(job['job_id'])
+    assert stored['archive']['status'] == 'archived'
+    assert stored['archive']['archived_at'] and stored['archive']['archive_queue_ms'] >= 0

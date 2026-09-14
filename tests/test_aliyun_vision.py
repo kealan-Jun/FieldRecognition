@@ -94,3 +94,16 @@ def test_incomplete_reply_is_not_a_reading(enabled, monkeypatch):
     monkeypatch.setattr(vision, '_request', lambda *a: partial)
     result = vision.read_panel(np.zeros((80, 100, 3), np.uint8))
     assert result['error'] == 'incomplete_answer'
+
+
+def test_arrearage_has_actionable_code_without_provider_message(enabled, monkeypatch):
+    calls = []
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(400, json={'error': {'code': 'Arrearage', 'message': 'test-only-secret'}})
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        monkeypatch.setattr(httpx, 'stream', lambda method, url, **kw: client.stream(method, url, headers=kw['headers'], json=kw['json']))
+        result = vision.read_panel(np.zeros((80, 100, 3), np.uint8))
+    assert result['error'] == 'account_arrearage' and result['provider_code'] == 'Arrearage'
+    assert result['http_status'] == 400 and not result['actual_model_invocation']
+    assert len(calls) == 1 and 'test-only-secret' not in json.dumps(result)

@@ -6,9 +6,11 @@ import time
 import cv2
 
 import aliyun_vision as vision
+from readout_timing import update_timing
 
 
 def save(core, document):
+    update_timing(document)
     with core['db']() as conn:
         conn.execute('UPDATE jobs SET status=?,document=? WHERE id=?',
                      (document['status'], json.dumps(document), document['job_id']))
@@ -70,12 +72,14 @@ def run(core, document, *, clock=time.monotonic, pause=time.sleep):
             if not valid():
                 cancelled()
                 return
-            if core['reserve_fallback'](document['binding_id']):
+            fallback_scope = document.get('binding_id') or 'unbound-camera:' + document['camera_id']
+            if core['reserve_fallback'](fallback_scope):
                 document.update(phase='extended_reading', fallback={'status': 'running', 'trigger': reason,
                                 'trigger_elapsed_seconds': round(clock() - started, 3), 'attempted_at': core['now']()})
                 save(core, document)
                 cloud = vision.read_panel(panel)
                 document['fallback'].update(cloud)
+                document['fallback']['finished_at'] = core['now']()
             else:
                 document['fallback'] = {'status': 'skipped', 'reason': 'cooldown', 'cooldown_seconds': 30}
         local = result_if_ready()
@@ -119,6 +123,7 @@ def run(core, document, *, clock=time.monotonic, pause=time.sleep):
                     row = conn.execute('SELECT document FROM jobs WHERE id=?', (document['job_id'],)).fetchone()
                     stored = json.loads(row['document'])
                     stored.update(local_ocr=late, local_ocr_finished_late=True)
+                    update_timing(stored)
                     conn.execute('UPDATE jobs SET document=? WHERE id=?', (json.dumps(stored), document['job_id']))
             future.add_done_callback(late_result)
             future.cancel()

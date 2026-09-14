@@ -30,9 +30,10 @@ readable 至少包含一个完整数字读数。所有结果仍需人核对。''
 
 
 class CloudError(Exception):
-    def __init__(self, code, http_status=None):
+    def __init__(self, code, http_status=None, provider_code=None):
         super().__init__(code)
         self.code, self.http_status = code, http_status
+        self.provider_code = provider_code
 
 
 class Reading(BaseModel):
@@ -120,7 +121,22 @@ def _request(payload, key):
             if response.status_code != 200:
                 code = {401: 'authentication_failed', 403: 'access_denied', 404: 'model_or_endpoint_unavailable',
                         429: 'rate_or_quota_limit'}.get(response.status_code, 'provider_http_error')
-                raise CloudError(code, response.status_code)
+                # Retain only recognized error codes, never provider messages that
+                # could echo credentials, prompts or image bytes. Bound error reads.
+                provider_code = None
+                error_body = bytearray()
+                for block in response.iter_bytes(4096):
+                    error_body.extend(block)
+                    if len(error_body) > 16384 or time.monotonic() > deadline:
+                        break
+                if len(error_body) <= 16384:
+                    try:
+                        error = json.loads(error_body).get('error', {})
+                        if isinstance(error, dict) and error.get('code') == 'Arrearage':
+                            code, provider_code = 'account_arrearage', 'Arrearage'
+                    except (ValueError, AttributeError):
+                        pass
+                raise CloudError(code, response.status_code, provider_code)
             data = bytearray()
             for block in response.iter_bytes(16384):
                 data.extend(block)
@@ -174,6 +190,8 @@ def read_panel(panel):
                        request_id=response.get('id'), returned_model=response.get('model'), usage=response.get('usage'))
     except CloudError as exc:
         receipt.update(status='failed', error=exc.code, http_status=exc.http_status)
+        if exc.provider_code:
+            receipt['provider_code'] = exc.provider_code
     except (KeyError, IndexError, TypeError, ValueError, ValidationError):
         receipt.update(status='failed', error='invalid_answer')
     except Exception:

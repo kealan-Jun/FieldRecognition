@@ -23,11 +23,12 @@ class PhotoResult(BaseModel):
     image_base64: str = Field(min_length=1, max_length=16 * 1024 * 1024)
     sha256: str | None = Field(default=None, pattern=r'^[a-fA-F0-9]{64}$')
     timestamp_basis: str = Field(default='agent_photo_receipt', max_length=100)
+    source_written_at: AwareDatetime | None = None
 
 
 class SavedPhotoRequest(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    binding_id: uuid.UUID
+    binding_id: uuid.UUID | None = None
     photo: PhotoResult | None = None
     image_path: str | None = Field(default=None, min_length=1, max_length=2000)
     crop: list[int] | None = None
@@ -76,6 +77,7 @@ def load_saved_photo(image_path, *, expected_camera, max_bytes):
     return PhotoResult(capture_id=relative.as_posix(), camera_id=camera, captured_at=captured,
                        source_ref=str(path), image_base64=base64.b64encode(raw).decode(),
                        sha256=hashlib.sha256(raw).hexdigest(),
+                       source_written_at=datetime.fromtimestamp(after.st_mtime, timezone.utc),
                        timestamp_basis='nas_filename_local_time_not_hardware_verified')
 
 
@@ -84,18 +86,33 @@ def install(core):
         conn.execute('CREATE TABLE IF NOT EXISTS imported_photos(camera_id TEXT, source_capture_id TEXT, '
                      'sha256 TEXT NOT NULL, capture_id TEXT NOT NULL, PRIMARY KEY(camera_id,source_capture_id))')
 
-    def read_saved_panel(body, *, trigger='explicit_request'):
+    def read_saved_panel(body, *, trigger='explicit_request', observation=None):
         with core['ocr_submit_lock']:
-            if not core['current_readout_binding']({'binding_id': str(body.binding_id)}):
+            if body.binding_id and not core['current_readout_binding']({'binding_id': str(body.binding_id)}):
                 raise HTTPException(409, '请先建立有效的仪器绑定')
             with core['db']() as conn:
-                binding = json.loads(conn.execute('SELECT document FROM bindings WHERE id=?', (str(body.binding_id),)).fetchone()['document'])
-            photo = body.photo or load_saved_photo(body.image_path, expected_camera=binding['camera_id'], max_bytes=core['MAX_BYTES'])
-            if photo.camera_id != binding['camera_id']:
+                row = conn.execute('SELECT document FROM bindings WHERE id=?', (str(body.binding_id),)).fetchone() if body.binding_id else None
+            binding = json.loads(row['document']) if row else None
+            camera = core['receiver_camera']
+            target = (binding['camera_id'] if binding else camera.target if camera else
+                      os.environ.get('FIELD_CAMERA_ID') or (body.photo.camera_id if body.photo else None))
+            if not target:
+                raise HTTPException(409, '请先配置语音照片所属相机')
+            read_started = core['now']()
+            photo = body.photo or load_saved_photo(body.image_path, expected_camera=target, max_bytes=core['MAX_BYTES'])
+            photo_read_at = core['now']()
+            if photo.camera_id != target:
                 raise HTTPException(409, '拍照结果的相机与当前绑定不一致')
-            if (photo.captured_at < datetime.fromisoformat(binding['started_at']) or
+            if ((binding and photo.captured_at < datetime.fromisoformat(binding['started_at'])) or
                     photo.captured_at > datetime.now(timezone.utc) + timedelta(seconds=60)):
                 raise HTTPException(409, '拍照时间早于本次绑定或在未来，请核对拍照回执')
+            if not binding and trigger == 'voice_photo_directory':
+                with core['db']() as conn:
+                    row = conn.execute('SELECT document FROM bindings WHERE camera=? AND ended IS NULL', (target,)).fetchone()
+                candidate = json.loads(row['document']) if row else None
+                if (candidate and photo.captured_at >= datetime.fromisoformat(candidate['started_at'])
+                        and core['current_readout_binding'](candidate)):
+                    binding = candidate
             try:
                 raw = base64.b64decode(photo.image_base64, validate=True)
             except (ValueError, binascii.Error):
@@ -103,7 +120,7 @@ def install(core):
             digest = hashlib.sha256(raw).hexdigest()
             if photo.sha256 and digest != photo.sha256.lower():
                 raise HTTPException(422, '照片内容与拍照回执的 SHA-256 不一致')
-            external = photo.model_dump(mode='json', exclude={'image_base64', 'sha256'}) | {'source_sha256': digest}
+            external = photo.model_dump(mode='json', exclude={'image_base64', 'sha256'}, exclude_none=True) | {'source_sha256': digest}
             with core['db']() as conn:
                 existing = conn.execute('SELECT * FROM imported_photos WHERE camera_id=? AND source_capture_id=?',
                                         (photo.camera_id, photo.capture_id)).fetchone()
@@ -111,7 +128,10 @@ def install(core):
                     if existing['sha256'] != digest:
                         raise HTTPException(409, '同一个拍照结果编号对应的照片内容发生变化')
                     capture = json.loads(conn.execute('SELECT document FROM scans WHERE id=?', (existing['capture_id'],)).fetchone()['document'])
-                    if capture['external_photo'] != external:
+                    comparison = dict(external)
+                    if 'source_written_at' not in capture['external_photo']:
+                        comparison.pop('source_written_at', None)
+                    if capture['external_photo'] != comparison:
                         raise HTTPException(409, '同一个拍照结果编号的原始回执发生变化')
                 else:
                     capture = None
@@ -120,6 +140,23 @@ def install(core):
                 # interpreted as a filesystem path or a URL to fetch by this service.
                 capture = core['scan_image'](raw, 'agent_saved_photo', photo.camera_id)
                 capture['external_photo'] = external
+                capture['photo_observation'] = dict(observation or {}) | {'imported_at': core['now'](),
+                    'read_started_at': read_started, 'photo_read_at': photo_read_at,
+                    'source_written_at': external.get('source_written_at'),
+                    'source_written_basis': ('nas_file_mtime' if body.image_path else
+                                             'agent_receipt' if photo.source_written_at else 'not_recorded')}
+                # Attribute only a registration that already existed when this photo
+                # was taken. A later registrant must not be assigned to older photos.
+                with core['db']() as conn:
+                    row = conn.execute('SELECT document FROM automation_settings WHERE camera=?', (target,)).fetchone()
+                registration = json.loads(row['document']) if row else {}
+                registered = registration.get('registered_at')
+                if registered and datetime.fromisoformat(registered) <= photo.captured_at:
+                    capture.update(operator=registration.get('operator') or None,
+                                   operator_basis='camera_registration',
+                                   operator_registration={'operator': registration.get('operator'), 'registered_at': registered})
+                else:
+                    capture.update(operator=None, operator_basis='not_recorded', operator_registration=None)
                 with core['db']() as conn:
                     conn.execute('UPDATE scans SET document=? WHERE id=?', (json.dumps(capture), capture['capture_id']))
                     conn.execute('INSERT INTO imported_photos VALUES(?,?,?,?)',
@@ -130,11 +167,18 @@ def install(core):
             with core['db']() as conn:
                 for row in conn.execute('SELECT status,document FROM jobs ORDER BY rowid DESC'):
                     job = json.loads(row['document'])
-                    if (job['binding_id'] == str(body.binding_id) and job['capture_id'] == capture['capture_id']
+                    if (job['capture_id'] == capture['capture_id']
                             and job['crop'] == requested_crop):
                         return job | {'status': row['status']}
-            return core['enqueue_ocr'](core['OcrRequest'](binding_id=body.binding_id,
-                                    capture_id=capture['capture_id'], crop=body.crop), trigger=trigger)
+            try:
+                return core['enqueue_ocr'](core['OcrRequest'](binding_id=binding['binding_id'] if binding else None,
+                                        capture_id=capture['capture_id'], crop=body.crop), trigger=trigger)
+            except HTTPException as exc:
+                # A photo must still be read if its optional automatic association is
+                # stale or conflicts with a decoded QR. Explicit binding requests stay strict.
+                if exc.status_code != 409 or body.binding_id or not binding:
+                    raise
+                return core['enqueue_ocr'](core['OcrRequest'](capture_id=capture['capture_id'], crop=body.crop), trigger=trigger)
 
     core['SavedPhotoRequest'] = SavedPhotoRequest
     core['read_saved_panel'] = read_saved_panel

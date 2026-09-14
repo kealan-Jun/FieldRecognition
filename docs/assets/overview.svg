@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420" role="img" aria-labelledby="title desc">
   <title id="title">FieldRecognition workflow</title>
-  <desc id="desc">Live video decodes a scene and instrument QR code to create a binding. The existing Agent saves a voice-triggered photo to NAS. Resident PaddleOCR reads it, with an Aliyun vision fallback after five seconds without a complete numeric candidate, when enabled and permitted. Each result retains its image, timestamp and binding evidence.</desc>
+  <desc id="desc">Live video decodes a scene and instrument QR code to create a binding. The existing Agent saves a voice-triggered photo to NAS. Resident PaddleOCR reads it, with an Aliyun vision fallback after five seconds without a complete numeric candidate, when enabled and permitted. Photos are processed even without a binding. Each result retains its image, stage timestamps and any binding evidence.</desc>
   <defs>
     <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
       <stop stop-color="#f2f8f7"/>
@@ -37,22 +37,22 @@
     </g>
     <g fill="#163d43" font-size="22" font-weight="700">
       <text x="61" y="202">Live video</text>
-      <text x="349" y="202">Bind once</text>
+      <text x="349" y="202">Optional binding</text>
       <text x="637" y="202">Voice photo</text>
       <text x="925" y="202">Read the panel</text>
     </g>
     <g fill="#526c70" font-size="14">
-      <text x="61" y="231">Decode scene + instrument QR.</text>
+      <text x="61" y="231">Decode an instrument QR.</text>
       <text x="61" y="254">One valid frame can bind.</text>
       <text x="349" y="231">Reuse the active relationship.</text>
       <text x="349" y="254">Keep OCR resident on GPU.</text>
       <text x="637" y="231">Use the Agent's saved image.</text>
-      <text x="637" y="254">Watch stable NAS files.</text>
+      <text x="637" y="254">Watch NAS, with or without QR.</text>
       <text x="925" y="231">PaddleOCR first.</text>
       <text x="925" y="254">Timed Aliyun vision fallback.</text>
     </g>
     <rect x="40" y="320" width="1120" height="65" rx="12" fill="#204e55"/>
-    <text x="62" y="346" font-size="13" font-weight="700" fill="#ffffff">Every result stays linked to its photo, time and instrument binding.</text>
+    <text x="62" y="346" font-size="13" font-weight="700" fill="#ffffff">Every result retains its photo, stage times and any verified binding.</text>
     <text x="62" y="369" font-size="12" fill="#c3deda">Rebind after the capture service session becomes invalid. Fallback: 5 s without digits, when enabled and permitted.</text>
   </g>
 </svg>

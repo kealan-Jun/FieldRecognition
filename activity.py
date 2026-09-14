@@ -1,5 +1,6 @@
 """Read-only activity timeline from stored receipts, including unbound QR hits."""
 import json
+from datetime import datetime
 
 
 def recent_activity(conn, camera_id=None, limit=50):
@@ -14,7 +15,7 @@ def recent_activity(conn, camera_id=None, limit=50):
             params + [limit]).fetchall()
 
     def add(doc, kind, timestamp, target, status, evidence=None, detail='', operator=None):
-        events.append({'event_id': f'{kind}:{doc.get("scan_id") if kind == "scan" else doc.get("job_id") or doc.get("binding_id") or doc.get("visit_id")}',
+        events.append({'event_id': f'{kind}:{doc.get("scan_id") if kind in {"scan", "photo"} else doc.get("job_id") or doc.get("binding_id") or doc.get("visit_id")}',
                        'kind': kind, 'occurred_at': timestamp, 'camera_id': doc['camera_id'],
                        'operator': doc.get('operator') if operator is None else operator,
                        'target': target, 'status': status, 'detail': detail, 'image_url': evidence})
@@ -33,7 +34,8 @@ def recent_activity(conn, camera_id=None, limit=50):
             detail = '已记录场景进入' if visit else '场景二维码已识别'
         else:
             detail = '照片已保存，无已登记二维码匹配'
-        add(doc, 'scan', doc['received_at'], '、'.join(hit['name'] for hit in hits) or '照片',
+        add(doc, 'photo' if doc.get('source') == 'agent_saved_photo' else 'scan',
+            (doc.get('external_photo') or {}).get('captured_at') or doc['received_at'], '、'.join(hit['name'] for hit in hits) or '照片',
             '已识别' if hits else '已留存', doc['image_url'], detail)
 
     for row in rows('bindings', 'started_at'):
@@ -60,6 +62,7 @@ def recent_activity(conn, camera_id=None, limit=50):
                  'interrupted': '识别中断', 'cancelled': '识别取消'}.get(status, status)
         if status == 'completed':
             label = '未读出完整数字' if doc.get('outcome') == 'no_numeric_readout' else '识别完成'
-        add(doc, 'readout', doc.get('finished_at') or doc['submitted_at'], doc['instrument']['name'],
+        add(doc, 'readout', doc.get('finished_at') or doc['submitted_at'],
+            (doc.get('instrument') or {}).get('name') or '未绑定仪器 · 照片读数',
             label, doc.get('crop_image_url') or doc.get('image_url'), readings)
-    return sorted(events, key=lambda event: (event['occurred_at'], event['event_id']), reverse=True)[:limit]
+    return sorted(events, key=lambda event: (datetime.fromisoformat(event['occurred_at']), event['event_id']), reverse=True)[:limit]
