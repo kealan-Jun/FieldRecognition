@@ -1,6 +1,5 @@
 """Transactional receipt outbox and immutable, content-addressed NAS archival."""
 import hashlib
-import html
 import json
 import os
 from pathlib import Path
@@ -29,6 +28,19 @@ def receipt_status(conn, entity, entity_id, source_written_at=None):
 
 def canonical(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()
+
+
+def replace_view(path, data):
+    """Atomically refresh a derived view; primary receipt/object files use immutable_write."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name('.' + path.name + '.' + uuid.uuid4().hex + '.tmp')
+    try:
+        with temporary.open('xb') as target:
+            target.write(data); target.flush(); os.fsync(target.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def immutable_write(path, data):
@@ -63,6 +75,9 @@ class ArchiveStore:
         self.lock = threading.Lock()
         self.worker = None
         self.status = {'status': 'disabled', 'last_error': None, 'last_archived_at': None}
+        base = Path(__file__).parent
+        self.index_version = '2:' + hashlib.sha256(b''.join((base / p).read_bytes()
+            for p in ('archive_catalog.py', 'static/archive.html', 'static/archive.js'))).hexdigest()[:16]
         with core['db']() as conn:
             conn.executescript('''
                 CREATE TABLE IF NOT EXISTS archive_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -94,6 +109,9 @@ class ArchiveStore:
                         SELECT ?,{key},{document},? FROM {table}''', (table, core['now']()))
                 conn.execute("INSERT INTO archive_meta VALUES('backfilled','1')")
 
+        from archive_integrity import ArchiveIntegrity
+        self.integrity = ArchiveIntegrity(self)
+
     def enabled(self):
         return os.environ.get('FIELD_ARCHIVE_ENABLED', '0').lower() in {'1', 'true', 'yes'}
 
@@ -110,9 +128,9 @@ class ArchiveStore:
             status = dict(self.status)
         return status | {'enabled': self.enabled(), 'pending_receipts': pending, 'archived_receipts': archived,
                          'root': os.environ.get('FIELD_ARCHIVE_ROOT'), 'source_instance': self.instance,
-                         'ordinary_video_frames_saved': False}
+                         'ordinary_video_frames_saved': False, 'integrity': self.integrity.snapshot()}
 
-    def _root(self):
+    def _root(self, *, create=True):
         configured = os.environ.get('FIELD_ARCHIVE_ROOT')
         if not configured:
             raise ValueError('Archive root is not configured')
@@ -123,7 +141,10 @@ class ArchiveStore:
             raise OSError('Archive mount unavailable')
         if root.name != 'FieldRecognitionArchive' or 'VisionCortexExperimentArchive' in root.parts:
             raise ValueError('Archive must use its own FieldRecognitionArchive directory')
-        root.mkdir(parents=True, exist_ok=True)
+        if create:
+            root.mkdir(parents=True, exist_ok=True)
+        elif not root.is_dir():
+            raise FileNotFoundError('Archive directory unavailable')
         return root
 
     def _artifact(self, root, relative, expected):
@@ -190,54 +211,17 @@ class ArchiveStore:
                      if doc.get(key)), fallback)
 
     def write_index(self):
+        from archive_catalog import build_index, render_index
         root = self._root()
         with self.core['db']() as conn:
-            rows = conn.execute('SELECT * FROM archive_outbox WHERE archived_at IS NOT NULL ORDER BY seq DESC LIMIT 200').fetchall()
-            count = conn.execute('SELECT count(*) FROM archive_outbox WHERE archived_at IS NOT NULL').fetchone()[0]
-        items, table = [], []
-        labels = {'scans': '扫码 / 照片', 'bindings': '仪器绑定', 'scene_visits': '场景关系',
-                  'jobs': '面板读数', 'automation_settings': '实验员登记 / 运行设置'}
-        for row in rows:
-            doc = json.loads(row['document'])
-            target = (doc.get('instrument') or {}).get('name') or (doc.get('scene') or {}).get('name') or '、'.join(
-                value['name'] for value in doc.get('matches', []) + doc.get('scene_matches', []))
-            if row['entity'] == 'jobs' and not doc.get('binding_id'):
-                target = '未绑定仪器 · 照片读数'
-            state = doc.get('status') or ('已结束' if doc.get('ended_at') else '使用中' if row['entity'] in {'bindings','scene_visits'} else '已记录')
-            readings = '、'.join(str(value['text']) for value in doc.get('lines', []) if value.get('text'))
-            item = {'sequence': row['seq'], 'entity': row['entity'], 'entity_id': row['entity_id'],
-                    'camera_id': doc.get('camera_id') or (row['entity_id'] if row['entity'] == 'automation_settings' else None),
-                    'occurred_at': self.event_time(doc, row['recorded_at']), 'operator': doc.get('operator'),
-                    'target': target, 'status': state, 'readings': readings, 'receipt': row['receipt_path'],
-                    'archived_at': row['archived_at'],
-                    'archive_queue_ms': elapsed_ms(row['recorded_at'], row['archived_at']),
-                    'write_to_archive_ms': elapsed_ms((doc.get('timing') or {}).get('source_written_at'), row['archived_at'])}
-            items.append(item)
-            shown_time = datetime.fromisoformat(item['occurred_at']).astimezone(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M:%S')
-            values = [shown_time, labels[row['entity']], item['camera_id'], item['operator'] or '当时未记录', target, state, readings]
-            cells = ''.join('<td>' + html.escape(str(value or '—')) + '</td>' for value in values)
-            table.append('<tr>' + cells + '<td><a href="' + html.escape(row['receipt_path'], quote=True) + '">完整回执</a></td></tr>')
-        index = {'schema': 'field-recognition-index/1', 'timezone': 'Asia/Shanghai', 'source_instance': self.instance,
-                 'updated_at': self.core['now'](), 'archived_receipts': count, 'listed_receipts': len(items),
-                 'older_receipts': 'All immutable versions remain in Receipts/', 'items': items}
-        overview = '''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>现场识别 · NAS 留存</title>
-<style>body{font:14px/1.7 system-ui;margin:40px;color:#193b42;background:#f4f7f8}table{border-collapse:collapse;background:white;width:100%}td,th{padding:10px;text-align:left;border-bottom:1px solid #d7e2e4}small{color:#60777c}a{color:#236673}</style>
-<h1>现场识别 · NAS 留存</h1><p>按相机与日期保留照片、绑定、场景与 OCR 回执。下表为最近 200 次记录变化，完整历史在 Receipts 目录，照片原件与面板图在 Objects 目录。</p>
-<p><small>时间显示为 Asia/Shanghai。未记录的人员不补写；识别结果不代表已经确认物理操作。历史版本可能只保留规范化图片，完整回执会明确说明原始字节是否存在。</small></p>
-<table><thead><tr><th>时间</th><th>类别</th><th>相机</th><th>实验员</th><th>仪器 / 场景</th><th>状态</th><th>读数</th><th>凭证</th></tr></thead><tbody>''' + ''.join(table) + '</tbody></table></html>'
-        # The index is a replaceable view; receipt and object files are immutable.
-        for name, raw in [('Index.json', canonical(index)), ('Readme.html', overview.encode())]:
-            temporary = root / ('.' + name + '.' + uuid.uuid4().hex + '.tmp')
-            try:
-                with temporary.open('xb') as output:
-                    output.write(raw)
-                    output.flush()
-                    os.fsync(output.fileno())
-                os.replace(temporary, root / name)
-            finally:
-                temporary.unlink(missing_ok=True)
+            rows = conn.execute('SELECT * FROM archive_outbox WHERE archived_at IS NOT NULL ORDER BY seq DESC').fetchall()
+        index = build_index(rows, self.instance, self.core['now'](), self.integrity.snapshot())
+        replace_view(root / 'Index.json', canonical(index))
+        replace_view(root / 'Readme.html', render_index(index))
         with self.core['db']() as conn:
-            conn.execute('INSERT OR REPLACE INTO archive_meta VALUES(?,?)', ('index_count', str(count)))
+            conn.execute('INSERT OR REPLACE INTO archive_meta VALUES(?,?)', ('index_count', str(len(rows))))
+            conn.execute('INSERT OR REPLACE INTO archive_meta VALUES(?,?)', ('index_version', self.index_version))
+            conn.execute('INSERT OR REPLACE INTO archive_meta VALUES(?,?)', ('index_integrity', index['integrity'].get('report_path') or ''))
 
     def step(self, batch_size=20):
         if not self.enabled():
@@ -265,10 +249,16 @@ class ArchiveStore:
                              (timestamp, relative, row['seq']))
             with self.lock:
                 self.status.update(last_archived_at=timestamp)
+        self.integrity.publish_pending()
         with self.core['db']() as conn:
             archived = conn.execute('SELECT count(*) FROM archive_outbox WHERE archived_at IS NOT NULL').fetchone()[0]
             indexed = conn.execute("SELECT value FROM archive_meta WHERE key='index_count'").fetchone()
-        if not indexed or int(indexed[0]) != archived:
+            version = conn.execute("SELECT value FROM archive_meta WHERE key='index_version'").fetchone()
+            audit = conn.execute("SELECT value FROM archive_meta WHERE key='index_integrity'").fetchone()
+        root = self._root()
+        if (not indexed or int(indexed[0]) != archived or not version or version[0] != self.index_version
+                or not audit or audit[0] != (self.integrity.snapshot()['report_path'] or '')
+                or not (root / 'Readme.html').is_file() or not (root / 'Index.json').is_file()):
             self.write_index()
         with self.core['db']() as conn:
             failed = conn.execute('SELECT last_error FROM archive_outbox WHERE archived_at IS NULL AND last_error IS NOT NULL LIMIT 1').fetchone()
@@ -279,6 +269,7 @@ class ArchiveStore:
         if self.enabled():
             self.worker = threading.Thread(target=self._run, name='receipt-archive', daemon=True)
             self.worker.start()
+            self.integrity.start()
 
     def _run(self):
         while not self.stop.is_set():
@@ -290,6 +281,7 @@ class ArchiveStore:
             self.stop.wait(3)
 
     def close(self):
+        self.integrity.close()
         self.stop.set()
         if self.worker:
             self.worker.join(timeout=3)

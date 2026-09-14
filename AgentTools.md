@@ -133,3 +133,6 @@ result = tools.call('get_panel_result', {'job_id': job['job_id']})
 `GET /api/readouts?limit=20&before=<游标>` 提供当前配置相机的读数分页，返回 `items`、`next_cursor` 和 `order=submitted_desc`。摘要包含 `job_id`、`result_url`、照片、拍摄时间、阶段时延和最新 `archive` 状态，不返回图片字节；`next_cursor=null` 表示末页。此为新增只读 HTTP 接口，九个 Agent 工具保持兼容。
 
 调度最多同时推进四张照片，GPU 推理仍串行；每张五秒等待可重叠。视觉请求同时只允许一个，忙时记录 `fallback.status=skipped, reason=busy`，不重试、不消费该任务的冷却名额。已完成的本地数字结果可以在其他照片等待视觉请求时先交付。
+
+
+NAS 全量索引：`GET /api/archive/files/Index.json` 返回全部已归档版本摘要；`GET /api/archive/files/Readme.html` 提供可筛选页面。`get_field_state.archive.integrity` 返回每日巡检状态、最近报告摘要、下次计划、最多 50 项异常及报告相对路径；完整报告位于 `/api/archive/files/<report_path>`。检查未完成与已完成但发现异常分别记录，不以 `pending_receipts=0` 替代完整性校验结论。九个 Agent 工具保持不变。

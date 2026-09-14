@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>现场识别 · NAS 留存索引</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f3f7f7;color:#183c43;font:14px/1.6 system-ui,sans-serif}main{max-width:1600px;margin:auto;padding:32px}header{display:flex;align-items:center;justify-content:space-between;gap:20px}h1{margin:0;font-size:26px}h2{font-size:16px;margin:0 0 8px}p{margin:5px 0;color:#61787e}a{color:#246a70}button,select,input{font:inherit;color:inherit;border:1px solid #cddde0;background:white;border-radius:6px;padding:8px 11px}button{cursor:pointer}button:disabled{opacity:.45;cursor:default}button:hover:enabled{background:#edf5f4}.card{margin-top:22px;border:1px solid #dce7e8;background:white;border-radius:12px;padding:20px}.check{display:flex;flex-wrap:wrap;justify-content:space-between;gap:10px;background:#eaf3f1}.check.warn{background:#fff4e5}.filters{display:grid;grid-template-columns:repeat(4,minmax(140px,1fr));gap:14px}.filters label{display:flex;flex-direction:column;gap:5px;font-size:12px}.filters input,.filters select{width:100%;min-width:0}.toolbar{display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap;margin:18px 0 12px}.table{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:12px;text-align:left}td,th{padding:13px 10px;border-bottom:1px solid #e2ebec;vertical-align:top}th{background:#f5f8f9;color:#647d82;font-weight:500}td small{display:block;color:#647d82;overflow-wrap:anywhere}td:first-child{white-space:nowrap}td:nth-child(3){max-width:260px;overflow-wrap:anywhere}td a{display:block;white-space:nowrap}footer{font-size:12px;color:#71878c;margin-top:22px}.count{font-weight:600}.empty{padding:35px;text-align:center;color:#6c8287}.links{display:flex;gap:18px}.error{color:#9b4927}#export{background:#1f6269;color:white;border-color:#1f6269}
+@media(max-width:900px){main{padding:18px}.filters{grid-template-columns:repeat(2,minmax(120px,1fr))}header{align-items:flex-start;flex-direction:column}}[hidden]{display:none!important}
+</style></head><body><main>
+<header><div><p>FIELD RECOGNITION / ARCHIVE</p><h1>NAS 留存索引</h1><p id="overview"></p></div><div class="links"><a href="Index.json">完整索引 JSON ↗</a><button id="reload">刷新索引</button></div></header>
+<section class="card check" id="integrity"><div><h2>完整性巡检</h2><p id="checkSummary"></p><p id="checkSchedule"></p><details id="checkIssues" hidden><summary>异常文件（最多展示 50 项，完整列表见报告）</summary><ul id="issueList"></ul></details></div><a id="checkReport" hidden>查看巡检报告 ↗</a></section>
+<section class="card"><h2>查询历史留存</h2><p>默认显示每条记录的最新版本；切换“全部版本”可查看当时的人员、状态和识别过程。</p>
+<form id="filters" class="filters">
+<label>实验员<select id="operator"><option value="">全部实验员</option></select></label>
+<label>仪器（绑定或二维码解码关联）<select id="instrument"><option value="">全部仪器</option></select></label>
+<label>事件起始日期 · 北京时间<input type="date" id="from"></label>
+<label>事件结束日期 · 北京时间<input type="date" id="to"></label>
+<label>相机<select id="camera"><option value="">全部相机</option></select></label>
+<label>记录类型<select id="entity"><option value="">全部类型</option><option value="jobs">面板读数</option><option value="scans">扫码 / 照片</option><option value="bindings">仪器绑定</option><option value="scene_visits">场景关系</option><option value="automation_settings">实验员登记 / 运行设置</option></select></label>
+<label>版本范围<select id="versions"><option value="latest">最新记录</option><option value="all">全部版本</option></select></label>
+<label>操作<div><button type="reset" aria-label="清除筛选">清除筛选</button></div></label></form>
+<div class="toolbar"><span id="resultCount" class="count" role="status"></span><div><button id="previous">上一页</button> <span id="page"></span> <button id="next">下一页</button> <button id="export">导出筛选 JSON</button></div></div>
+<p id="filterError" class="error" hidden>结束日期应不早于起始日期。</p>
+<div class="table"><table><thead><tr><th>事件时间 / 类型</th><th>实验员 / 相机</th><th>仪器 / 场景</th><th>状态 / OCR 原文</th><th>归档时间 / 版本</th><th>凭证</th></tr></thead><tbody id="rows"></tbody></table></div><p id="empty" class="empty" hidden>没有符合条件的记录。</p>
+</section><footer>索引覆盖本机数据库已确认归档的全部版本。文件采用相对路径，整体复制目录后仍可查阅。数据更新后请刷新索引。<br>OCR 原文包含数字候选和其他文字，准确读数需结合照片核对。巡检核对文件与已留存哈希，不修改原件，也不替代权限级防篡改或备份。</footer>
+</main><script id="archiveData" type="application/json">/*ARCHIVE_DATA*/</script><script>/*ARCHIVE_SCRIPT*/</script></body></html>

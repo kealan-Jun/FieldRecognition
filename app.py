@@ -583,6 +583,23 @@ def readouts(limit: int = 20, before: int | None = None):
         return readout_page(conn, camera, limit=limit, before=before)
 
 
+@app.get('/api/archive/files/{relative:path}')
+def archive_file(relative: str):
+    from archive_integrity import relative_file
+    if not archive_store.enabled():
+        raise HTTPException(404, '未启用 NAS 留存')
+    if (relative not in {'Readme.html', 'Index.json'}
+            and not re.fullmatch(r'(?:Receipts|Objects|Integrity)/[A-Za-z0-9_./-]+\.(?:json|png|jpg|jpeg)', relative)):
+        raise HTTPException(404, '归档文件不存在')
+    try:
+        path = relative_file(archive_store._root(create=False), relative)
+        if not path.is_file():
+            raise FileNotFoundError()
+    except (OSError, ValueError):
+        raise HTTPException(404, '归档文件暂不可用')
+    return FileResponse(path, headers={'Cache-Control': 'no-store'})
+
+
 # Agent and browser share the same capture, QR, binding and OCR implementation.
 from scene_binding import install as install_scenes
 install_scenes(globals())
