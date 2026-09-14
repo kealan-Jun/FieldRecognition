@@ -76,8 +76,10 @@ async def lifespan(application):
     if has_binding:
         queue_ocr_warmup()
     saved_photo_watcher.start()
+    automatic_runner.start()
     yield
     stopping.set()
+    automatic_runner.close()
     saved_photo_watcher.close()
     live_scanner.close()
     if receiver_camera:
@@ -223,6 +225,7 @@ def state():
         jobs = [json.loads(row['document']) | {'status': row['status']} for row in conn.execute('SELECT status,document FROM jobs ORDER BY rowid DESC LIMIT 20')]
     return {'scenes': scene_records(), 'scene_visits': scene_visits(), 'instruments': instruments, 'bindings': bindings, 'jobs': jobs, 'ocr': dict(ocr_state),
             'vision_fallback': aliyun_vision.public_config(), 'photo_watch': saved_photo_watcher.snapshot(),
+            'automation': automatic_runner.snapshot(),
             'camera': receiver_camera.snapshot() if receiver_camera else {'configured': bool(os.environ.get('FIELD_CAMERA_SNAPSHOT_URL')),
                        'id': os.environ.get('FIELD_CAMERA_ID', 'UnconfiguredNeckCamera'),
                        'mode': 'http_snapshot'}, 'demo': True}
@@ -285,7 +288,8 @@ def image_file(capture_id: uuid.UUID):
 
 @app.post('/api/bindings')
 def bind(body: BindingRequest, *, automatic: bool = False):
-    result = save_binding(body, automatic=automatic)
+    with live_scanner.lock:
+        result = save_binding(body, automatic=automatic)
     # Enqueue only after the binding transaction commits, without delaying its response.
     queue_ocr_warmup()
     return result
@@ -327,12 +331,19 @@ def save_binding(body: BindingRequest, *, automatic: bool = False):
 
 @app.post('/api/bindings/{binding_id}/end')
 def end_binding(binding_id: uuid.UUID):
+    with live_scanner.lock:
+        return finish_binding(binding_id)
+
+
+def finish_binding(binding_id):
     with db() as conn:
         row = conn.execute('SELECT * FROM bindings WHERE id=?', (str(binding_id),)).fetchone()
         if not row:
             raise HTTPException(404, '绑定不存在')
         result = json.loads(row['document'])
         if not row['ended']:
+            if receiver_camera and result['camera_id'] == receiver_camera.target:
+                automatic_runner.pause('binding_ended')
             result['ended_at'] = now()
             conn.execute('UPDATE bindings SET ended=?,document=? WHERE id=?', (result['ended_at'], json.dumps(result), str(binding_id)))
     return result
@@ -531,6 +542,9 @@ install_saved_photo(globals())
 
 from photo_watch import SavedPhotoWatcher
 saved_photo_watcher = SavedPhotoWatcher(globals())
+
+from automation import install as install_automation
+automatic_runner = install_automation(globals())
 
 from agent_tools import install_tools
 install_tools(app, globals())

@@ -1,5 +1,7 @@
 # 现场识别 Agent 工具 v1
 
+本机后台自动模式及实验员登记见 [本机自动运行](docs/本机自动运行.md)。`get_field_state` 新增 `automation` 状态；后台自动扫码独立于网页，下面手动连续扫码接口的 20 秒租约只适用于 `owner=browser` 会话。新模式未增加 Agent 工具数量。
+
 这是一组框架无关的 HTTP JSON 小工具，复用网页已有取流、二维码、设备绑定和 PaddleOCR 实现。无需改动挂脖设备 Agent。本版不是 MCP 服务；Agent 适配层将工具名称及参数转发到以下接口即可。
 
 - 工具发现：`GET http://127.0.0.1:8188/api/tools`，返回 name、description、input_schema。

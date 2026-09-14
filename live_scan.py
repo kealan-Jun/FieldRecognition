@@ -48,7 +48,7 @@ class LiveScanner:
                                (self.camera().target,)).fetchone()
         return json.loads(row['document']) if row else None
 
-    def start(self, operator):
+    def start(self, operator, *, owner='browser'):
         if not operator.strip():
             raise HTTPException(422, '请先填写实验员姓名或编号')
         camera = self.camera()
@@ -56,10 +56,12 @@ class LiveScanner:
             if self.session and self.session['status'] in ACTIVE:
                 raise HTTPException(409, '已有连续扫码正在运行，请先停止')
             self.session = {'session_id': str(uuid.uuid4()), 'status': 'scanning',
-                            'camera_id': camera.target, 'operator': operator.strip(),
+                            'camera_id': camera.target, 'operator': operator.strip(), 'owner': owner,
                             'started_at': self.core['now'](), 'frames_scanned': 0,
                             'message': '连续扫码中：先对准场景码，再对准仪器码',
                             'scan': None, 'binding': None}
+            if owner == 'automation':
+                self.session['after_frame_id'] = camera.snapshot().get('decoded_frames', 0)
             self.last_seen = time.monotonic()
             existing = self.active_binding()
             if existing:
@@ -85,7 +87,7 @@ class LiveScanner:
             return False
         if self.session['status'] not in ACTIVE:
             return False
-        if time.monotonic() - self.last_seen > LEASE_SECONDS:
+        if self.session.get('owner') != 'automation' and time.monotonic() - self.last_seen > LEASE_SECONDS:
             self.session.update(status='stopped', message='页面已断开，连续扫码已停止；已有绑定继续保留')
             return False
         return True
@@ -123,6 +125,12 @@ class LiveScanner:
                 with self.lock:
                     if not self._running(session_id):
                         return
+                    if self.session.get('owner') == 'automation':
+                        info = self.camera().snapshot()
+                        if not info.get('service_status_available') or not info.get('service_status', {}).get('online'):
+                            continue
+                        if metadata.get('decoded_frame_id', 0) <= self.session['after_frame_id']:
+                            continue
                     self.session.update(status='scanning', frames_scanned=self.session['frames_scanned'] + 1,
                                         last_frame_metadata=metadata, decode_ms=decoded[2]['elapsed_ms'])
                     # Slow decoding must not commit an old frame as a new observation.
@@ -243,7 +251,12 @@ def install(core):
 
     @app.delete('/api/camera/scan-sessions/{session_id}')
     def stop(session_id: uuid.UUID):
-        return scanner.read(session_id, cancel=True)
+        with scanner.lock:
+            scanner.read(session_id)  # Validate the target before changing automatic mode.
+            runner = core.get('automatic_runner')
+            if runner and runner.settings()['enabled']:
+                runner.pause()
+            return scanner.read(session_id, cancel=True)
 
     @app.get('/api/camera/preview.mjpg')
     async def preview(request: Request):

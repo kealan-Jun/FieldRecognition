@@ -1,6 +1,7 @@
 const $ = s => document.querySelector(s);
 let state, scan, activeBinding, picture, stream, crop = null, drag = null, jobTimer;
 let previewLive = false, scanSession = null, scanTimer, cameraTimer, scanStarting = false, displayedJobKey = null;
+let operatorDirty = false, automationScanId = null;
 const pendingButtons = new Set();
 const canvas = $('#imageCanvas'), ctx = canvas.getContext('2d');
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -10,15 +11,19 @@ async function api(path,options={}) {const r=await fetch(path,options);const dat
 const json = data=>({method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
 function busy(button,work){return async()=>{pendingButtons.add(button);button.disabled=true;try{await work();}catch(e){message(e.message,true);}finally{pendingButtons.delete(button);button.disabled=false;updateButtons();}};}
 function updateButtons(){
-  const scanning = Boolean(scanSession) || scanStarting;
+  const manualScanning = Boolean(scanSession) || scanStarting;
+  const autoScanning = state?.automation?.enabled && ['scanning','waiting_camera'].includes(state.automation.session?.status);
+  const scanning = manualScanning || autoScanning;
   $('#enterScene').disabled=scanning||!scan?.scene_matches?.length;
   $('#bind').disabled=scanning||Boolean(activeBinding)||!scan?.matches?.length;
   $('#ocr').disabled=scanning||previewLive||!scan||!activeBinding||Boolean(jobTimer);
   $('#endBinding').hidden=!activeBinding; $('#endBinding').disabled=scanning;
-  $('#continuousScan').disabled=scanning||state?.camera.mode!=='gwhp_main';
-  $('#stopScan').hidden=!scanSession; $('#operator').disabled=scanning;
+  $('#continuousScan').disabled=scanning||state?.automation?.enabled||state?.camera.mode!=='gwhp_main';
+  $('#stopScan').hidden=!scanSession; $('#operator').disabled=scanning||Boolean(activeBinding);
+  $('#autoEnable').disabled=scanning;
+  $('#autoPause').disabled=!state?.automation?.enabled;
   for(const s of ['#neckCapture','#upload','#webcamOpen','#shutter', '[data-sample="A"]','[data-sample="B"]','[data-sample="Scene01"]']) $(s).disabled=scanning;
-  $('#neckLive').disabled=scanning||state?.camera.mode!=='gwhp_main';
+  $('#neckLive').disabled=manualScanning||state?.camera.mode!=='gwhp_main';
   for(const button of pendingButtons)button.disabled=true;
 }
 
@@ -43,8 +48,8 @@ async function pollCamera(){
     const previousBinding=activeBinding?.binding_id;
     await refresh(false);
     if(previousBinding&&!activeBinding){
-      $('#liveStatus').textContent='原绑定已结束。设备采集服务重新在线后，请重新连续扫码绑定。';
-      message('原绑定已结束，请重新扫码绑定。');
+      const text=state.automation?.enabled?'原绑定已结束，相机恢复后将自动重新扫码。':'原绑定已结束，可在登记区重新开启自动运行。';
+      $('#liveStatus').textContent=text;message(text);
     }
     const fresh=state.camera.status==='streaming'&&state.camera.frame_age_ms<=1000&&state.camera.service_status?.online!==false;
     $('#liveBadge').textContent=fresh?'实时视频':'等待相机新画面';
@@ -146,11 +151,34 @@ function renderPhotoWatch(){
   const labels={disabled:'照片监控未开启',waiting_binding:'绑定后开始等待这台相机的语音照片',watching:'正在等待新的语音拍照文件',waiting_photo:'等待这台相机的第一张语音照片',waiting_queue:'已有照片正在识别，稍后处理新照片',storage_unavailable:'拍照存储暂不可用，正在等待恢复',storage_unconfigured:'尚未配置拍照存储',watch_error:'照片监控暂不可用',invalid_camera_directory:'相机照片目录不可用'};
   $('#photoWatchState').textContent=watch.last_photo_status==='rejected'?`照片未能处理：${watch.detail}`:labels[watch.status]||'等待语音拍照';
 }
+function renderAutomation(){
+  const automatic=state.automation;
+  if(!automatic)return;
+  const labels={starting:'正在启动',paused:'自动扫码已暂停',waiting_operator:'等待实验员登记',waiting_config:'等待相机配置',waiting_camera:'等待相机上线',scanning:'后台自动扫码中',bound:'已绑定 · 等待语音照片',manual_scan:'正在手动扫码',retrying:'正在恢复连接'};
+  $('#automationState').textContent=labels[automatic.status]||automatic.status;
+  $('#automationDetail').textContent=automatic.message;
+  $('#operatorRegistration').textContent=automatic.registered_at?`已登记：${automatic.operator} · ${stamp(automatic.registered_at)}。更换实验员前请先结束当前绑定。`:'首次使用请登记姓名或编号，保存后本机持续运行，关闭网页也有效。';
+  if(!operatorDirty && document.activeElement!==$('#operator'))$('#operator').value=automatic.operator||'';
+  if(automatic.enabled)$('#liveStatus').textContent=automatic.session?.message||automatic.message;
+  updateButtons();
+}
+$('#operator').oninput=()=>{operatorDirty=true;};
+$('#autoEnable').onclick=busy($('#autoEnable'),async()=>{
+  const operator=$('#operator').value.trim();
+  if(!operator)throw Error('请先登记实验员姓名或编号');
+  await api('/api/automation',{...json({enabled:true,operator}),method:'PUT'});
+  operatorDirty=false;await refresh(false);
+  message('实验员登记已保存，后台自动运行已开启；关闭网页仍会继续。');
+});
+$('#autoPause').onclick=busy($('#autoPause'),async()=>{
+  await api('/api/automation',{...json({enabled:false}),method:'PUT'});
+  await refresh(false);message('自动扫码已暂停。已有绑定和语音照片监控仍保留；结束使用请点击结束绑定。');
+});
 function forms(){ $('#instrumentForms').innerHTML=state.instruments.map((a,i)=>`<form class="instrument-form" data-id="${esc(a.id)}"><strong>${esc(a.name)}</strong><div class="id">${esc(a.id)}</div><div class="row"><label class="field">仪器名称<input name="name" value="${esc(a.name)}" required maxlength="80"></label><label class="field">所属场景 / 实验区域<input name="scene" value="${esc(a.scene)}" placeholder="例如：A 实验室 / 离心区" required maxlength="100"></label></div><label class="field">型号（可选）<input name="model" value="${esc(a.model)}" maxlength="100"></label><button class="secondary" type="submit">保存登记</button> <a href="/static/labels/Instrument${a.id==='e9434a0a-3319-414a-b988-4cc6884edce4'?'A':'B'}.png" target="_blank" rel="noopener">查看标签 ↗</a></form>`).join('');document.querySelectorAll('.instrument-form').forEach(form=>form.onsubmit=async e=>{e.preventDefault();const button=form.querySelector('button');button.disabled=true;try{const values=Object.fromEntries(new FormData(form));await api(`/api/instruments/${form.dataset.id}`,{...json(values),method:'PUT'});await refresh(false);if(scan){scan.matches=scan.matches.map(m=>({...m,...state.instruments.find(a=>a.id===m.id)}));renderScan();}message('仪器与场景登记已保存。');}catch(err){message(err.message,true);}finally{button.disabled=false;}}); }
-async function refresh(renderForms=true){state=await api('/api/state');$('#cameraState').className='pill'+(state.camera.status==='streaming'?'':' warning');$('#cameraState').textContent=state.camera.configured?`${state.camera.id} · ${{streaming:'主码流在线',discovering:'正在发现',reconnecting:'接收端连接失败',camera_offline:'设备离线',waiting_keyframe:'等待关键帧',not_started:'正在连接'}[state.camera.status]||'已配置取图'}`:`${state.camera.id} · 等待连接`;$('#ocrState').textContent=`PaddleOCR · CPU · ${{not_loaded:'绑定后自动加载',queued:'等待后台加载',loading:'模型加载中',ready:'模型常驻 · 已就绪',error:'加载/识别失败'}[state.ocr.status]||state.ocr.status}`;activeBinding=state.bindings.find(b=>!b.ended_at&&b.camera_id===(previewLive?state.camera.id:scan?.camera_id||state.camera.id))||null;renderBinding();renderLatestJob();renderPhotoWatch();if(renderForms)forms();$('#historyRows').innerHTML=state.bindings.length?`<div style="overflow:auto"><table><thead><tr><th>仪器 / 场景</th><th>实验员 / 相机</th><th>开始时间</th><th>状态</th><th>证据</th></tr></thead><tbody>${state.bindings.map(b=>`<tr><td>${esc(b.instrument.name)}<br><small>${esc(b.instrument.scene)}</small></td><td>${esc(b.operator)}<br><small>${esc(b.camera_id)}</small></td><td>${esc(stamp(b.started_at))}</td><td>${b.ended_at?'已结束':'使用中'}</td><td><a href="${b.image_url}" target="_blank" rel="noopener">扫码原图</a></td></tr>`).join('')}</tbody></table></div>`:'尚无绑定记录';}
+async function refresh(renderForms=true){state=await api('/api/state');$('#cameraState').className='pill'+(state.camera.status==='streaming'?'':' warning');$('#cameraState').textContent=state.camera.configured?`${state.camera.id} · ${{streaming:'主码流在线',discovering:'正在发现',reconnecting:'接收端连接失败',camera_offline:'设备离线',waiting_keyframe:'等待关键帧',not_started:'正在连接'}[state.camera.status]||'已配置取图'}`:`${state.camera.id} · 等待连接`;$('#ocrState').textContent=`PaddleOCR · CPU · ${{not_loaded:'绑定后自动加载',queued:'等待后台加载',loading:'模型加载中',ready:'模型常驻 · 已就绪',error:'加载/识别失败'}[state.ocr.status]||state.ocr.status}`;activeBinding=state.bindings.find(b=>!b.ended_at&&b.camera_id===(previewLive?state.camera.id:scan?.camera_id||state.camera.id))||null;renderBinding();renderLatestJob();renderPhotoWatch();renderAutomation();const autoScan=state.automation?.session?.scan;if(autoScan && ['bound','needs_selection'].includes(state.automation.session.status) && automationScanId!==autoScan.scan_id){automationScanId=autoScan.scan_id;await showScan(autoScan,{keepLive:state.automation.session.status==='bound'});}if(renderForms)forms();$('#historyRows').innerHTML=state.bindings.length?`<div style="overflow:auto"><table><thead><tr><th>仪器 / 场景</th><th>实验员 / 相机</th><th>开始时间</th><th>状态</th><th>证据</th></tr></thead><tbody>${state.bindings.map(b=>`<tr><td>${esc(b.instrument.name)}<br><small>${esc(b.instrument.scene)}</small></td><td>${esc(b.operator)}<br><small>${esc(b.camera_id)}</small></td><td>${esc(stamp(b.started_at))}</td><td>${b.ended_at?'已结束':'使用中'}</td><td><a href="${b.image_url}" target="_blank" rel="noopener">扫码原图</a></td></tr>`).join('')}</tbody></table></div>`:'尚无绑定记录';}
 $('#refresh').onclick=busy($('#refresh'),()=>refresh());
 $('#export').onclick=busy($('#export'),async()=>{const data=await api('/api/export');const url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='FieldRecognitionSession.json';a.click();URL.revokeObjectURL(url);});
-$('#operator').value=localStorage.getItem('fieldOperator')||'';
+$('#operator').value='';
 refresh().then(()=>{renderBinding();pollCamera();}).catch(e=>{message(e.message,true);cameraTimer=setTimeout(pollCamera,2000);});
 window.addEventListener('pagehide',()=>{stopWebcam();closePreview();clearTimeout(cameraTimer);clearTimeout(scanTimer);if(scanSession)fetch(`/api/camera/scan-sessions/${scanSession}`,{method:'DELETE',keepalive:true}).catch(()=>{});});
 
