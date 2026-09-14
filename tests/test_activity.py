@@ -1,6 +1,6 @@
 import json
 
-from activity import recent_activity
+from activity import recent_activity, readout_event
 from test_demo import app_client, scan  # noqa: F401
 
 
@@ -47,7 +47,8 @@ def test_readout_history_uses_persisted_status_and_reading(app_client):
            'crop_image_url': '/api/images/test-job', 'lines': [{'text': '123.45'}]}
     with app.db() as conn:
         conn.execute('INSERT INTO jobs VALUES(?,?,?)', ('test-job', 'interrupted', json.dumps(doc)))
-        event = recent_activity(conn, 'ActualCamera')[0]
+        assert not recent_activity(conn, 'ActualCamera')
+        event = readout_event(conn,conn.execute('SELECT * FROM jobs WHERE id=?',(doc['job_id'],)).fetchone())
     assert event['kind'] == 'readout' and event['status'] == '识别中断'
     assert event['operator'] == '测试员'
     assert event['image_url'] == doc['crop_image_url']
@@ -61,7 +62,8 @@ def test_old_whole_frame_history_is_marked_unverified_without_rewriting_receipt(
     raw=json.dumps(doc)
     with app.db() as conn:
         conn.execute('INSERT INTO jobs VALUES(?,?,?)',(doc['job_id'],'completed',raw))
-        event=recent_activity(conn,'ActualCamera')[0]
+        assert not recent_activity(conn,'ActualCamera')
+        event=readout_event(conn,conn.execute('SELECT * FROM jobs WHERE id=?',(doc['job_id'],)).fetchone())
         assert event['detail']=='150'
         assert event['quality_notes']==['历史整图或手动选框识别，面板归属未核验']
         assert conn.execute('SELECT document FROM jobs WHERE id=?',(doc['job_id'],)).fetchone()[0]==raw
@@ -96,7 +98,7 @@ def test_scene_scan_is_distinct_from_instrument_binding(app_client):
     assert visit['operator'] == '测试员'
 
 
-def test_photo_local_timezone_does_not_sort_ahead_of_later_utc_readout(app_client):
+def test_qr_voice_photo_keeps_capture_time_while_empty_readout_is_hidden(app_client):
     app, client = app_client
     capture = scan(client)
     capture.update(source='agent_saved_photo', external_photo={'captured_at': '2026-09-14T11:53:00+08:00'})
@@ -106,7 +108,8 @@ def test_photo_local_timezone_does_not_sort_ahead_of_later_utc_readout(app_clien
         conn.execute('UPDATE scans SET document=? WHERE id=?', (json.dumps(capture), capture['scan_id']))
         conn.execute('INSERT INTO jobs VALUES(?,?,?)', (job['job_id'], 'completed', json.dumps(job)))
         events = recent_activity(conn)
-    assert [e['kind'] for e in events] == ['readout', 'photo']
+    assert [e['kind'] for e in events] == ['scan']
+    assert events[0]['occurred_at']=='2026-09-14T11:53:00+08:00'
 
 
 def test_readout_pages_keep_cursor_camera_timing_and_archive(app_client, monkeypatch):

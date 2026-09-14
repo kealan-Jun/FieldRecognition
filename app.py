@@ -276,7 +276,7 @@ def state():
                                "AND json_extract(document,'$.source')='neck_camera_gwhp_main' "
                                "AND (json_array_length(document,'$.matches')>0 OR json_array_length(document,'$.scene_matches')>0) "
                                "ORDER BY rowid DESC LIMIT 1", (receiver_camera.target,)).fetchone() if receiver_camera else None
-        activity = recent_activity(conn, receiver_camera.target if receiver_camera else None)
+        activity = recent_activity(conn, receiver_camera.target if receiver_camera else os.environ.get('FIELD_CAMERA_ID'))
     return {'scenes': scene_records(), 'scene_visits': scene_visits(), 'instruments': instruments, 'bindings': bindings, 'jobs': jobs, 'ocr': dict(ocr_state),
             'last_camera_scan': json.loads(last_hit['document']) if last_hit else None,
             'activity': activity,
@@ -682,22 +682,22 @@ def get_measurements(job_id: uuid.UUID):
 
 
 @app.get('/api/readouts')
-def readouts(limit: int = 20, before: int | None = None):
+def readouts(limit: int = 20, before: int | None = None, related_only: bool = False):
     if not 1 <= limit <= 50 or (before is not None and before < 1):
         raise HTTPException(422, '页大小需为 1–50，游标需为正整数')
     camera = receiver_camera.target if receiver_camera else os.environ.get('FIELD_CAMERA_ID')
     with db() as conn:
-        return readout_page(conn, camera, limit=limit, before=before)
+        return readout_page(conn, camera, limit=limit, before=before,related_only=related_only)
 
 
 @app.get('/api/workbenches')
-def workbenches(limit: int = 200):
+def workbenches(limit: int = 200, related_only: bool = False):
     if not 1 <= limit <= 500:
         raise HTTPException(422, '记录范围需为 1–500')
     from workbench_records import summarize
     camera = receiver_camera.target if receiver_camera else os.environ.get('FIELD_CAMERA_ID')
     with db() as conn:
-        return summarize(conn, camera, limit=limit)
+        return summarize(conn, camera, limit=limit,related_only=related_only)
 
 
 @app.get('/api/archive/files/{relative:path}')

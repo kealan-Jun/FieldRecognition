@@ -116,6 +116,7 @@ def test_unbound_photo_watch_records_detection_and_no_duplicate_after_restart(ap
     app.run_ocr(job)
     assert app.get_job(job['job_id'])['status'] == 'completed'
     events = client.get('/api/state').json()['activity']
-    assert next(e for e in events if e['kind'] == 'readout')['target'] == '未绑定仪器 · 照片读数'
+    assert not any(e['kind']=='readout' for e in events)
+    assert app.get_job(job['job_id'])['instrument'] is None
     watcher.close()
     restarted.close()

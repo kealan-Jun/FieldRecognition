@@ -285,7 +285,7 @@ async function loadReadoutPage(){
   const request=++historyRequest, cursor=historyStack.at(-1);
   historyLoading=true;renderHistory();
   try{
-    const page=await api('/api/readouts?limit=20'+(cursor?'&before='+cursor:''));
+    const page=await api('/api/readouts?related_only=true&limit=20'+(cursor?'&before='+cursor:''));
     if(request!==historyRequest)return;
     historyData=page.items;historyNext=page.next_cursor;
   }catch(error){if(request===historyRequest)message(error.message,true);}
@@ -300,16 +300,16 @@ $('#historyNext').onclick=()=>{if(!historyLoading&&historyNext){historyStack.pus
 $('#historyPrevious').onclick=()=>{if(!historyLoading&&historyStack.length>1){historyStack.pop();historyData=[];historyNext=null;loadReadoutPage();}};
 async function loadWorkbenches(){
   if(workbenchLoading)return;workbenchLoading=true;
-  try{workbenchData=await api('/api/workbenches');if(historyMode==='workbenches')renderHistory();}
+  try{workbenchData=await api('/api/workbenches?related_only=true');if(historyMode==='workbenches')renderHistory();}
   catch(e){message(e.message,true);}finally{workbenchLoading=false;}
 }
-function benchReadings(rows){return rows.slice(0,8).map(r=>`<div class="bench-reading"><strong>${esc(r.text)}</strong><span>${esc(stamp(r.captured_at))} · ${esc(r.operator||'未记录实验员')}</span><a href="${esc(r.image_url)}" target="_blank" rel="noopener">原图 ↗</a> <a href="${esc(r.result_url)}" target="_blank" rel="noopener">回执 ↗</a></div>`).join('')||'<p class="caption">暂无归属明确的读数</p>';}
+function benchReadings(rows){return rows.slice(0,8).map(r=>`<div class="bench-reading"><strong>${esc(r.text)}</strong><span>${esc(stamp(r.captured_at))} · ${esc(r.operator||'未记录实验员')}</span><a href="${esc(r.image_url)}" target="_blank" rel="noopener">原图 ↗</a> <a href="${esc(r.result_url)}" target="_blank" rel="noopener">回执 ↗</a></div>`).join('')||'<p class="caption">暂无符合记录条件的面板读数</p>';}
 function renderWorkbenches(){
   $('#historyPager').hidden=true;
-  $('#historyScope').textContent='最近 200 次识别 · 每组展示最近 8 条读数；完整记录见“全部读数”';
+  $('#historyScope').textContent='最近 200 次相关面板识别 · 每组展示最近 8 条读数；完整记录见“面板读数”';
   const groups=workbenchData?.workbenches||[];
   const key=JSON.stringify(['workbenches',groups]);if(historyRenderedKey===key)return;historyRenderedKey=key;
-  $('#historyRows').innerHTML=groups.length?groups.map(g=>`<section class="bench-group"><h3>${esc(g.name)}</h3><p class="caption">${g.photo_count} 次识别 · ${g.reading_count} 条数字候选 · 按仪器分别记录，不相加</p><div class="bench-grid">${g.instruments.map(i=>`<div class="bench-instrument"><h4>${esc(i.name)} <small>${i.readings.length} 条</small></h4>${benchReadings(i.readings)}</div>`).join('')}<div class="bench-instrument"><h4>实验台待归属 <small>${g.unassigned_readings.length} 条</small></h4>${benchReadings(g.unassigned_readings)}</div></div></section>`).join(''):'正在读取实验台记录…';
+  $('#historyRows').innerHTML=groups.length?groups.map(g=>`<section class="bench-group"><h3>${esc(g.name)}</h3><p class="caption">${g.photo_count} 次识别 · ${g.reading_count} 条数字候选 · 按仪器分别记录，不相加</p><div class="bench-grid">${g.instruments.map(i=>`<div class="bench-instrument"><h4>${esc(i.name)} <small>${i.readings.length} 条</small></h4>${benchReadings(i.readings)}</div>`).join('')}${g.unassigned_readings.length?`<div class="bench-instrument"><h4>实验台待归属 <small>${g.unassigned_readings.length} 条</small></h4>${benchReadings(g.unassigned_readings)}</div>`:""}</div></section>`).join(''):'正在读取实验台记录…';
 }
 function renderHistory(){
   if(!state)return;
@@ -330,7 +330,7 @@ function renderHistory(){
   historyRenderedKey=renderKey;
   // Preserve expanded timing details while the background status refreshes.
   const opened=new Set([...document.querySelectorAll('#historyRows tr[data-event]')].filter(row=>row.querySelector('details[open]')).map(row=>row.dataset.event));
-  $('#historyRows').innerHTML=events.length?`<div class="table-scroll"><table class="history-table"><thead><tr><th>时间 / 事件</th><th>对象与结果</th><th>实验员 / 相机</th><th>识别耗时</th><th>NAS 留存</th><th>凭证</th></tr></thead><tbody>${events.map(event=>`<tr data-event="${esc(event.event_id)}"><td>${esc(stamp(event.occurred_at))}<small>${esc(event.kind==='readout'&&event.input_mode==='video'?'视频面板读数':labels[event.kind]||event.kind)}</small>${event.captured_at?`<small>拍摄 ${esc(stamp(event.captured_at))}</small>`:''}</td><td><strong>${esc(event.target)}</strong><small>${esc(event.status)}</small>${event.detail?`<div class="history-reading">${esc(event.detail)}</div>`:''}${(event.quality_notes||[]).map(note=>`<small class="history-error">${esc(note)}</small>`).join('')}${event.fallback?.status==='failed'?`<small class="history-error">${event.fallback.error==='account_arrearage'?'账户欠费，进一步识别不可用':'进一步识别失败，见任务回执'}</small>`:''}</td><td>${esc(displayOperator(event.operator)||'当时未记录')}<small>${esc(displayCamera(event.camera_id))}</small></td><td>${historyLatency(event)}</td><td>${historyArchive(event)}</td><td>${event.image_url?`<a class="history-photo" href="${esc(event.image_url)}" target="_blank" rel="noopener"><img src="${esc(event.image_url)}" loading="lazy" decoding="async" alt="本条记录的照片">原图 ↗</a>`:''}${event.result_url?`<a href="${esc(event.result_url)}" target="_blank" rel="noopener">任务回执 ↗</a>`:''}${event.measurement_url?`<a href="${esc(event.measurement_url)}" target="_blank" rel="noopener">标准读数 ↗</a>`:''}</td></tr>`).join('')}</tbody></table></div>`:historyLoading?'正在读取记录…':'当前范围暂无记录。';
+  $('#historyRows').innerHTML=events.length?`<div class="table-scroll"><table class="history-table"><thead><tr><th>时间 / 事件</th><th>对象与结果</th><th>实验员 / 相机</th><th>识别耗时</th><th>NAS 留存</th><th>凭证</th></tr></thead><tbody>${events.map(event=>`<tr data-event="${esc(event.event_id)}"><td>${esc(stamp(event.occurred_at))}<small>${esc(event.kind==='readout'&&event.input_mode==='video'?'视频面板读数':labels[event.kind]||event.kind)}</small>${event.captured_at?`<small>拍摄 ${esc(stamp(event.captured_at))}</small>`:''}</td><td><strong>${esc(event.target)}</strong><small>${esc(event.status)}</small>${event.detail?`<div class="history-reading">${esc(event.detail)}</div>`:''}${(event.quality_notes||[]).map(note=>`<small class="history-error">${esc(note)}</small>`).join('')}${event.fallback?.status==='failed'?`<small class="history-error">${event.fallback.error==='account_arrearage'?'账户欠费，进一步识别不可用':'进一步识别失败，见任务回执'}</small>`:''}</td><td>${esc(displayOperator(event.operator)||'当时未记录')}<small>${esc(displayCamera(event.camera_id))}</small></td><td>${historyLatency(event)}</td><td>${historyArchive(event)}</td><td>${event.image_url?`<a class="history-photo" href="${esc(event.image_url)}" target="_blank" rel="noopener"><img src="${esc(event.image_url)}" loading="lazy" decoding="async" alt="本条记录的照片">原图 ↗</a>`:''}${event.result_url?`<a href="${esc(event.result_url)}" target="_blank" rel="noopener">任务回执 ↗</a>`:''}${event.measurement_url?`<a href="${esc(event.measurement_url)}" target="_blank" rel="noopener">标准读数 ↗</a>`:''}</td></tr>`).join('')}</tbody></table></div>`:historyLoading?'正在读取记录…':'当前范围暂无相关记录。二维码识别、绑定和有明确面板归属的读数会显示在这里。';
   document.querySelectorAll('#historyRows tr[data-event]').forEach(row=>{if(opened.has(row.dataset.event)&&row.querySelector('details'))row.querySelector('details').open=true;});
 }
 function showPage(){

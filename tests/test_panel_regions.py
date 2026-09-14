@@ -64,6 +64,9 @@ def test_two_panels_keep_separate_bindings_polygons_and_archived_crops(archive, 
     exported=client.get('/api/jobs/'+job['job_id']+'/measurements').json()
     assert exported['format_available'] and len(exported['records'])==2
     assert '面板分别定位' in client.get('/api/readouts').json()['items'][0]['target']
+    related=client.get('/api/readouts?related_only=true').json()['items'][0]
+    assert related['job_id']==done['job_id']
+    assert [r['instrument']['id'] for r in related['readings']]==[A,B]
 
 
 def test_unlocalized_ocr_does_not_borrow_the_only_bound_instrument(app_client, monkeypatch):

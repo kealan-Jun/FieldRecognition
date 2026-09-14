@@ -3,13 +3,21 @@ import json
 from datetime import datetime
 from archive_store import receipt_status
 from aliyun_vision import READOUT
+from history_records import panel_readings, job_rows
 
 
-def readout_event(conn, row):
+def readout_event(conn, row, *, related_only=False):
     doc = json.loads(row['document'])
     status = row['status']
+    if related_only:
+        relevant = panel_readings(doc,status)
+        assets = {r['instrument']['id']:r['instrument'] for r in relevant}
+        doc = dict(doc, readings=relevant, lines=relevant,
+            instrument=next(iter(assets.values())) if len(assets)==1 else None,
+            instrument_candidates=[{'instrument':a} for a in assets.values()],
+            binding_ids=list(dict.fromkeys(r['binding_id'] for r in relevant if r.get('binding_id'))))
     lines = [line for line in doc.get('lines', []) if line.get('text')
-             and (doc.get('device') == 'cloud' or READOUT.fullmatch(line['text']))]
+             and (related_only or doc.get('device') == 'cloud' or READOUT.fullmatch(line['text']))]
     label = {'queued': '等待识别', 'running': '正在识别', 'failed': '识别失败',
              'interrupted': '识别中断', 'cancelled': '识别取消'}.get(status, status)
     if status == 'completed':
@@ -43,7 +51,7 @@ def readout_event(conn, row):
             'archive': receipt_status(conn, 'jobs', doc['job_id'], (doc.get('timing') or {}).get('source_written_at'))}
 
 
-def readout_page(conn, camera_id=None, *, limit=20, before=None):
+def readout_page(conn, camera_id=None, *, limit=20, before=None, related_only=False):
     """Stable keyset pages in submission order; no photo bytes or raw model output."""
     conditions, params = [], []
     if camera_id:
@@ -53,11 +61,12 @@ def readout_page(conn, camera_id=None, *, limit=20, before=None):
         conditions.append('rowid<?')
         params.append(before)
     where = ' WHERE ' + ' AND '.join(conditions) if conditions else ''
-    rows = conn.execute('SELECT rowid AS cursor,* FROM jobs' + where + ' ORDER BY rowid DESC LIMIT ?',
-                        params + [limit + 1]).fetchall()
-    return {'items': [readout_event(conn, row) for row in rows[:limit]],
+    rows = (job_rows(conn,camera_id,limit=limit+1,before=before) if related_only else
+            conn.execute('SELECT rowid AS cursor,* FROM jobs' + where + ' ORDER BY rowid DESC LIMIT ?',
+                         params + [limit + 1]).fetchall())
+    return {'items': [readout_event(conn, row,related_only=related_only) for row in rows[:limit]],
             'next_cursor': rows[limit - 1]['cursor'] if len(rows) > limit else None,
-            'camera_id': camera_id, 'order': 'submitted_desc'}
+            'camera_id': camera_id, 'order': 'submitted_desc','related_only':related_only}
 
 
 def recent_activity(conn, camera_id=None, limit=50):
@@ -66,9 +75,13 @@ def recent_activity(conn, camera_id=None, limit=50):
     def rows(table, timestamp):
         where, params = ('', []) if camera_id is None else (
             "WHERE json_extract(document,'$.camera_id')=?", [camera_id])
+        if table=='scans':
+            where += (' AND ' if where else 'WHERE ') + "(coalesce(json_array_length(document,'$.matches'),0)>0 OR coalesce(json_array_length(document,'$.scene_matches'),0)>0)"
+        occurred_at = ("coalesce(json_extract(document,'$.external_photo.captured_at'),json_extract(document,'$.received_at'))"
+                       if table == 'scans' else f"json_extract(document,'$.{timestamp}')")
         # Table/field names come only from the fixed calls below.
         return conn.execute(
-            f"SELECT * FROM {table} {where} ORDER BY json_extract(document,'$.{timestamp}') DESC LIMIT ?",
+            f"SELECT * FROM {table} {where} ORDER BY julianday({occurred_at}) DESC,rowid DESC LIMIT ?",
             params + [limit]).fetchall()
 
     def add(doc, kind, timestamp, target, status, evidence=None, detail='', operator=None):
@@ -88,15 +101,13 @@ def recent_activity(conn, camera_id=None, limit=50):
         binding = json.loads(linked['document']) if linked else None
         if doc.get('matches'):
             detail = '已建立绑定' if binding else '未建立仪器绑定'
-        elif doc.get('scene_matches'):
+        else:
             visit = conn.execute("SELECT 1 FROM scene_visits WHERE json_extract(document,'$.scan_id')=? LIMIT 1",
                                  (doc['scan_id'],)).fetchone()
             detail = '已记录场景进入' if visit else '场景二维码已识别'
-        else:
-            detail = '照片已保存，无已登记二维码匹配'
-        add(doc, 'photo' if doc.get('source') in {'agent_saved_photo', 'neck_camera_video_ocr'} else 'scan',
-            (doc.get('external_photo') or {}).get('captured_at') or doc['received_at'], '、'.join(hit['name'] for hit in hits) or '照片',
-            '已识别' if hits else '已留存', doc['image_url'], detail)
+        add(doc, 'scan',
+            (doc.get('external_photo') or {}).get('captured_at') or doc['received_at'], '、'.join(hit['name'] for hit in hits),
+            '已识别', doc['image_url'], detail)
 
     for row in rows('bindings', 'started_at'):
         doc = json.loads(row['document'])
@@ -124,6 +135,6 @@ def recent_activity(conn, camera_id=None, limit=50):
         if doc.get('ended_at'):
             add(doc, 'scene_left', doc['ended_at'], doc['scene']['name'], '场景关系已结束', doc['image_url'])
 
-    for row in rows('jobs', 'submitted_at'):
-        events.append(readout_event(conn, row))
+    for row in job_rows(conn,camera_id,limit=limit,recent=True):
+        events.append(readout_event(conn, row,related_only=True))
     return sorted(events, key=lambda event: (datetime.fromisoformat(event['occurred_at']), event['event_id']), reverse=True)[:limit]
