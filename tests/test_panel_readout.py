@@ -159,3 +159,78 @@ def test_failure_has_no_invented_reading_and_cooldown_survives_new_request(job_c
     second = execute(app, second, complete(local_result()), Clock())
     assert first['lines'] == second['lines'] == [] and len(calls) == 1
     assert second['fallback']['reason'] == 'cooldown'
+
+
+def test_busy_vision_slot_does_not_reserve_or_invoke(job_context, monkeypatch):
+    app, _, job, _ = job_context
+    monkeypatch.setattr(app, 'reserve_fallback', lambda scope: pytest.fail('Busy slot must not consume cooldown'))
+    with app.vision_call_lock:
+        result = execute(app, job, complete(local_result()), Clock())
+    assert result['fallback'] == {'status': 'skipped', 'reason': 'busy'}
+    assert result['local_ocr']['actual_model_invocation']
+
+
+def test_next_photo_finishes_while_previous_photo_waits_for_cloud(app_client, monkeypatch):
+    """Prove scheduling with gates, not a timing benchmark or real OCR call."""
+    import threading
+    app, client = app_client
+    capture = scan(client)
+    entered, release, second_finished = threading.Event(), threading.Event(), threading.Event()
+    monkeypatch.setenv('FIELD_ALIYUN_FALLBACK_ENABLED', '1')
+    monkeypatch.setenv('DASHSCOPE_API_KEY', 'test-only-secret')
+    monkeypatch.setenv('FIELD_ALIYUN_NO_DIGITS_SECONDS', '.1')
+    monkeypatch.setattr(app, 'predict_panel', lambda panel, x, y: local_result('12.34 g' if x else None))
+    original_run = app.run_ocr
+    def run(job):
+        original_run(job)
+        if job['crop'][0] == 1:
+            second_finished.set()
+    monkeypatch.setattr(app, 'run_ocr', run)
+    calls = []
+    def cloud(panel):
+        calls.append(1); entered.set()
+        assert release.wait(3)
+        return cloud_result()
+    monkeypatch.setattr(vision, 'read_panel', cloud)
+    try:
+        first = client.post('/api/ocr', json={'capture_id': capture['capture_id'], 'crop': [0, 0, 100, 100]}).json()
+        assert entered.wait(2)
+        second = client.post('/api/ocr', json={'capture_id': capture['capture_id'], 'crop': [1, 0, 100, 100]}).json()
+        assert second_finished.wait(2), 'Another photo must not wait for the first vision response'
+        result = app.get_job(second['job_id'])
+        assert result['lines'][0]['text'] == '12.34 g' and 'fallback' not in result
+        assert app.get_job(first['job_id'])['status'] == 'running'
+        assert len(calls) == 1
+    finally:
+        release.set()
+        app.readout_pool.shutdown(wait=True)
+
+
+def test_parallel_requests_keep_single_ocr_worker_and_four_job_limit(app_client, monkeypatch):
+    import threading
+    app, client = app_client
+    capture = scan(client)
+    entered, release = threading.Event(), threading.Event()
+    guard, active, peak = threading.Lock(), 0, 0
+    def predict(panel, x, y):
+        nonlocal active, peak
+        with guard:
+            active += 1; peak = max(peak, active)
+        entered.set()
+        try:
+            assert release.wait(3)
+            return local_result('12.34 g')
+        finally:
+            with guard:
+                active -= 1
+    monkeypatch.setattr(app, 'predict_panel', predict)
+    try:
+        jobs = [client.post('/api/ocr', json={'capture_id': capture['capture_id'], 'crop': [x, 0, 100, 100]}) for x in range(4)]
+        assert all(response.status_code == 202 for response in jobs)
+        assert entered.wait(1)
+        assert client.post('/api/ocr', json={'capture_id': capture['capture_id'], 'crop': [4, 0, 100, 100]}).status_code == 429
+    finally:
+        release.set()
+        app.readout_pool.shutdown(wait=True)
+    assert peak == 1
+    assert all(app.get_job(response.json()['job_id'])['status'] == 'completed' for response in jobs)

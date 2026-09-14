@@ -1,3 +1,4 @@
+from test_demo import wait_for_job
 import importlib
 import sys
 import threading
@@ -70,7 +71,7 @@ def test_binding_loads_in_background_once_and_predictions_reuse_resident_model(a
 
     for _ in range(2):
         job = client.post('/api/ocr', json={'binding_id': binding['binding_id'], 'capture_id': args['scan_id']}).json()
-        app.readout_pool.submit(lambda: None).result(timeout=2)
+        wait_for_job(client, job['job_id'])
         assert client.get('/api/jobs/' + job['job_id']).json()['status'] == 'completed'
     assert len(predictions) == 2 and len(constructions) == 1
     client.post('/api/bindings/' + binding['binding_id'] + '/end')

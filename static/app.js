@@ -3,6 +3,8 @@ let state, scan, activeBinding, picture, stream, crop = null, drag = null, jobTi
 let previewLive = false, scanSession = null, scanTimer, cameraTimer, scanStarting = false, displayedJobKey = null;
 let operatorDirty = false, automationScanId = null, previewInitialized = false, previewRetry;
 let historicalScan = false;
+let historyMode='all', historyStack=[null], historyNext=null, historyData=[], historyLoading=false, historyRequest=0;
+let historyRenderedKey=null;
 const pendingButtons = new Set();
 const canvas = $('#imageCanvas'), ctx = canvas.getContext('2d');
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -163,7 +165,7 @@ function readoutLatency(job){
 }
 function readoutIssue(job){
   const fallback=job.fallback||{};
-  if(fallback.status==='skipped')return '<p class="caption">进一步识别处于调用间隔内，本次未调用。原因已留存。</p>';
+  if(fallback.status==='skipped')return `<p class="caption">${fallback.reason==='busy'?'进一步识别正在处理其他照片，本次未调用。':'进一步识别处于调用间隔内，本次未调用。'}原因已留存。</p>`;
   if(fallback.status!=='failed')return '';
   const reason=fallback.error==='account_arrearage'?'阿里云账户欠费或余额状态受限，请恢复账户后重试。':`进一步识别未完成${fallback.http_status?'（HTTP '+fallback.http_status+'）':''}，具体原因已留存。`;
   return `<p class="readout-issue">${esc(reason)}</p>`;
@@ -234,7 +236,7 @@ $('#autoPause').onclick=busy($('#autoPause'),async()=>{
   await refresh(false);message('自动扫码已暂停。已有绑定和语音照片监控仍保留；结束使用请点击结束绑定。');
 });
 function forms(){ $('#instrumentForms').innerHTML=state.instruments.map((a,i)=>`<form class="instrument-form" data-id="${esc(a.id)}"><strong>${esc(a.name)}</strong><div class="id">${esc(a.id)}</div><div class="row"><label class="field">仪器名称<input name="name" value="${esc(a.name)}" required maxlength="80"></label><label class="field">所属场景 / 实验区域<input name="scene" value="${esc(a.scene)}" placeholder="例如：A 实验室 / 离心区" required maxlength="100"></label></div><label class="field">型号（可选）<input name="model" value="${esc(a.model)}" maxlength="100"></label><button class="secondary" type="submit">保存登记</button> <a href="/static/labels/Instrument${a.id==='e9434a0a-3319-414a-b988-4cc6884edce4'?'A':'B'}.png" target="_blank" rel="noopener">查看标签 ↗</a></form>`).join('');document.querySelectorAll('.instrument-form').forEach(form=>form.onsubmit=async e=>{e.preventDefault();const button=form.querySelector('button');button.disabled=true;try{const values=Object.fromEntries(new FormData(form));await api(`/api/instruments/${form.dataset.id}`,{...json(values),method:'PUT'});await refresh(false);if(scan){scan.matches=scan.matches.map(m=>({...m,...state.instruments.find(a=>a.id===m.id)}));renderScan();}message('仪器与场景登记已保存。');}catch(err){message(err.message,true);}finally{button.disabled=false;}}); }
-async function refresh(renderForms=true){state=await api('/api/state');if(!previewInitialized&&state.camera.mode==='gwhp_main'){previewInitialized=true;if(!picture&&!stream)openPreview();}$('#cameraState').className='pill'+(state.camera.status==='streaming'?'':' warning');$('#cameraState').title=state.camera.id;$('#cameraState').textContent=state.camera.configured?`${{streaming:'主码流在线',discovering:'正在发现',reconnecting:'接收端连接失败',camera_offline:'设备离线',waiting_keyframe:'等待关键帧',not_started:'正在连接'}[state.camera.status]||'已配置取图'}`:`${state.camera.id} · 等待连接`;$('#ocrState').textContent=`PaddleOCR · ${(state.ocr.device||'cpu').toUpperCase()} · ${{not_loaded:'等待加载',queued:'等待后台加载',loading:'模型加载中',ready:'模型常驻 · 已就绪',error:'加载/识别失败'}[state.ocr.status]||state.ocr.status}`;activeBinding=state.bindings.find(b=>!b.ended_at&&b.camera_id===(previewLive?state.camera.id:scan?.camera_id||state.camera.id))||null;renderBinding();renderLatestJob();renderPhotoWatch();renderAutomation();const autoScan=state.automation?.session?.scan||state.last_camera_scan;if(autoScan && automationScanId!==autoScan.scan_id){automationScanId=autoScan.scan_id;await showScan(autoScan,{keepLive:state.automation?.session?.status!=='needs_selection',historical:!state.automation?.session?.scan});}if(renderForms)forms();renderHistory();}
+async function refresh(renderForms=true){state=await api('/api/state');if(!previewInitialized&&state.camera.mode==='gwhp_main'){previewInitialized=true;if(!picture&&!stream)openPreview();}$('#cameraState').className='pill'+(state.camera.status==='streaming'?'':' warning');$('#cameraState').title=state.camera.id;$('#cameraState').textContent=state.camera.configured?`${{streaming:'主码流在线',discovering:'正在发现',reconnecting:'接收端连接失败',camera_offline:'设备离线',waiting_keyframe:'等待关键帧',not_started:'正在连接'}[state.camera.status]||'已配置取图'}`:`${state.camera.id} · 等待连接`;$('#ocrState').textContent=`PaddleOCR · ${(state.ocr.device||'cpu').toUpperCase()} · ${{not_loaded:'等待加载',queued:'等待后台加载',loading:'模型加载中',ready:'模型常驻 · 已就绪',error:'加载/识别失败'}[state.ocr.status]||state.ocr.status}`;activeBinding=state.bindings.find(b=>!b.ended_at&&b.camera_id===(previewLive?state.camera.id:scan?.camera_id||state.camera.id))||null;renderBinding();renderLatestJob();renderPhotoWatch();renderAutomation();const autoScan=state.automation?.session?.scan||state.last_camera_scan;if(autoScan && automationScanId!==autoScan.scan_id){automationScanId=autoScan.scan_id;await showScan(autoScan,{keepLive:state.automation?.session?.status!=='needs_selection',historical:!state.automation?.session?.scan});}if(renderForms)forms();renderHistory();if(historyMode==='readouts'&&location.hash==='#history'&&!historyLoading)loadReadoutPage();}
 
 $('#refresh').onclick=busy($('#refresh'),()=>refresh());
 $('#export').onclick=busy($('#export'),async()=>{const data=await api('/api/export');const url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='FieldRecognitionSession.json';a.click();URL.revokeObjectURL(url);});
@@ -244,13 +246,53 @@ window.addEventListener('pagehide',()=>{stopWebcam();closePreview();clearTimeout
 
 $('#enterScene').onclick=busy($('#enterScene'),async()=>{const chosen=$('input[name="scene"]:checked');if(!chosen)throw Error('请选择场景');await api('/api/scene/enter',json({scan_id:scan.scan_id,scene_id:chosen.value}));await refresh(false);activeBinding=state.bindings.find(b=>!b.ended_at&&b.camera_id===scan.camera_id)||null;renderBinding();message('已进入场景，请拍摄仪器二维码并绑定使用。');});
 
+function duration(value){return value===null||value===undefined?'—':value<1000?Math.round(value)+' ms':(value/1000).toFixed(2)+' 秒';}
+function historyLatency(event){
+  if(event.kind!=='readout')return '—';
+  const timing=event.timing||{},d=timing.durations_ms||{};
+  const total=timing.is_backfill?d.detect_to_result_ms:d.write_to_result_ms;
+  const parts=[['文件发现',d.write_to_detect_ms],['稳定等待',d.file_stability_ms],['读取',d.file_read_ms],['导入等待',d.ingest_wait_ms],['导入',d.import_ms],['任务排队',d.queue_wait_ms],['OCR 等待',d.ocr_wait_ms],['OCR',d.ocr_ms],['进一步识别',d.vision_ms],['写入至归档',event.archive?.write_to_archive_ms]];
+  return `<strong>${timing.is_backfill?'补处理':'写入至结果'} ${duration(total)}</strong><small>OCR ${duration(d.ocr_ms)}</small><details class="history-timing"><summary>阶段耗时</summary><dl>${parts.map(([label,value])=>`<div><dt>${label}</dt><dd>${duration(value)}</dd></div>`).join('')}</dl><small>${timing.is_backfill?'历史补处理，不计入实时性能。':'写入时间取自文件 mtime，时钟尚未独立校准。'}</small></details>`;
+}
+function historyArchive(event){
+  const a=event.archive||{};
+  return `<span class="pill ${a.status==='archived'?'':'muted'}">${a.status==='archived'?'已归档':a.status==='pending'?'待同步':'未记录'}</span>${a.archived_at?`<small>${esc(stamp(a.archived_at))}</small>`:''}`;
+}
+async function loadReadoutPage(){
+  const request=++historyRequest, cursor=historyStack.at(-1);
+  historyLoading=true;renderHistory();
+  try{
+    const page=await api('/api/readouts?limit=20'+(cursor?'&before='+cursor:''));
+    if(request!==historyRequest)return;
+    historyData=page.items;historyNext=page.next_cursor;
+  }catch(error){if(request===historyRequest)message(error.message,true);}
+  finally{if(request===historyRequest){historyLoading=false;renderHistory();}}
+}
+$('#historyMode').onchange=()=>{
+  historyMode=$('#historyMode').value;historyStack=[null];historyNext=null;historyData=[];
+  historyRequest++;historyLoading=false;
+  if(historyMode==='readouts')loadReadoutPage();else renderHistory();
+};
+$('#historyNext').onclick=()=>{if(!historyLoading&&historyNext){historyStack.push(historyNext);historyData=[];historyNext=null;loadReadoutPage();}};
+$('#historyPrevious').onclick=()=>{if(!historyLoading&&historyStack.length>1){historyStack.pop();historyData=[];historyNext=null;loadReadoutPage();}};
 function renderHistory(){
+  if(!state)return;
   const archive=state.archive||{};
-  $('#archiveStatus').textContent=archive.enabled?`NAS 留存：${archive.status==='ready'?'已连接':archive.status==='retrying'?'等待重试，记录保留在本机':'正在连接'} · 已归档 ${archive.archived_receipts||0} 条 · 待同步 ${archive.pending_receipts||0} 条`:'NAS 留存未启用，记录保存在本机。';
+  $('#archiveStatus').textContent=archive.enabled?`NAS 留存：${archive.status==='ready'?'已连接':archive.status==='retrying'?'等待重试，记录保留在本机':'正在连接'} · 已归档 ${archive.archived_receipts||0} 个版本 · 待同步 ${archive.pending_receipts||0} 个版本`:'NAS 留存未启用，记录保存在本机。';
   $('#archiveStatus').title=archive.root||'';
-  const events=state.activity||[];
+  const events=historyMode==='readouts'?historyData:state.activity||[];
+  $('#historyScope').textContent=historyMode==='readouts'?`第 ${historyStack.length} 页 · ${events.length} 条 · 按提交先后${historyLoading?' · 正在更新':''}`:`最近 ${events.length} 条操作`;
+  $('#historyPager').hidden=historyMode!=='readouts';
+  $('#historyPrevious').disabled=historyLoading||historyStack.length===1;
+  $('#historyNext').disabled=historyLoading||!historyNext;
   const labels={photo:'语音照片',scan:'扫码识别',binding_started:'仪器绑定',binding_ended:'结束绑定',scene_entered:'进入场景',scene_left:'结束场景',readout:'面板读数'};
-  $('#historyRows').innerHTML=events.length?`<div class="table-scroll"><table><thead><tr><th>时间</th><th>事件</th><th>对象与结果</th><th>实验员 / 相机</th><th>凭证</th></tr></thead><tbody>${events.map(event=>`<tr><td>${esc(stamp(event.occurred_at))}</td><td>${esc(labels[event.kind]||event.kind)}</td><td><strong>${esc(event.target)}</strong><small>${esc(event.status)}${event.detail?' · '+esc(event.detail):''}</small></td><td>${esc(displayOperator(event.operator)||'当时未记录')}<small>${esc(displayCamera(event.camera_id))}</small></td><td>${event.image_url?`<a href="${esc(event.image_url)}" target="_blank" rel="noopener">查看原图 ↗</a>`:'—'}</td></tr>`).join('')}</tbody></table></div>`:'当前相机尚无操作记录。成功解码、绑定和照片读数会按实际发生时间显示在这里。';
+  const renderKey=JSON.stringify([events,historyLoading&&events.length===0]);
+  if(renderKey===historyRenderedKey)return;
+  historyRenderedKey=renderKey;
+  // Preserve expanded timing details while the background status refreshes.
+  const opened=new Set([...document.querySelectorAll('#historyRows tr[data-event]')].filter(row=>row.querySelector('details[open]')).map(row=>row.dataset.event));
+  $('#historyRows').innerHTML=events.length?`<div class="table-scroll"><table class="history-table"><thead><tr><th>时间 / 事件</th><th>对象与结果</th><th>实验员 / 相机</th><th>识别耗时</th><th>NAS 留存</th><th>凭证</th></tr></thead><tbody>${events.map(event=>`<tr data-event="${esc(event.event_id)}"><td>${esc(stamp(event.occurred_at))}<small>${esc(labels[event.kind]||event.kind)}</small>${event.captured_at?`<small>拍摄 ${esc(stamp(event.captured_at))}</small>`:''}</td><td><strong>${esc(event.target)}</strong><small>${esc(event.status)}</small>${event.detail?`<div class="history-reading">${esc(event.detail)}</div>`:''}${event.fallback?.status==='failed'?`<small class="history-error">${event.fallback.error==='account_arrearage'?'账户欠费，进一步识别不可用':'进一步识别失败，见任务回执'}</small>`:''}</td><td>${esc(displayOperator(event.operator)||'当时未记录')}<small>${esc(displayCamera(event.camera_id))}</small></td><td>${historyLatency(event)}</td><td>${historyArchive(event)}</td><td>${event.image_url?`<a class="history-photo" href="${esc(event.image_url)}" target="_blank" rel="noopener"><img src="${esc(event.image_url)}" loading="lazy" decoding="async" alt="本条记录的照片">原图 ↗</a>`:''}${event.result_url?`<a href="${esc(event.result_url)}" target="_blank" rel="noopener">任务回执 ↗</a>`:''}</td></tr>`).join('')}</tbody></table></div>`:historyLoading?'正在读取记录…':'当前范围暂无记录。';
+  document.querySelectorAll('#historyRows tr[data-event]').forEach(row=>{if(opened.has(row.dataset.event)&&row.querySelector('details'))row.querySelector('details').open=true;});
 }
 function showPage(){
   const titles={workspace:'扫码与读数',registry:'仪器登记',history:'操作记录'};

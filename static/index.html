@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>现场识别 · 设备绑定与面板读数</title>
-<link rel="icon" href="/static/BrandLogo.png"><link rel="stylesheet" href="/static/style.css?v=a60b28ada61c">
+<link rel="icon" href="/static/BrandLogo.png"><link rel="stylesheet" href="/static/style.css?v=d7f449d0583f">
 </head>
 <body>
 <aside>
@@ -54,8 +54,10 @@
   </div>
 </div>
 <section class="card page-view" id="registry" hidden><div class="card-title"><div><h2>仪器登记</h2><p class="caption">管理名称、型号与所属场景，查看对应二维码。</p></div></div><div id="instrumentForms" class="registry-grid"></div></section>
-<section class="card page-view" id="history" hidden><div class="card-title"><div><h2>操作记录</h2><p class="caption">按时间查看本相机的识别、绑定、场景与读数记录。</p></div><button id="export" class="secondary">导出 JSON</button></div><p id="archiveStatus" class="caption" role="status">正在检查 NAS 留存</p><div id="historyRows" class="empty-text">正在读取记录</div></section>
+<section class="card page-view" id="history" hidden><div class="card-title"><div><h2>操作记录</h2><p class="caption">查看照片、识别过程与 NAS 留存，数字候选需结合原图核对。</p></div><button id="export" class="secondary">导出状态 JSON</button></div>
+<div class="history-toolbar"><label>记录范围 <select id="historyMode"><option value="all">最近操作</option><option value="readouts">全部读数</option></select></label><span id="historyScope" class="caption"></span><div id="historyPager" hidden><button id="historyPrevious" class="secondary">上一页</button><button id="historyNext" class="secondary">下一页</button></div></div>
+<p id="archiveStatus" class="caption" role="status">正在检查 NAS 留存</p><div id="historyRows" class="empty-text">正在读取记录</div></section>
 <footer>FieldRecognition <span>现场设备识别与面板读数</span></footer>
 </main>
-<script src="/static/app.js?v=e533e2995087"></script>
+<script src="/static/app.js?v=acde6db84127"></script>
 </body></html>

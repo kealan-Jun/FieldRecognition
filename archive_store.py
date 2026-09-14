@@ -16,6 +16,17 @@ from readout_timing import elapsed_ms
 TABLES = {'scans': 'id', 'bindings': 'id', 'scene_visits': 'id', 'jobs': 'id', 'automation_settings': 'camera'}
 
 
+def receipt_status(conn, entity, entity_id, source_written_at=None):
+    row = conn.execute('SELECT * FROM archive_outbox WHERE entity=? AND entity_id=? ORDER BY seq DESC LIMIT 1',
+                       (entity, entity_id)).fetchone()
+    if not row:
+        return {'status': 'not_queued'}
+    return {'status': 'archived' if row['archived_at'] else 'pending', 'sequence': row['seq'],
+            'queued_at': row['recorded_at'], 'archived_at': row['archived_at'], 'receipt_path': row['receipt_path'],
+            'archive_queue_ms': elapsed_ms(row['recorded_at'], row['archived_at']),
+            'write_to_archive_ms': elapsed_ms(source_written_at, row['archived_at'])}
+
+
 def canonical(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()
 
@@ -88,14 +99,8 @@ class ArchiveStore:
 
     def job_receipt(self, document):
         with self.core['db']() as conn:
-            row = conn.execute("SELECT * FROM archive_outbox WHERE entity='jobs' AND entity_id=? ORDER BY seq DESC LIMIT 1",
-                               (document['job_id'],)).fetchone()
-        if not row:
-            return {'status': 'not_queued'}
-        return {'status': 'archived' if row['archived_at'] else 'pending', 'sequence': row['seq'],
-                'queued_at': row['recorded_at'], 'archived_at': row['archived_at'], 'receipt_path': row['receipt_path'],
-                'archive_queue_ms': elapsed_ms(row['recorded_at'], row['archived_at']),
-                'write_to_archive_ms': elapsed_ms((document.get('timing') or {}).get('source_written_at'), row['archived_at'])}
+            return receipt_status(conn, 'jobs', document['job_id'],
+                                  (document.get('timing') or {}).get('source_written_at'))
 
     def snapshot(self):
         with self.core['db']() as conn:

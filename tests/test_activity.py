@@ -77,3 +77,35 @@ def test_photo_local_timezone_does_not_sort_ahead_of_later_utc_readout(app_clien
         conn.execute('INSERT INTO jobs VALUES(?,?,?)', (job['job_id'], 'completed', json.dumps(job)))
         events = recent_activity(conn)
     assert [e['kind'] for e in events] == ['readout', 'photo']
+
+
+def test_readout_pages_keep_cursor_camera_timing_and_archive(app_client, monkeypatch):
+    app, client = app_client
+    monkeypatch.setenv('FIELD_CAMERA_ID', 'ActualCamera')
+    def insert(ident, camera='ActualCamera'):
+        doc = {'job_id': ident, 'camera_id': camera, 'instrument': None, 'operator': None,
+               'submitted_at': '2026-09-14T04:00:00+00:00', 'status': 'completed',
+               'lines': [{'text': 'RN55'}, {'text': '12.34 g'}],
+               'timing': {'is_backfill': False, 'durations_ms': {'write_to_result_ms': 1250, 'ocr_ms': 20}}}
+        with app.db() as conn:
+            conn.execute('INSERT INTO jobs VALUES(?,?,?)', (ident, 'completed', json.dumps(doc)))
+    for i in range(5):
+        insert('job-' + str(i))
+    insert('other-camera', 'OtherCamera')
+    first = client.get('/api/readouts?limit=2').json()
+    assert [row['job_id'] for row in first['items']] == ['job-4', 'job-3']
+    item = first['items'][0]
+    assert item['timing']['durations_ms']['write_to_result_ms'] == 1250
+    assert item['archive']['status'] == 'pending' and item['result_url'] == '/api/jobs/job-4'
+    assert item['detail'] == '12.34 g' and item['status'] == '数字候选 · 待核对'
+    insert('new-after-first-page')
+    second = client.get('/api/readouts', params={'limit': 2, 'before': first['next_cursor']}).json()
+    last = client.get('/api/readouts', params={'limit': 2, 'before': second['next_cursor']}).json()
+    assert [row['job_id'] for row in second['items'] + last['items']] == ['job-2', 'job-1', 'job-0']
+    assert last['next_cursor'] is None
+    assert all(row['camera_id'] == 'ActualCamera' for row in first['items'] + second['items'] + last['items'])
+    with app.db() as conn:
+        conn.execute("UPDATE archive_outbox SET archived_at='2026-09-14T04:00:02Z',receipt_path='receipt.json' WHERE entity_id='job-4'")
+    assert client.get('/api/readouts').json()['items'][1]['archive']['status'] == 'archived'
+    for query in ('limit=0', 'limit=51', 'before=-1', 'before=abc'):
+        assert client.get('/api/readouts?' + query).status_code == 422

@@ -1,6 +1,46 @@
 """Read-only activity timeline from stored receipts, including unbound QR hits."""
 import json
 from datetime import datetime
+from archive_store import receipt_status
+from aliyun_vision import READOUT
+
+
+def readout_event(conn, row):
+    doc = json.loads(row['document'])
+    status = row['status']
+    lines = [line for line in doc.get('lines', []) if line.get('text')
+             and (doc.get('device') == 'cloud' or READOUT.fullmatch(line['text']))]
+    label = {'queued': '等待识别', 'running': '正在识别', 'failed': '识别失败',
+             'interrupted': '识别中断', 'cancelled': '识别取消'}.get(status, status)
+    if status == 'completed':
+        label = '数字候选 · 待核对' if lines else '未读出完整数字'
+    return {'event_id': 'readout:' + doc['job_id'], 'job_id': doc['job_id'], 'kind': 'readout',
+            'occurred_at': doc.get('finished_at') or doc['submitted_at'],
+            'submitted_at': doc['submitted_at'], 'captured_at': (doc.get('external_photo') or {}).get('captured_at'),
+            'camera_id': doc['camera_id'], 'operator': doc.get('operator'),
+            'target': (doc.get('instrument') or {}).get('name') or '未绑定仪器 · 照片读数',
+            'status': label, 'detail': '、'.join(line['text'] for line in lines),
+            'image_url': doc.get('image_url') or doc.get('crop_image_url'),
+            'result_url': '/api/jobs/' + doc['job_id'], 'timing': doc.get('timing') or {},
+            'fallback': doc.get('fallback') and {key: doc['fallback'].get(key) for key in ('status', 'reason', 'error', 'http_status')},
+            'archive': receipt_status(conn, 'jobs', doc['job_id'], (doc.get('timing') or {}).get('source_written_at'))}
+
+
+def readout_page(conn, camera_id=None, *, limit=20, before=None):
+    """Stable keyset pages in submission order; no photo bytes or raw model output."""
+    conditions, params = [], []
+    if camera_id:
+        conditions.append("json_extract(document,'$.camera_id')=?")
+        params.append(camera_id)
+    if before is not None:
+        conditions.append('rowid<?')
+        params.append(before)
+    where = ' WHERE ' + ' AND '.join(conditions) if conditions else ''
+    rows = conn.execute('SELECT rowid AS cursor,* FROM jobs' + where + ' ORDER BY rowid DESC LIMIT ?',
+                        params + [limit + 1]).fetchall()
+    return {'items': [readout_event(conn, row) for row in rows[:limit]],
+            'next_cursor': rows[limit - 1]['cursor'] if len(rows) > limit else None,
+            'camera_id': camera_id, 'order': 'submitted_desc'}
 
 
 def recent_activity(conn, camera_id=None, limit=50):
@@ -19,6 +59,9 @@ def recent_activity(conn, camera_id=None, limit=50):
                        'kind': kind, 'occurred_at': timestamp, 'camera_id': doc['camera_id'],
                        'operator': doc.get('operator') if operator is None else operator,
                        'target': target, 'status': status, 'detail': detail, 'image_url': evidence})
+        entity = 'scans' if kind in {'scan', 'photo'} else 'bindings' if kind.startswith('binding_') else 'scene_visits'
+        ident = doc.get('scan_id') if entity == 'scans' else doc.get('binding_id') if entity == 'bindings' else doc.get('visit_id')
+        events[-1]['archive'] = receipt_status(conn, entity, ident)
 
     for row in rows('scans', 'received_at'):
         doc = json.loads(row['document'])
@@ -55,14 +98,5 @@ def recent_activity(conn, camera_id=None, limit=50):
             add(doc, 'scene_left', doc['ended_at'], doc['scene']['name'], '场景关系已结束', doc['image_url'])
 
     for row in rows('jobs', 'submitted_at'):
-        doc = json.loads(row['document'])
-        status = row['status']  # Includes startup interruption even if an old JSON snapshot says running.
-        readings = '、'.join(str(line['text']) for line in doc.get('lines', []) if line.get('text'))
-        label = {'queued': '等待识别', 'running': '正在识别', 'failed': '识别失败',
-                 'interrupted': '识别中断', 'cancelled': '识别取消'}.get(status, status)
-        if status == 'completed':
-            label = '未读出完整数字' if doc.get('outcome') == 'no_numeric_readout' else '识别完成'
-        add(doc, 'readout', doc.get('finished_at') or doc['submitted_at'],
-            (doc.get('instrument') or {}).get('name') or '未绑定仪器 · 照片读数',
-            label, doc.get('crop_image_url') or doc.get('image_url'), readings)
+        events.append(readout_event(conn, row))
     return sorted(events, key=lambda event: (datetime.fromisoformat(event['occurred_at']), event['event_id']), reverse=True)[:limit]

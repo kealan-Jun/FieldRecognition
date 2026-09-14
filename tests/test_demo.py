@@ -2,6 +2,7 @@ import importlib
 import io
 import json
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -37,6 +38,17 @@ def scan(client, name='InstrumentA', camera='TestCamera'):
     result = client.post('/api/scans', files={'file': (path.name, path.read_bytes(), 'image/png')}, data={'camera_id': camera})
     assert result.status_code == 200
     return result.json()
+
+
+def wait_for_job(client, job_id, timeout=3):
+    """Wait for this job's state, independent of request executor concurrency."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        result = client.get('/api/jobs/' + job_id).json()
+        if result['status'] not in {'queued', 'running'}:
+            return result
+        time.sleep(.01)
+    pytest.fail('Readout did not reach a terminal status')
 
 
 def enter_scene(client, camera='TestCamera', scene_id=None):

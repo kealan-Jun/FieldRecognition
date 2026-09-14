@@ -1,3 +1,4 @@
+from test_demo import wait_for_job
 import uuid
 from test_demo import app_client, scan, enter_scene  # noqa: F401
 
@@ -20,7 +21,7 @@ def test_direct_instrument_binding_and_scene_evidence_isolation(app_client):
     assert app.current_readout_binding({'binding_id': binding['binding_id']})
     job = client.post('/api/ocr', json={'binding_id': binding['binding_id'], 'capture_id': picture['capture_id']})
     assert job.status_code == 202
-    app.readout_pool.submit(lambda: None).result(timeout=3)
+    wait_for_job(client, job.json()['job_id'])
     result = client.get('/api/jobs/' + job.json()['job_id']).json()
     assert result['status'] == 'completed'
     assert result['scene_qr_verified'] is False and result['scene_visit_id'] is None

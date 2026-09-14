@@ -73,15 +73,26 @@ def run(core, document, *, clock=time.monotonic, pause=time.sleep):
                 cancelled()
                 return
             fallback_scope = document.get('binding_id') or 'unbound-camera:' + document['camera_id']
-            if core['reserve_fallback'](fallback_scope):
-                document.update(phase='extended_reading', fallback={'status': 'running', 'trigger': reason,
-                                'trigger_elapsed_seconds': round(clock() - started, 3), 'attempted_at': core['now']()})
-                save(core, document)
-                cloud = vision.read_panel(panel)
-                document['fallback'].update(cloud)
-                document['fallback']['finished_at'] = core['now']()
+            # Timers for separate photos can overlap, but paid requests must not.
+            # A busy provider slot does not consume the persistent cooldown.
+            if not core['vision_call_lock'].acquire(blocking=False):
+                document['fallback'] = {'status': 'skipped', 'reason': 'busy'}
             else:
-                document['fallback'] = {'status': 'skipped', 'reason': 'cooldown', 'cooldown_seconds': 30}
+                try:
+                    if not valid():
+                        cancelled()
+                        return
+                    if core['reserve_fallback'](fallback_scope):
+                        document.update(phase='extended_reading', fallback={'status': 'running', 'trigger': reason,
+                                        'trigger_elapsed_seconds': round(clock() - started, 3), 'attempted_at': core['now']()})
+                        save(core, document)
+                        cloud = vision.read_panel(panel)
+                        document['fallback'].update(cloud)
+                        document['fallback']['finished_at'] = core['now']()
+                    else:
+                        document['fallback'] = {'status': 'skipped', 'reason': 'cooldown', 'cooldown_seconds': 30}
+                finally:
+                    core['vision_call_lock'].release()
         local = result_if_ready()
         document['local_ocr'] = local or {'status': 'running', 'lines': [], 'model': core['ocr_state']['engine']}
         if not valid():

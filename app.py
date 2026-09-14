@@ -25,7 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field
 from ocr_runtime import configured_device, create_model, OcrDeviceUnavailable
-from activity import recent_activity
+from activity import recent_activity, readout_page
 from readout_timing import update_timing
 
 BASE = Path(__file__).parent
@@ -97,7 +97,8 @@ async def lifespan(application):
 app = FastAPI(title='FieldRecognition · 现场识别', version='0.1.0', lifespan=lifespan)
 app.mount('/static', StaticFiles(directory=BASE / 'static'), name='static')
 ocr_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='panel-ocr')
-readout_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='panel-request')
+readout_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix='panel-request')
+vision_call_lock = threading.Lock()
 ocr_submit_lock = threading.RLock()
 stopping = threading.Event()
 ocr_lock = threading.RLock()
@@ -571,6 +572,15 @@ def export():
     result = state()
     result['exported_at'] = now()
     return result
+
+
+@app.get('/api/readouts')
+def readouts(limit: int = 20, before: int | None = None):
+    if not 1 <= limit <= 50 or (before is not None and before < 1):
+        raise HTTPException(422, '页大小需为 1–50，游标需为正整数')
+    camera = receiver_camera.target if receiver_camera else os.environ.get('FIELD_CAMERA_ID')
+    with db() as conn:
+        return readout_page(conn, camera, limit=limit, before=before)
 
 
 # Agent and browser share the same capture, QR, binding and OCR implementation.

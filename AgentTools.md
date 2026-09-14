@@ -129,3 +129,7 @@ result = tools.call('get_panel_result', {'job_id': job['job_id']})
 `get_field_state.archive` 返回 NAS 留存状态：`enabled`、`status`（disabled/ready/retrying）、`pending_receipts`、`archived_receipts`、`last_error`、`last_archived_at`、`root` 和 `source_instance`。服务仍在本机运行，后台向独立 NAS 目录归档，Agent 不需要新增调用。`ready` 表示归档目标可用；确认当前全部记录归档还需 `pending_receipts=0`。不把存储成功说成读数正确或物理操作完成。目录结构与回执见 [本机运行与 NAS 留存](docs/本机运行与NAS留存.md)。
 
 任务的 `timing` 保存源写入、首次发现、稳定、读取、导入、排队、OCR、视觉模型、最终结果时间和毫秒差值；`get_panel_result.archive` 保存最新回执的归档确认与耗时。缺失时间为 null，NAS mtime 未独立校时，补处理标记为 `is_backfill=true`。完整字段、近实时目标与边界见 [识别时延与未绑定照片](docs/识别时延与未绑定照片.md)。
+
+`GET /api/readouts?limit=20&before=<游标>` 提供当前配置相机的读数分页，返回 `items`、`next_cursor` 和 `order=submitted_desc`。摘要包含 `job_id`、`result_url`、照片、拍摄时间、阶段时延和最新 `archive` 状态，不返回图片字节；`next_cursor=null` 表示末页。此为新增只读 HTTP 接口，九个 Agent 工具保持兼容。
+
+调度最多同时推进四张照片，GPU 推理仍串行；每张五秒等待可重叠。视觉请求同时只允许一个，忙时记录 `fallback.status=skipped, reason=busy`，不重试、不消费该任务的冷却名额。已完成的本地数字结果可以在其他照片等待视觉请求时先交付。
