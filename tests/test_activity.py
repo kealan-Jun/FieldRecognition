@@ -53,6 +53,20 @@ def test_readout_history_uses_persisted_status_and_reading(app_client):
     assert event['image_url'] == doc['crop_image_url']
 
 
+def test_old_whole_frame_history_is_marked_unverified_without_rewriting_receipt(app_client):
+    app,client=app_client
+    doc={'job_id':'old-whole','capture_id':'photo','camera_id':'ActualCamera','instrument':{'name':'B'},
+         'submitted_at':'2026-09-14T05:44:00Z','status':'completed',
+         'panel_selection':'user_selected_crop_or_full_photo','lines':[{'text':'150'}]}
+    raw=json.dumps(doc)
+    with app.db() as conn:
+        conn.execute('INSERT INTO jobs VALUES(?,?,?)',(doc['job_id'],'completed',raw))
+        event=recent_activity(conn,'ActualCamera')[0]
+        assert event['detail']=='150'
+        assert event['quality_notes']==['历史整图或手动选框识别，面板归属未核验']
+        assert conn.execute('SELECT document FROM jobs WHERE id=?',(doc['job_id'],)).fetchone()[0]==raw
+
+
 def test_corrected_liveness_end_keeps_original_event_and_recovery(app_client):
     app,client=app_client
     first=scan(client)

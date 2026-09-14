@@ -1,3 +1,4 @@
+import json
 import numpy as np
 import pytest
 
@@ -51,3 +52,15 @@ def test_partial_digit_text_can_locate_roi_but_is_not_guessed_into_a_reading():
     assert out['digit_region']['status']=='located' and not out['lines']
     out=refine_digits(lambda *a:{'lines':[line('51',[0,0,60,20])]},image,raw)
     assert out['lines'][0]['text']=='51'
+
+
+def test_conflicting_warp_does_not_overwrite_source_without_a_crop_check():
+    raw={'lines':[line('390',[40,30,60,20])]}
+    image=np.zeros((100,120,3),np.uint8)
+    answers=iter([{'lines':[line('290',[0,0,60,20])]}, {'lines':[line('390',[12,12,60,20])]}])
+    out=refine_digits(lambda *a:next(answers),image,raw,source_image=image)
+    assert out['lines'][0]['text']=='390' and out['digit_consistency']['status']=='resolved'
+    assert out['digit_region']['method']=='dominant_numeric_line_source_check_v1'
+    json.dumps(out)
+    out=refine_digits(lambda *a:{'lines':[line('290',[0,0,60,20])]},image,raw)
+    assert out['lines']==[] and out['digit_consistency']['status']=='disagreement'

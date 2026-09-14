@@ -21,7 +21,7 @@ BOXES = [dict(class_id=0, instrument_id=A, confidence=.8, xyxy=[20,30,80,50]),
 
 def configure(app, monkeypatch, boxes=BOXES):
     # These tests isolate association/crop routing; digit refinement has its own tests.
-    monkeypatch.setattr(panel_regions,'refine_digits',lambda predict,image,initial,x=0,y=0:initial)
+    monkeypatch.setattr(panel_regions,'refine_digits',lambda predict,image,initial,x=0,y=0,**kw:initial)
     monkeypatch.setenv('FIELD_PANEL_DETECTOR_ENABLED', '1')
     monkeypatch.setattr(app.panel_detector, 'warmup', lambda: True)
     monkeypatch.setattr(app.panel_detector, 'predict', lambda image: {'status':'completed', 'boxes':copy.deepcopy(boxes), 'weights_sha256':'a'*64})
@@ -58,6 +58,11 @@ def test_two_panels_keep_separate_bindings_polygons_and_archived_crops(archive, 
         assert len(records)==1
         r=json.loads(records[0].read_text())
         assert [v['text'] for v in r['readings']]==[text]
+        standard=json.loads((records[0].parent/'Measurement.json').read_text())
+        assert set(standard)=={'wearer_id','device_model','device_no','qr_hash','photo_time','values'}
+        assert standard['qr_hash']==next(b['qr_hash'] for b in bindings if b['instrument']['id']==iid)
+    exported=client.get('/api/jobs/'+job['job_id']+'/measurements').json()
+    assert exported['format_available'] and len(exported['records'])==2
     assert '面板分别定位' in client.get('/api/readouts').json()['items'][0]['target']
 
 
@@ -168,3 +173,16 @@ def test_localization_timeout_never_sends_whole_image_to_cloud(app_client,monkey
     done=app.get_job(job['job_id'])
     assert done['error']=='bound_panel_localization_unavailable'
     assert done['readings']==[] and done['instrument'] is None
+
+
+def test_stirrer_values_use_aligned_left_right_windows_before_partial_frame_selection(app_client,monkeypatch):
+    app,_=app_client
+    boxes=[BOXES[0],dict(BOXES[0],xyxy=[90,30,150,50]),BOXES[1]]
+    configure(app,monkeypatch,boxes)
+    local=app.predict_readout(np.zeros((300,400,3),np.uint8),binding_snapshots=[{'instrument':{'id':A}},{'instrument':{'id':B}}])
+    assert [r['measurement_name'] for r in local['panel_regions']]==['温度','转速','质量']
+    # Only one changed window can subsequently be retained, with its role intact.
+    assert local['panel_regions'][1]['measurement_name']=='转速'
+    configure(app,monkeypatch,boxes[1:])
+    local=app.predict_readout(np.zeros((300,400,3),np.uint8),binding_snapshots=[{'instrument':{'id':A}}])
+    assert local['panel_regions'][0]['measurement_name'] is None

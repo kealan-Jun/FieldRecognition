@@ -23,7 +23,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, UnidentifiedImageError
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, FiniteFloat, model_validator
 from ocr_runtime import configured_device, create_model, OcrDeviceUnavailable
 from activity import recent_activity, readout_page
 from readout_timing import update_timing
@@ -59,8 +59,12 @@ with db() as conn:
     CREATE TABLE IF NOT EXISTS camera_service_state(camera TEXT PRIMARY KEY, document TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS fallback_attempts(binding_id TEXT PRIMARY KEY, attempted_at REAL NOT NULL);
     ''')
+    columns = {row['name'] for row in conn.execute('PRAGMA table_info(instruments)')}
+    for column, declaration in [('device_no','TEXT'),('measurement_ranges',"TEXT NOT NULL DEFAULT '{}'")]:
+        if column not in columns:
+            conn.execute(f'ALTER TABLE instruments ADD COLUMN {column} {declaration}')
     for item in json.loads((BASE / 'InstrumentRegistry.json').read_text())['instruments']:
-        conn.execute('INSERT OR IGNORE INTO instruments VALUES(?,?,?,?)',
+        conn.execute('INSERT OR IGNORE INTO instruments(id,name,scene,model) VALUES(?,?,?,?)',
                      (item['instrument_id'], item['label'], '', ''))
     # Interrupted jobs stay explicit and cannot be mistaken for completed OCR.
     conn.execute("UPDATE jobs SET status='interrupted' WHERE status IN ('queued','running')")
@@ -114,10 +118,16 @@ ocr_model = None
 panel_detector = PanelDetector()
 
 
+def instrument_record(row):
+    record = dict(row)
+    record['measurement_ranges'] = json.loads(record.get('measurement_ranges') or '{}')
+    return record
+
+
 def get_instrument(instrument_id):
     with db() as conn:
         row = conn.execute('SELECT * FROM instruments WHERE id=?', (instrument_id,)).fetchone()
-    return dict(row) if row else None
+    return instrument_record(row) if row else None
 
 
 def validate_capture_epoch(conn, scan):
@@ -175,7 +185,8 @@ def qr_matches(values, points):
             scene = next((s for s in scene_records() if s['id'] == instrument_id), None)
             if scene:
                 if not any(s['id'] == instrument_id for s in scene_matches):
-                    scene_matches.append(scene | {'polygon': np.asarray(points[ordinal]).tolist()})
+                    scene_matches.append(scene | {'polygon': np.asarray(points[ordinal]).tolist(),
+                        'qr_hash':hashlib.sha256(value.encode('utf-8')).hexdigest()})
             else:
                 unknown.append('场景编号尚未登记：' + instrument_id)
             continue
@@ -184,7 +195,8 @@ def qr_matches(values, points):
             unknown.append('仪器编号尚未登记：' + instrument_id)
             continue
         if not any(row['id'] == instrument_id for row in matches):
-            matches.append(asset | {'polygon': np.asarray(points[ordinal]).tolist()})
+            matches.append(asset | {'polygon': np.asarray(points[ordinal]).tolist(),
+                'qr_hash':hashlib.sha256(value.encode('utf-8')).hexdigest()})
     return {'matches': matches, 'scene_matches': scene_matches, 'unknown': unknown,
                         'status': 'matched' if matches or scene_matches else 'not_registered' if unknown else 'no_qr',
                         'signature_status': 'unsigned_demo_label'}
@@ -215,16 +227,31 @@ def save_camera_scan(frame, metadata, *, decoded=None, operator=None, scan_sessi
                       decoded=decoded, metadata=metadata, operator=operator, scan_session_id=scan_session_id)
 
 
+class MeasurementRange(BaseModel):
+    unit: str | None = Field(default=None, max_length=20)
+    range: tuple[FiniteFloat | None, FiniteFloat | None] = (None,None)
+
+    @model_validator(mode='after')
+    def ordered(self):
+        low, high = self.range
+        if low is not None and high is not None and low>high:
+            raise ValueError('范围最小值不能大于最大值')
+        return self
+
+
 class InstrumentEdit(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     scene: str = Field(min_length=1, max_length=100)
     model: str = Field(default='', max_length=100)
+    device_no: str | None = Field(default=None,max_length=100)
+    measurement_ranges: dict[str,MeasurementRange] | None = None
 
 
 class BindingRequest(BaseModel):
     scan_id: uuid.UUID
     instrument_id: uuid.UUID
     operator: str = Field(min_length=1, max_length=80)
+    wearer_id: str | None = Field(default=None,max_length=100)
 
 
 class OcrRequest(BaseModel):
@@ -242,7 +269,7 @@ def index():
 @app.get('/api/state')
 def state():
     with db() as conn:
-        instruments = [dict(row) for row in conn.execute('SELECT * FROM instruments ORDER BY name')]
+        instruments = [instrument_record(row) for row in conn.execute('SELECT * FROM instruments ORDER BY name')]
         bindings = [json.loads(row['document']) for row in conn.execute('SELECT document FROM bindings WHERE ended IS NULL OR rowid IN (SELECT rowid FROM bindings ORDER BY rowid DESC LIMIT 30) ORDER BY rowid DESC')]
         jobs = [json.loads(row['document']) | {'status': row['status']} for row in conn.execute('SELECT status,document FROM jobs ORDER BY rowid DESC LIMIT 20')]
         last_hit = conn.execute("SELECT document FROM scans WHERE json_extract(document,'$.camera_id')=? "
@@ -272,6 +299,12 @@ def edit_instrument(instrument_id: uuid.UUID, body: InstrumentEdit):
     with db() as conn:
         conn.execute('UPDATE instruments SET name=?,scene=?,model=? WHERE id=?',
                      (body.name.strip(), body.scene.strip(), body.model.strip(), str(instrument_id)))
+        if 'device_no' in body.model_fields_set:
+            conn.execute('UPDATE instruments SET device_no=? WHERE id=?',
+                         ((body.device_no or '').strip() or None,str(instrument_id)))
+        if 'measurement_ranges' in body.model_fields_set:
+            conn.execute('UPDATE instruments SET measurement_ranges=? WHERE id=?',
+                         (json.dumps({k:v.model_dump() for k,v in (body.measurement_ranges or {}).items()}),str(instrument_id)))
     return get_instrument(str(instrument_id))
 
 
@@ -354,6 +387,8 @@ def save_binding(body: BindingRequest, *, automatic: bool = False):
                 return existing
         timestamp = now()
         result = {'binding_id': str(uuid.uuid4()), 'operator': body.operator.strip(),
+                  'wearer_id':(body.wearer_id or '').strip() or None,
+                  'qr_hash':next(item.get('qr_hash') for item in scan['matches'] if item['id']==str(body.instrument_id)),
                   'camera_id': scan['camera_id'], 'instrument': asset, 'started_at': timestamp,
                   'ended_at': None, 'scan_id': scan['scan_id'], 'image_url': scan['image_url'],
                   'identity_basis': 'unsigned_qr_and_continuous_scan_opt_in' if automatic else 'unsigned_qr_and_operator_confirmation',
@@ -636,6 +671,14 @@ def export():
     result = state()
     result['exported_at'] = now()
     return result
+
+
+@app.get('/api/jobs/{job_id}/measurements')
+def get_measurements(job_id: uuid.UUID):
+    document = get_job(job_id)
+    return {'job_id':str(job_id),'records':document.get('measurement_records',[]),
+            'status':document['status'],
+            'format_available':'measurement_records' in document}
 
 
 @app.get('/api/readouts')

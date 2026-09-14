@@ -12,6 +12,7 @@ def main():
         import numpy as np
         import torch
         from ultralytics import YOLO, settings
+        from panel_recovery import detect
         settings.update({'sync': False})
         torch.set_num_threads(2)
         if not torch.cuda.is_available():
@@ -26,11 +27,13 @@ def main():
             image = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
             if image is None:
                 raise ValueError('invalid image')
-            with contextlib.redirect_stdout(sys.stderr):
-                result = model.predict(image, device=0, imgsz=imgsz, conf=confidence, max_det=6, verbose=False)[0]
-            response = {'boxes': [{'class_id':int(c), 'confidence':float(s), 'xyxy':b}
-                for b,c,s in zip(result.boxes.xyxy.cpu().tolist(), result.boxes.cls.cpu().tolist(), result.boxes.conf.cpu().tolist())],
-                'speed_ms':result.speed}
+            def infer(pixels, size, threshold):
+                with contextlib.redirect_stdout(sys.stderr):
+                    result = model.predict(pixels, device=0, imgsz=size, conf=threshold, max_det=12, verbose=False)[0]
+                return {'boxes': [{'class_id':int(c), 'confidence':float(s), 'xyxy':b}
+                    for b,c,s in zip(result.boxes.xyxy.cpu().tolist(), result.boxes.cls.cpu().tolist(), result.boxes.conf.cpu().tolist())],
+                    'speed_ms':result.speed}
+            response = detect(image, infer, imgsz=imgsz, confidence=confidence)
         except Exception as exc:
             response = {'error':type(exc).__name__}
         wire.write(json.dumps(response)+'\n'); wire.flush()

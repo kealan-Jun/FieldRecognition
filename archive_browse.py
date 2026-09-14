@@ -59,6 +59,9 @@ def build_views(rows):
         data = {'schema': 'field-recognition-browse/1', 'derived_view': True,
                 'timezone': 'Asia/Shanghai', 'category': category, **data}
         views[str(directory / 'Record.json')] = json.dumps(data, ensure_ascii=False, indent=2).encode()
+        measurement = data.get('measurement')
+        if measurement:
+            views[str(directory / 'Measurement.json')] = json.dumps(measurement,ensure_ascii=False,indent=2).encode()
         operator = {'Demo验证': '样张验证'}.get(data.get('operator'), data.get('operator'))
         camera = {'DemoSampleCamera': '样张相机', 'SampleCamera': '样张相机'}.get(data.get('camera_id'), data.get('camera_id'))
         is_relation = data['entity'] in {'bindings', 'scene_visits'}
@@ -69,6 +72,8 @@ def build_views(rows):
                   ('照片来源', data.get('source_ref')), ('绑定开始' if is_relation else '识别开始', display_time(data.get('started_at'))),
                   ('绑定结束', display_time(data.get('ended_at'))), ('识别完成', display_time(data.get('finished_at')))]
         body = '<p><a href="'+link('Browse/Readme.html')+'">分类入口</a> · <a href="Record.json">完整分类记录 JSON</a></p><article><dl>'
+        if measurement:
+            body = '<p><a href="Measurement.json">标准仪器读数 JSON</a></p>' + body
         body += ''.join('<dt>'+esc(k)+'</dt><dd>'+esc(v)+'</dd>' for k, v in fields if v is not None)
         body += '</dl><p>读数及仪器归属需结合原图核对；原始历史记录不因分类重写。</p></article>'
         image = data.get('photos', {}).get('image')
@@ -117,6 +122,7 @@ def build_views(rows):
             'binding_ids': doc.get('binding_ids', []), 'instrument': doc.get('instrument'),
             'instrument_candidates': doc.get('instrument_candidates', []), 'workbench': workbench,
             'readings': readings, 'panel_regions':doc.get('panel_regions', []), 'panel_detection':doc.get('panel_detection'), 'source_ref': external.get('source_ref'), 'external_capture_id': external.get('capture_id'),
+            'measurement_records':doc.get('measurement_records',[]),
             'captured_at': external.get('captured_at'), 'source_written_at': external.get('source_written_at'),
             'input_mode': 'voice_photo' if external else 'video' if doc.get('request_trigger') == 'video_stream' else 'other',
             'timing': doc.get('timing'), 'photos': photos, 'receipt_versions': sorted(versions[(entity, ident)], key=lambda v:v['sequence'])}
@@ -125,15 +131,21 @@ def build_views(rows):
             record('Bindings', [day, camera, ident], title+' · '+str(doc.get('operator') or '未登记人员').replace('Demo验证', '样张验证'), common)
         elif entity == 'jobs':
             groups = {}
+            measurements = {r['instrument_id']:r for r in doc.get('measurement_records',[])}
             for reading in readings:
                 groups.setdefault((reading.get('instrument') or {}).get('id') or 'Unassigned', []).append(reading)
+            for instrument_id in measurements:
+                groups.setdefault(instrument_id,[])
             if not groups:
                 candidates = doc.get('instrument_candidates') or []
                 sole = asset.get('id') or (candidates[0]['instrument']['id'] if len(candidates) == 1 else 'Unassigned')
                 groups[sole] = []
             for instrument_id, values in groups.items():
                 name = next(((v.get('instrument') or {}).get('name') for v in values if (v.get('instrument') or {}).get('name')), target)
-                record('InstrumentReadings', [instrument_id, day, ident], common['local_time']+' · '+name, common | {'target':name, 'readings': values, 'folder_instrument_id': instrument_id})
+                measurement = measurements.get(instrument_id,{})
+                record('InstrumentReadings', [instrument_id, day, ident], common['local_time']+' · '+name, common | {
+                    'target':name, 'readings': values, 'folder_instrument_id': instrument_id,
+                    'measurement':measurement.get('record'),'measurement_evidence':measurement.get('evidence')})
             if external:
                 filename = PurePosixPath(external.get('source_ref') or external.get('capture_id') or ident).name
                 record('VoicePhotos', [camera, day, local.strftime('%H-%M-%S')+'_'+ident], title+' · '+filename, common)

@@ -14,6 +14,16 @@ def readout_event(conn, row):
              'interrupted': '识别中断', 'cancelled': '识别取消'}.get(status, status)
     if status == 'completed':
         label = '数字候选 · 待核对' if lines else '未读出完整数字'
+    notes = []
+    if doc.get('panel_selection')=='user_selected_crop_or_full_photo' and not doc.get('panel_detection'):
+        notes.append('历史整图或手动选框识别，面板归属未核验')
+    for reading in doc.get('readings',[]):
+        issue = {'decimal_uncertain':'小数点可能缺失，不能直接作为数值',
+                 'possible_display_self_test':'疑似屏幕自检，不能作为测量值'}.get(reading.get('quality_issue'))
+        if issue and issue not in notes:
+            notes.append(issue)
+    if doc.get('recognition_skipped'):
+        notes.append('未检测到已绑定仪器面板，已跳过识别')
     return {'event_id': 'readout:' + doc['job_id'], 'job_id': doc['job_id'], 'kind': 'readout',
             'occurred_at': doc.get('finished_at') or doc['submitted_at'],
             'submitted_at': doc['submitted_at'], 'captured_at': (doc.get('external_photo') or {}).get('captured_at'),
@@ -22,6 +32,8 @@ def readout_event(conn, row):
                 c['instrument']['name'] for c in doc.get('instrument_candidates', [])) + (' · 面板分别定位' if doc.get('association_status') == 'localized_panels' else ' · 归属待确认')
                 if doc.get('instrument_candidates') else '未绑定仪器 · 照片读数'),
             'status': label, 'detail': '、'.join(line['text'] for line in lines),
+            'quality_notes':notes,
+            'measurement_url':'/api/jobs/'+doc['job_id']+'/measurements' if doc.get('measurement_records') else None,
             'image_url': doc.get('image_url') or doc.get('crop_image_url'),
             'result_url': '/api/jobs/' + doc['job_id'], 'timing': doc.get('timing') or {},
             'readings': doc.get('readings', []), 'binding_ids': doc.get('binding_ids', []),

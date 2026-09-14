@@ -23,6 +23,8 @@ def build_readings(document):
         unique = local_candidates[0] if len(local_candidates) == 1 else None
         value = line.get('value') or match[1]
         issue = 'decimal_uncertain' if re.fullmatch(r'[+-]?0\d+', value) else None
+        if re.fullmatch(r'[+-]?8{5,}(?:\.8+)?', value):
+            issue = 'possible_display_self_test'
         result.append({'reading_id': f"{document['job_id']}:{len(result) + 1}",
             'text': text, 'value': value, 'unit': line.get('unit') or (text[match.end():].strip() if match else None) or None,
             'polygon': line.get('polygon'), 'confidence': line.get('confidence'),
@@ -35,6 +37,7 @@ def build_readings(document):
             'activity_confirmed': False,
             'image_url': document.get('image_url'), 'capture_id': document['capture_id'],
             'panel_id':line.get('panel_id'), 'panel_bbox':region.get('bbox') if region else None,
+            'measurement_name':region.get('measurement_name') if region else None,
             'digit_region':region.get('digit_region') if region else None,
             'temporal_confirmation':line.get('temporal_confirmation') or {'status':'single_frame'},
             'panel_image_url':region.get('image_url') if region else None,

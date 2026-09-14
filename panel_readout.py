@@ -146,6 +146,8 @@ def run(core, document, *, clock=time.monotonic, pause=time.sleep):
                 instrument_association='unbound_photo', instrument_identity_basis='not_localized', association_status='unlocalized')
         from reading_results import build_readings
         document['readings'] = build_readings(document)
+        from measurement_records import build_records
+        document['measurement_records'] = build_records(document)
         document.update(finished_at=core['now'](), wall_seconds=round(clock() - started, 3))
         if future and not document.get('local_ocr'):
             document['local_ocr'] = result_if_ready() or {'status': 'running', 'lines': []}

@@ -116,10 +116,12 @@ class PanelDetector:
                     boxes.append(item | {'xyxy': [x1,y1,x2,y2],
                         'instrument_id': self.config['classes'][key]['instrument_id']})
                 boxes.sort(key=lambda b: (b['class_id'], b['xyxy'][0], b['xyxy'][1]))
-                self.state.update(status='ready', error=None, last_seconds=round(time.monotonic()-started, 3))
+                self.state.update(status='ready', error=None, last_seconds=round(time.monotonic()-started, 3),
+                                  recovery=result.get('recovery'))
                 return {'status': 'completed', 'boxes': boxes, 'model': 'YOLO11n',
                     'weights_sha256': self.state['weights_sha256'], 'model_version': self.config['version'],
-                    'device': 'gpu:0', 'wall_seconds': self.state['last_seconds'], 'speed_ms': result.get('speed_ms')}
+                    'device': 'gpu:0', 'wall_seconds': self.state['last_seconds'], 'speed_ms': result.get('speed_ms'),
+                    'recovery':result.get('recovery')}
             except Exception as exc:
                 self.close()
                 self.state.update(status='error', error=type(exc).__name__)
