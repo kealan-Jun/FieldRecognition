@@ -98,7 +98,7 @@ get_field_state 的 `ocr.status` 为 queued/loading 时表示绑定后的后台�
 
 ## 已有语音照片与自动识别
 
-当前服务监控 `/mnt/realityloop-nas/voice_photos/<绑定相机>/日期/时间/照片.jpg`。绑定后只加载 OCR 并等待文件；现有 Agent 执行拍照、写完照片后，本服务才执行识别。轮询 2 秒，稳定至少 1 秒；不重拍、不修改 NAS、不因相机视频不断变化而触发读数。目录和导入回执的持久化去重跨本地服务重启有效。设备采集服务停启导致绑定失效后，重新扫码才能处理之后的新照片。
+当前服务监控 `/mnt/realityloop-nas/voice_photos/<绑定相机>/日期/时间/照片.jpg`。绑定后只加载 OCR 并等待文件；现有 Agent 执行拍照、写完照片后，本服务才执行识别。轮询 2 秒，稳定至少 1 秒；不重拍、不修改源照片、不因相机视频不断变化而触发读数。目录和导入回执的持久化去重跨本地服务重启有效。设备采集服务停启导致绑定失效后，重新扫码才能处理之后的新照片。
 
 直接传递拍照结果的标准库调用：
 
@@ -125,3 +125,5 @@ result = tools.call('get_panel_result', {'job_id': job['job_id']})
 直接仪器绑定时，`scene_visit_id=null`、`scene_qr_verified=false`、`scene_basis=instrument_registration`；`scene.name` 只表达登记位置。实际识别并进入场景后绑定则保留真实 visit ID，并标记 `decoded_scene_qr`。不得把前者说成已经扫描场景码。`enter_scene` 可传使用者明确提供的 `operator`，自动扫码会传入已登记实验员，缺失时不补造。
 
 `get_field_state.activity` 返回配置相机最近 50 条操作记录，包括扫码、场景进入／结束、仪器绑定／结束与面板读数。每条含 `event_id`、`kind`、`occurred_at`、`camera_id`、`operator`、`target`、`status`、`detail`、`image_url`。扫码成功但没有绑定也会出现；人员缺失保持 null，不能用当前登记者代填历史操作人。
+
+`get_field_state.archive` 返回 NAS 留存状态：`enabled`、`status`（disabled/ready/retrying）、`pending_receipts`、`archived_receipts`、`last_error`、`last_archived_at`、`root` 和 `source_instance`。服务仍在本机运行，后台向独立 NAS 目录归档，Agent 不需要新增调用。`ready` 表示归档目标可用；确认当前全部记录归档还需 `pending_receipts=0`。不把存储成功说成读数正确或物理操作完成。目录结构与回执见 [本机运行与 NAS 留存](docs/本机运行与NAS留存.md)。

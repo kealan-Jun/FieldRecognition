@@ -43,6 +43,9 @@ def main():
     print('相机：' + data.get('camera', {}).get('status', '未配置'))
     print('OCR：' + data.get('ocr', {}).get('device', '未知') + ' · ' + data.get('ocr', {}).get('status', '未知'))
     print('照片监控：' + data.get('photo_watch', {}).get('status', '未知'))
+    archive = data.get('archive', {})
+    print('NAS 留存：' + {'disabled': '未启用', 'ready': '已连接', 'retrying': '等待重试'}.get(archive.get('status'), '正在检查')
+          + f" · 已归档 {archive.get('archived_receipts', 0)} 条，待同步 {archive.get('pending_receipts', 0)} 条")
     print('页面：' + URL)
     if action == 'open':
         subprocess.run(['xdg-open', URL], check=True)

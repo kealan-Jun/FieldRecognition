@@ -79,11 +79,13 @@ async def lifespan(application):
     if has_binding:
         queue_ocr_warmup()
     saved_photo_watcher.start()
+    archive_store.start()
     automatic_runner.start()
     yield
     stopping.set()
     automatic_runner.close()
     saved_photo_watcher.close()
+    archive_store.close()
     live_scanner.close()
     if receiver_camera:
         receiver_camera.close()
@@ -126,6 +128,8 @@ def save_image(data, source, camera):
     try:
         with Image.open(io.BytesIO(data)) as original:
             original.load()
+            original_extension = {'JPEG': '.jpg', 'PNG': '.png', 'WEBP': '.webp',
+                                  'BMP': '.bmp', 'TIFF': '.tiff'}.get(original.format, '.bin')
             if original.width * original.height > 16_000_000:
                 raise ValueError('图片像素过大')
             # EXIF orientation must match what the user sees and crops.
@@ -136,9 +140,13 @@ def save_image(data, source, camera):
     ident = str(uuid.uuid4())
     path = DATA / 'Images' / f'{ident}.png'
     image.save(path)
+    source_hash = hashlib.sha256(data).hexdigest()
+    original_blob = f'Originals/{source_hash}{original_extension}'
+    from archive_store import immutable_write
+    immutable_write(DATA / original_blob, data)
     return {'capture_id': ident, 'image_url': f'/api/images/{ident}',
             'source': source, 'camera_id': camera, 'received_at': now(),
-            'source_sha256': hashlib.sha256(data).hexdigest(),
+            'source_sha256': source_hash, 'original_blob': original_blob,
             'image_sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
             'width': image.width, 'height': image.height, 'path': str(path)}
 
@@ -237,6 +245,7 @@ def state():
     return {'scenes': scene_records(), 'scene_visits': scene_visits(), 'instruments': instruments, 'bindings': bindings, 'jobs': jobs, 'ocr': dict(ocr_state),
             'last_camera_scan': json.loads(last_hit['document']) if last_hit else None,
             'activity': activity,
+            'archive': archive_store.snapshot(),
             'vision_fallback': aliyun_vision.public_config(), 'photo_watch': saved_photo_watcher.snapshot(),
             'automation': automatic_runner.snapshot(),
             'camera': receiver_camera.snapshot() if receiver_camera else {'configured': bool(os.environ.get('FIELD_CAMERA_SNAPSHOT_URL')),
@@ -559,6 +568,9 @@ saved_photo_watcher = SavedPhotoWatcher(globals())
 
 from automation import install as install_automation
 automatic_runner = install_automation(globals())
+
+from archive_store import ArchiveStore
+archive_store = ArchiveStore(globals())
 
 from agent_tools import install_tools
 install_tools(app, globals())

@@ -225,6 +225,9 @@ window.addEventListener('pagehide',()=>{stopWebcam();closePreview();clearTimeout
 $('#enterScene').onclick=busy($('#enterScene'),async()=>{const chosen=$('input[name="scene"]:checked');if(!chosen)throw Error('请选择场景');await api('/api/scene/enter',json({scan_id:scan.scan_id,scene_id:chosen.value}));await refresh(false);activeBinding=state.bindings.find(b=>!b.ended_at&&b.camera_id===scan.camera_id)||null;renderBinding();message('已进入场景，请拍摄仪器二维码并绑定使用。');});
 
 function renderHistory(){
+  const archive=state.archive||{};
+  $('#archiveStatus').textContent=archive.enabled?`NAS 留存：${archive.status==='ready'?'已连接':archive.status==='retrying'?'等待重试，记录保留在本机':'正在连接'} · 已归档 ${archive.archived_receipts||0} 条 · 待同步 ${archive.pending_receipts||0} 条`:'NAS 留存未启用，记录保存在本机。';
+  $('#archiveStatus').title=archive.root||'';
   const events=state.activity||[];
   const labels={scan:'扫码识别',binding_started:'仪器绑定',binding_ended:'结束绑定',scene_entered:'进入场景',scene_left:'结束场景',readout:'面板读数'};
   $('#historyRows').innerHTML=events.length?`<div class="table-scroll"><table><thead><tr><th>时间</th><th>事件</th><th>对象与结果</th><th>实验员 / 相机</th><th>凭证</th></tr></thead><tbody>${events.map(event=>`<tr><td>${esc(stamp(event.occurred_at))}</td><td>${esc(labels[event.kind]||event.kind)}</td><td><strong>${esc(event.target)}</strong><small>${esc(event.status)}${event.detail?' · '+esc(event.detail):''}</small></td><td>${esc(displayOperator(event.operator)||'当时未记录')}<small>${esc(displayCamera(event.camera_id))}</small></td><td>${event.image_url?`<a href="${esc(event.image_url)}" target="_blank" rel="noopener">查看原图 ↗</a>`:'—'}</td></tr>`).join('')}</tbody></table></div>`:'当前相机尚无操作记录。成功解码、绑定和照片读数会按实际发生时间显示在这里。';

@@ -40,6 +40,8 @@
 
 本仓库提供识别服务、网页和 Agent HTTP 工具。挂脖设备、Receiver、Agent 的语音与拍照服务、NAS 保存流程由现有系统提供。当前实现面向**单个配置相机、本机 GPU OCR**，完整机制与实现边界见 [技术方案](技术方案.md)。
 
+服务在本机常驻，关闭网页后仍运行；从 NAS 读取语音照片，将照片与业务回执写入独立的 NAS 归档目录。NAS 无需安装程序或提供管理员账号，具体结构、权限与重试机制见 [本机运行与 NAS 留存](docs/本机运行与NAS留存.md)。
+
 ### 核心能力
 
 | 能力 | 当前实现 |
@@ -52,6 +54,8 @@
 | 🧾 **结果可追溯** | 保存图片引用、SHA-256、拍摄与接收时间、绑定快照、选框和模型原始结果；提供网页查询与九个 Agent 工具。 |
 
 ## 🗞️ 项目进展
+
+- **2026-09-14**：增加本机事务归档队列、NAS 照片与版本回执留存、断线补传和可直接打开的中文索引。103 项自动测试通过，涵盖绑定起止、OCR 结果与原件关联；实际仪器语音读数验收仍待现场测试。
 
 - **2026-09-14**：仪器码支持直接自动绑定，场景扫码证据独立记录；工作台显示原始命中帧，操作记录纳入未绑定的扫码和面板读数。桌面工作台按窗口高度同屏布局。94 项自动测试通过，现场仪器 A 的二维码已成功解码，新的自动绑定现场闭环仍待验收。
 
@@ -99,6 +103,7 @@ OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 \
 | `FIELD_SAVED_PHOTO_ROOT` | 已挂载的语音照片根目录，例如 `/mnt/realityloop-nas/voice_photos`。 |
 | `FIELD_SAVED_PHOTO_WATCH_ENABLED=1` | 开启有效绑定相机的新照片监控。 |
 | `FIELD_SAVED_PHOTO_TIMEZONE` | 照片文件名时间的时区，默认 `Asia/Shanghai`。 |
+| `FIELD_ARCHIVE_ENABLED`、`FIELD_ARCHIVE_ROOT`、`FIELD_ARCHIVE_MOUNT` | 开启独立 NAS 归档，指定 `FieldRecognitionArchive` 目录及其挂载点；运行数据库留在本机。 |
 | `DASHSCOPE_API_KEY`、`FIELD_ALIYUN_FALLBACK_ENABLED=1` | 配置阿里云凭证并启用视觉兜底；凭证只放环境变量或未跟踪的 `.env`。 |
 | `FIELD_ALIYUN_MODEL` | 本版配置为 `qwen3.8-max`，实际可用性以账户和服务区域为准。 |
 | `FIELD_ALIYUN_NO_DIGITS_SECONDS` | 单张任务无完整数字候选的等待时间，默认 `5` 秒。 |
@@ -145,6 +150,8 @@ flowchart TB
     Result --> UI[网页 / Agent 查询]
     Binding --> Store[(SQLite + 本地图片)]
     Result --> Store
+    Store --> Outbox[本机持久化归档队列]
+    Outbox --> Archive[NAS 独立目录：照片、版本回执与索引]
 ```
 
 | 组成 | 主要技术 | 负责什么 |
@@ -211,6 +218,7 @@ FieldRecognition/
 ├── scene_binding.py                # 场景进入与绑定校验
 ├── photo_watch.py / saved_photo.py  # NAS 照片监控、导入与去重
 ├── panel_readout.py                 # 本地识别与超时兜底调度
+├── archive_store.py                 # 本机事务队列、NAS 归档与索引
 ├── aliyun_vision.py                 # 阿里云视觉调用与结果校验
 ├── agent_tools.py / agent_client.py # Agent 工具与 Python 适配器
 ├── static/                         # 网页、项目标识与二维码样张
