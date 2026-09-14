@@ -6,6 +6,7 @@ import uuid
 
 import cv2
 import aliyun_vision as vision
+from digit_regions import refine_digits, extract_digits
 
 
 def predict(core, image, x=0, y=0, *, video=False, allowed_instrument_ids=()):
@@ -30,10 +31,13 @@ def predict(core, image, x=0, y=0, *, video=False, allowed_instrument_ids=()):
         pad = max(2, round(min(x2-x1,y2-y1)*.08))
         cx,cy = max(0,x1-pad),max(0,y1-pad)
         ex,ey = min(image.shape[1],x2+pad),min(image.shape[0],y2+pad)
-        local = core['predict_panel'](image[cy:ey,cx:ex].copy(), x+cx, y+cy)
+        panel = image[cy:ey,cx:ex].copy()
+        local = core['predict_panel'](panel, x+cx, y+cy)
+        local = refine_digits(core['predict_panel'], panel, local, x+cx, y+cy)
         region = {'panel_id':f"panel-{box['class_id']}-{ordinal}", 'class_id':box['class_id'],
             'instrument_id':box['instrument_id'], 'detector_confidence':box['confidence'],
-            'bbox':[x+x1,y+y1,x+x2,y+y2], 'crop':[x+cx,y+cy,ex-cx,ey-cy], 'local_ocr':local}
+            'bbox':[x+x1,y+y1,x+x2,y+y2], 'crop':[x+cx,y+cy,ex-cx,ey-cy], 'local_ocr':local,
+            'digit_region':local.get('digit_region')}
         local['lines'] = [dict(line, panel_id=region['panel_id']) for line in local.get('lines', [])]
         regions.append(region); lines.extend(local['lines'])
     result = {'status':'completed', 'lines':lines, 'panel_regions':regions, 'panel_detection':detection,
@@ -81,6 +85,8 @@ def finish(core, document, local, image, *, valid, clock=time.monotonic, started
             candidates[instrument['id']] = {'instrument':instrument,'binding_id':region['binding_id'],'basis':region['association_basis']}
         x,y,w,h = region['crop']
         crop = image[y:y+h,x:x+w].copy()
+        if (region.get('digit_region') or {}).get('status') == 'located':
+            crop, _ = extract_digits(image,region['digit_region'])
         ident = str(uuid.uuid4()); path = core['DATA']/'Images'/f'{ident}.png'
         if not cv2.imwrite(str(path), crop):
             raise ValueError('panel evidence encoding failed')

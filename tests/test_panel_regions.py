@@ -20,6 +20,8 @@ BOXES = [dict(class_id=0, instrument_id=A, confidence=.8, xyxy=[20,30,80,50]),
 
 
 def configure(app, monkeypatch, boxes=BOXES):
+    # These tests isolate association/crop routing; digit refinement has its own tests.
+    monkeypatch.setattr(panel_regions,'refine_digits',lambda predict,image,initial,x=0,y=0:initial)
     monkeypatch.setenv('FIELD_PANEL_DETECTOR_ENABLED', '1')
     monkeypatch.setattr(app.panel_detector, 'warmup', lambda: True)
     monkeypatch.setattr(app.panel_detector, 'predict', lambda image: {'status':'completed', 'boxes':copy.deepcopy(boxes), 'weights_sha256':'a'*64})

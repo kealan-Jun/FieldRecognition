@@ -35,6 +35,8 @@ def build_readings(document):
             'activity_confirmed': False,
             'image_url': document.get('image_url'), 'capture_id': document['capture_id'],
             'panel_id':line.get('panel_id'), 'panel_bbox':region.get('bbox') if region else None,
+            'digit_region':region.get('digit_region') if region else None,
+            'temporal_confirmation':line.get('temporal_confirmation') or {'status':'single_frame'},
             'panel_image_url':region.get('image_url') if region else None,
             'panel_image_sha256':region.get('image_sha256') if region else None,
             'detector_confidence':region.get('detector_confidence') if region else None,

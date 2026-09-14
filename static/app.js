@@ -167,9 +167,9 @@ $('#endBinding').onclick=busy($('#endBinding'),async()=>{await api('/api/camera/
 function renderVideoOcr(v){
   videoState=v;if(!v)return;
   const status={paused:'视频识别已暂停',unconfigured:'等待配置相机',waiting_operator:'等待实验员登记',waiting_binding:'等待扫码绑定设备，暂不识别面板',waiting_camera:'等待新鲜画面',loading_model:'正在加载模型',inferring:'视频持续识别中',watching:'视频持续识别中',yielding_to_photo:'优先处理语音照片',error:'视频识别异常'}[v.status]||'正在准备';
-  $('#videoOcrStatus').textContent=`${status} · 已推理 ${v.frames_inferred||0} 帧 · 留存 ${v.evidence_saved||0} 帧${v.last_result_at?' · 更新 '+new Date(v.last_result_at).toLocaleTimeString('zh-CN',{hour12:false}):''}`;
+  $('#videoOcrStatus').textContent=`${status}${v.pending_panels&&['watching','inferring'].includes(v.status)?' · '+v.pending_panels+' 个面板确认中':''} · 已推理 ${v.frames_inferred||0} 帧 · 留存 ${v.evidence_saved||0} 帧${v.last_result_at?' · 更新 '+new Date(v.last_result_at).toLocaleTimeString('zh-CN',{hour12:false}):''}`;
   $('#videoOcrToggle').textContent=v.enabled?'暂停视频识别':'开启视频识别';
-  $('#videoReadings').innerHTML=(['waiting_camera','waiting_binding','paused','error'].includes(v.status)?[]:v.latest_lines||[]).map(line=>`<div class="live-reading"><strong>${esc(line.text)}</strong><small>${esc(line.instrument?.name||'归属待确认')} · 实时读数</small></div>`).join('')||'<span class="caption">等待画面中出现清晰读数</span>';
+  $('#videoReadings').innerHTML=(['waiting_camera','waiting_binding','paused','error'].includes(v.status)?[]:v.latest_lines||[]).map(line=>`<div class="live-reading"><strong>${esc(line.text)}</strong><small>${esc(line.instrument?.name||'归属待确认')} · ${line.temporal_confirmation?.status==='confirmed'?'多帧确认':'实时读数'}</small></div>`).join('')||'<span class="caption">等待画面中出现清晰读数</span>';
 }
 async function pollVideo(){try{renderVideoOcr(await api('/api/video-ocr'));}catch(e){$('#videoOcrStatus').textContent='视频识别状态连接中，正在重试';}videoTimer=setTimeout(pollVideo,500);}
 $('#videoOcrToggle').onclick=busy($('#videoOcrToggle'),async()=>{renderVideoOcr(await api('/api/video-ocr',{...json({enabled:!videoState?.enabled}),method:'PUT'}));});

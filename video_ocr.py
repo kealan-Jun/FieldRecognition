@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from aliyun_vision import READOUT, fallback_reason, no_digits_seconds
 from live_scan import frame_key
 from qr_decode import decode_qr
+from panel_confirmation import PanelConfirmation
 
 
 class VideoSettings(BaseModel):
@@ -34,6 +35,7 @@ class VideoOcr:
         self.last_saved = -1000
         self.no_digits_since = None
         self.epoch = None
+        self.confirmation = PanelConfirmation()
         self.state = {'status': 'starting', 'frames_inferred': 0, 'evidence_saved': 0,
                       'latest_lines': [], 'last_error': None, 'background_frames_skipped': 0}
 
@@ -46,6 +48,7 @@ class VideoOcr:
         with self.lock:
             return copy.deepcopy(self.state) | {'enabled': self.enabled(), 'sample_interval_seconds': self.interval,
                 'target_fps': 1 / self.interval, 'saves_every_frame': False, 'stable_samples': 2,
+                'confirmation_rule':'2_of_3_distinct_frames','confirmation_window_seconds':1.6,
                 'min_evidence_interval_seconds': 2, 'unreadable_evidence_interval_seconds': 30,
                 'empty_background_saved': False, 'unreadable_requires_visible_instrument_qr': not self.core['panel_detector'].enabled(),
                 'panel_detector': self.core['panel_detector'].snapshot()}
@@ -82,6 +85,7 @@ class VideoOcr:
     def step(self):
         camera = self.core['receiver_camera']
         if not self.enabled() or not camera:
+            self.confirmation.reset()
             self.state['status'] = 'paused' if camera else 'unconfigured'
             if self.pending and self.pending[0].done():
                 self.pending = None
@@ -93,15 +97,18 @@ class VideoOcr:
         info = camera.snapshot()
         service = info.get('service_status', {})
         if not info.get('service_status_available') or not service.get('online'):
+            self.confirmation.reset()
             self.state['status'] = 'waiting_camera'
             self.no_digits_since = None
             return
         epoch = service.get('media_session_id')
         if epoch != self.epoch:
+            self.confirmation.reset()
             self.epoch, self.signature, self.last_saved_signature = epoch, None, None
             self.no_digits_since, self.stable_count = None, 0
         snapshots = self.core['current_panel_bindings'](camera.target) if self.core['panel_detector'].enabled() else None
         if snapshots == []:
+            self.confirmation.reset()
             if self.pending:
                 self.pending[0].cancel()
                 if self.pending[0].done():
@@ -134,6 +141,7 @@ class VideoOcr:
         try:
             frame, metadata = camera.frame()
         except ValueError:
+            self.confirmation.reset()
             self.state['status'] = 'waiting_camera'
             self.no_digits_since, self.stable_count = None, 0
             return
@@ -150,9 +158,11 @@ class VideoOcr:
     def accept(self, frame, metadata, observed, local):
         current = self.clock()
         if 'panel_detection' in local:
-            allowed = {b['instrument']['id'] for b in self.core['current_panel_bindings'](self.core['receiver_camera'].target)}
+            bindings = self.core['current_panel_bindings'](self.core['receiver_camera'].target)
+            allowed = {b['instrument']['id'] for b in bindings}
             # Discard a result whose binding ended during inference.
             if any(r['instrument_id'] not in allowed for r in local.get('panel_regions', [])):
+                self.confirmation.reset()
                 self.state.update(latest_lines=[], latest_panels=[])
                 self.no_digits_since, self.stable_count, self.signature = None, 0, None
                 return
@@ -164,6 +174,10 @@ class VideoOcr:
         visible_ids = tuple(sorted(hit['id'] for hit in hits))
         if localized:
             visible_ids = tuple(sorted({r['instrument_id'] for r in panels}))
+            lines = self.confirmation.observe(panels,frame_key(metadata),observed,current,
+                (self.epoch,tuple(sorted(b['binding_id'] for b in bindings))))
+            self.state['pending_panels'] = sum(r['temporal_confirmation']['status']=='pending' and
+                any(READOUT.fullmatch(l.get('text','')) for l in r['local_ocr'].get('lines',[])) for r in panels)
         elif not visible_ids:
             with self.core['db']() as conn:
                 visible_ids = tuple(sorted(json.loads(row['document'])['instrument']['id'] for row in conn.execute(
@@ -195,12 +209,20 @@ class VideoOcr:
                 self.no_digits_since = current
         else:
             self.no_digits_since = None
-        change = bool(lines) and self.stable_count >= 2 and signature != self.last_saved_signature
+        changed_panels = [r for r in panels if self.confirmation.changed(r) and self.confirmation.can_save(r,current)] if localized else []
+        change = bool(changed_panels) if localized else bool(lines) and self.stable_count >= 2 and signature != self.last_saved_signature
         unreadable = (self.no_digits_since is not None and current - self.no_digits_since >= no_digits_seconds()
                       and current - self.last_saved >= 30 and self.stable_count >= 2
                       and signature != self.last_saved_signature)
-        if not (change and current - self.last_saved >= 2) and not unreadable:
+        if not (change and (localized or current - self.last_saved >= 2)) and not unreadable:
             return
+        if localized and change:
+            local = copy.deepcopy(local)
+            selected = {r['panel_id'] for r in changed_panels}
+            local['panel_regions'] = [r for r in local['panel_regions'] if r['panel_id'] in selected]
+            local['lines'] = [l for l in lines if l.get('panel_id') in selected]
+            for region in local['panel_regions']:
+                region['local_ocr']['lines'] = [l for l in local['lines'] if l.get('panel_id')==region['panel_id']]
         # Only evidence frames reach disk. No stream frame is stored while waiting for stability.
         with self.core['ocr_submit_lock']:
             with self.core['db']() as conn:
@@ -216,13 +238,17 @@ class VideoOcr:
             elapsed = current - self.no_digits_since if self.no_digits_since is not None else 0
             capture.update(received_at=observed, video_observation={'observed_at': observed,
                 'evidence_reason': 'reading_changed' if change else 'unreadable_timeout',
-                'stable_samples': self.stable_count, 'no_digits_elapsed_seconds': elapsed,
+                'stable_samples': min(r['temporal_confirmation']['votes'] for r in changed_panels) if changed_panels else self.stable_count,
+                'confirmation_rule': '2_of_3_distinct_frames' if localized and change else None,
+                'no_digits_elapsed_seconds': elapsed,
                 'sample_interval_seconds': self.interval})
             with self.core['db']() as conn:
                 conn.execute('UPDATE scans SET document=? WHERE id=?', (json.dumps(capture), capture['capture_id']))
             job = self.core['enqueue_ocr'](self.core['OcrRequest'](capture_id=capture['capture_id'], auto_associate=True),
                                           trigger='video_stream', precomputed_local=local)
             self.last_saved, self.last_saved_signature = current, signature
+            if localized:
+                self.confirmation.mark_saved(local['panel_regions'],current)
             self.state.update(last_job_id=job['job_id'], last_evidence_at=self.core['now'](),
                               evidence_saved=self.state['evidence_saved'] + 1)
 
