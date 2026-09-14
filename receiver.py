@@ -1,4 +1,4 @@
-"""Single selected camera from receiver GWHP main stream; bounded CPU demo."""
+"""Single selected camera from receiver GWHP main stream; bounded CPU decoding."""
 from __future__ import annotations
 
 import json
@@ -71,7 +71,7 @@ class ReceiverCamera:
         self.started = False
         self.on_service_status = None
         self.info = {'configured': True, 'id': target, 'mode': 'gwhp_main', 'status': 'not_started',
-                     'decoder': 'PyAV CPU / single-camera demo', 'receiver': self.receiver,
+                     'decoder': 'PyAV CPU / single-camera', 'receiver': self.receiver,
                      'reconnect_count': 0, 'sequence_gaps': 0, 'decode_errors': 0,
                      'dropped_packets': 0, 'decoded_frames': 0, 'online_cameras': []}
 

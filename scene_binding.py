@@ -2,12 +2,13 @@
 import json
 import uuid
 from fastapi import HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class SceneEntry(BaseModel):
     scan_id: uuid.UUID
     scene_id: uuid.UUID
+    operator: str | None = Field(default=None, min_length=1, max_length=80)
 
 
 def install(core):
@@ -55,6 +56,7 @@ def install(core):
                     conn.execute(f'UPDATE {table} SET ended=?,document=? WHERE id=?', (timestamp, json.dumps(doc), row['id']))
             result = {'visit_id': str(uuid.uuid4()), 'camera_id': scan['camera_id'], 'scene': dict(scene),
                       'scan_id': scan['scan_id'], 'image_url': scan['image_url'], 'started_at': timestamp,
+                      'operator': body.operator.strip() if body.operator else None,
                       'ended_at': None, 'identity_basis': 'unsigned_scene_qr_and_continuous_scan_opt_in' if automatic else 'unsigned_scene_qr_and_user_confirmation'}
             conn.execute('INSERT INTO scene_visits VALUES(?,?,NULL,?)', (result['visit_id'], result['camera_id'], json.dumps(result)))
             return result
@@ -69,6 +71,13 @@ def install(core):
             raise HTTPException(409, '仪器所属场景与该相机当前场景不一致')
         return visit
 
+    def optional_scene(conn, camera, scene_name):
+        # An instrument QR establishes the instrument identity by itself. A scene
+        # name from its registration is not evidence that a scene QR was scanned.
+        if not conn.execute('SELECT 1 FROM scene_visits WHERE camera=? AND ended IS NULL', (camera,)).fetchone():
+            return None
+        return validate(conn, camera, scene_name)
+
     core['app'].post('/api/scene/enter')(enter)
     core.update(scene_records=scenes, scene_visits=visits, enter_scene=enter,
-                validate_scene=validate, SceneEntry=SceneEntry)
+                validate_scene=validate, optional_scene=optional_scene, SceneEntry=SceneEntry)

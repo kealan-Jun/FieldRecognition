@@ -1,4 +1,4 @@
-"""One user-requested photograph: resident CPU OCR first, timed vision fallback."""
+"""One user-requested photograph: resident local OCR first, timed vision fallback."""
 import hashlib
 import json
 import time
@@ -49,7 +49,7 @@ def run(core, document, *, clock=time.monotonic, pause=time.sleep):
         configured = vision.public_config()['available']
         deadline = started + (vision.no_digits_seconds() if configured else 90)
         # A successful numeric result returns immediately. A miss cannot trigger a paid
-        # request before the deadline, and slow CPU inference cannot block the watchdog.
+        # request before the deadline, and slow local inference cannot block the watchdog.
         while True:
             if not valid():
                 cancelled()
@@ -87,7 +87,7 @@ def run(core, document, *, clock=time.monotonic, pause=time.sleep):
             document.update(local)
         else:
             document.update(status='failed', error='local_ocr_timeout', lines=[])
-        # When CPU finishes during the vision call, prefer its valid numeric result.
+        # When local OCR finishes during the vision call, prefer its valid numeric result.
         local_has_digits = local and vision.fallback_reason(local['lines'], local.get('error')) is None
         if cloud and cloud.get('answer', {}).get('readings') and not local_has_digits:
             document.update(status='completed', model=cloud['model'], device='cloud', actual_model_invocation=True,
@@ -104,7 +104,7 @@ def run(core, document, *, clock=time.monotonic, pause=time.sleep):
             document['local_ocr'] = result_if_ready() or {'status': 'running', 'lines': []}
         save(core, document)
         if future and document.get('local_ocr', {}).get('status') == 'running':
-            # An in-flight CPU operation cannot be killed safely. Its eventual raw
+            # An in-flight OCR operation cannot be killed safely. Its eventual raw
             # result is kept for audit, without replacing the answer already delivered.
             def late_result(completed):
                 if completed.cancelled():

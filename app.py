@@ -1,4 +1,4 @@
-"""Independent QR binding + CPU PaddleOCR demo. No NAS or Agent dependency."""
+"""Independent QR binding and resident PaddleOCR panel recognition."""
 from __future__ import annotations
 
 import hashlib
@@ -24,8 +24,11 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field
+from ocr_runtime import configured_device, create_model, OcrDeviceUnavailable
+from activity import recent_activity
 
 BASE = Path(__file__).parent
+OCR_DEVICE = configured_device()
 DATA = Path(os.environ.get('FIELD_DEMO_DATA', str(BASE / 'Data')))
 DATA.mkdir(parents=True, exist_ok=True)
 (DATA / 'Images').mkdir(exist_ok=True)
@@ -88,16 +91,16 @@ async def lifespan(application):
     readout_pool.shutdown(wait=False, cancel_futures=True)
 
 
-app = FastAPI(title='FieldLink · 现场识别 Demo', version='0.1.0', lifespan=lifespan)
+app = FastAPI(title='FieldRecognition · 现场识别', version='0.1.0', lifespan=lifespan)
 app.mount('/static', StaticFiles(directory=BASE / 'static'), name='static')
-ocr_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='cpu-ocr')
+ocr_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='panel-ocr')
 readout_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='panel-request')
 ocr_submit_lock = threading.RLock()
 stopping = threading.Event()
 ocr_lock = threading.RLock()
 ocr_warmup_lock = threading.Lock()
 ocr_warmup_future = None
-ocr_state = {'status': 'not_loaded', 'device': 'cpu', 'engine': 'PaddleOCR / PP-OCRv5 mobile',
+ocr_state = {'status': 'not_loaded', 'device': OCR_DEVICE, 'engine': 'PaddleOCR / PP-OCRv5 mobile',
              'resident': False, 'load_count': 0, 'loaded_at': None}
 ocr_model = None
 
@@ -172,7 +175,7 @@ def qr_matches(values, points):
                         'signature_status': 'unsigned_demo_label'}
 
 
-def scan_image(data, source, camera, *, decoded=None, metadata=None):
+def scan_image(data, source, camera, *, decoded=None, metadata=None, operator=None, scan_session_id=None):
     capture = save_image(data, source, camera)
     if decoded is None:
         from qr_decode import decode_qr
@@ -181,17 +184,20 @@ def scan_image(data, source, camera, *, decoded=None, metadata=None):
     result = capture | qr_matches(values, points) | {'scan_id': capture['capture_id'], 'qr_diagnostics': diagnostics}
     if metadata is not None:
         result['frame_metadata'] = metadata
+    if operator is not None:
+        result['operator'] = operator
+        result['scan_session_id'] = scan_session_id
     with db() as conn:
         conn.execute('INSERT INTO scans VALUES(?,?)', (result['scan_id'], json.dumps(result)))
     return result
 
 
-def save_camera_scan(frame, metadata, *, decoded=None):
+def save_camera_scan(frame, metadata, *, decoded=None, operator=None, scan_session_id=None):
     ok, encoded = cv2.imencode('.png', frame)
     if not ok:
         raise HTTPException(500, '画面编码失败')
     return scan_image(encoded.tobytes(), 'neck_camera_gwhp_main', receiver_camera.target,
-                      decoded=decoded, metadata=metadata)
+                      decoded=decoded, metadata=metadata, operator=operator, scan_session_id=scan_session_id)
 
 
 class InstrumentEdit(BaseModel):
@@ -214,7 +220,7 @@ class OcrRequest(BaseModel):
 
 @app.get('/')
 def index():
-    return FileResponse(BASE / 'static' / 'index.html')
+    return FileResponse(BASE / 'static' / 'index.html', headers={'Cache-Control': 'no-cache'})
 
 
 @app.get('/api/state')
@@ -223,12 +229,19 @@ def state():
         instruments = [dict(row) for row in conn.execute('SELECT * FROM instruments ORDER BY name')]
         bindings = [json.loads(row['document']) for row in conn.execute('SELECT document FROM bindings WHERE ended IS NULL OR rowid IN (SELECT rowid FROM bindings ORDER BY rowid DESC LIMIT 30) ORDER BY rowid DESC')]
         jobs = [json.loads(row['document']) | {'status': row['status']} for row in conn.execute('SELECT status,document FROM jobs ORDER BY rowid DESC LIMIT 20')]
+        last_hit = conn.execute("SELECT document FROM scans WHERE json_extract(document,'$.camera_id')=? "
+                               "AND json_extract(document,'$.source')='neck_camera_gwhp_main' "
+                               "AND (json_array_length(document,'$.matches')>0 OR json_array_length(document,'$.scene_matches')>0) "
+                               "ORDER BY rowid DESC LIMIT 1", (receiver_camera.target,)).fetchone() if receiver_camera else None
+        activity = recent_activity(conn, receiver_camera.target if receiver_camera else None)
     return {'scenes': scene_records(), 'scene_visits': scene_visits(), 'instruments': instruments, 'bindings': bindings, 'jobs': jobs, 'ocr': dict(ocr_state),
+            'last_camera_scan': json.loads(last_hit['document']) if last_hit else None,
+            'activity': activity,
             'vision_fallback': aliyun_vision.public_config(), 'photo_watch': saved_photo_watcher.snapshot(),
             'automation': automatic_runner.snapshot(),
             'camera': receiver_camera.snapshot() if receiver_camera else {'configured': bool(os.environ.get('FIELD_CAMERA_SNAPSHOT_URL')),
                        'id': os.environ.get('FIELD_CAMERA_ID', 'UnconfiguredNeckCamera'),
-                       'mode': 'http_snapshot'}, 'demo': True}
+                       'mode': 'http_snapshot'}, 'product': 'FieldRecognition'}
 
 
 @app.put('/api/instruments/{instrument_id}')
@@ -308,7 +321,7 @@ def save_binding(body: BindingRequest, *, automatic: bool = False):
         asset = get_instrument(str(body.instrument_id))
         if not asset['scene']:
             raise HTTPException(409, '先在仪器登记中填写所属场景')
-        visit = validate_scene(conn, scan['camera_id'], asset['scene'])
+        visit = optional_scene(conn, scan['camera_id'], asset['scene'])
         previous = conn.execute('SELECT document FROM bindings WHERE camera=? AND ended IS NULL', (scan['camera_id'],)).fetchone()
         if previous:
             existing = json.loads(previous['document'])
@@ -320,7 +333,10 @@ def save_binding(body: BindingRequest, *, automatic: bool = False):
                   'camera_id': scan['camera_id'], 'instrument': asset, 'started_at': timestamp,
                   'ended_at': None, 'scan_id': scan['scan_id'], 'image_url': scan['image_url'],
                   'identity_basis': 'unsigned_qr_and_continuous_scan_opt_in' if automatic else 'unsigned_qr_and_operator_confirmation',
-                  'activity_confirmed': False, 'scene_visit_id': visit['visit_id'], 'scene': visit['scene']}
+                  'activity_confirmed': False, 'scene_visit_id': visit['visit_id'] if visit else None,
+                  'scene': visit['scene'] if visit else {'id': None, 'name': asset['scene']},
+                  'scene_qr_verified': visit is not None,
+                  'scene_basis': 'decoded_scene_qr' if visit else 'instrument_registration'}
         service = conn.execute('SELECT document FROM camera_service_state WHERE camera=?', (scan['camera_id'],)).fetchone()
         result['device_service'] = json.loads(service['document']) if service else None
         if not result['operator']:
@@ -350,12 +366,7 @@ def finish_binding(binding_id):
 
 
 def create_ocr_model():
-    from paddleocr import PaddleOCR
-    return PaddleOCR(device='cpu', cpu_threads=2, enable_mkldnn=False,
-                     text_detection_model_name='PP-OCRv5_mobile_det',
-                     text_recognition_model_name='PP-OCRv5_mobile_rec',
-                     use_doc_orientation_classify=False, use_doc_unwarping=False,
-                     use_textline_orientation=False)
+    return create_model(OCR_DEVICE)
 
 
 def load_ocr():
@@ -363,15 +374,16 @@ def load_ocr():
     with ocr_lock:
         if ocr_model is None:
             started = time.monotonic()
-            ocr_state.update(status='loading', error=None, resident=False)
+            ocr_state.update(status='loading', error=None, error_detail=None, resident=False)
             try:
                 ocr_model = create_ocr_model()
             except Exception as exc:
-                ocr_state.update(status='error', error=type(exc).__name__, resident=False)
+                ocr_state.update(status='error', error=type(exc).__name__, resident=False,
+                                 error_detail=str(exc) if isinstance(exc, OcrDeviceUnavailable) else None)
                 raise
             ocr_state.update(loaded_at=now(), load_count=ocr_state['load_count'] + 1,
                              load_seconds=round(time.monotonic() - started, 3))
-        ocr_state.update(status='ready', resident=True, error=None)
+        ocr_state.update(status='ready', resident=True, error=None, error_detail=None)
         return ocr_model
 
 
@@ -399,7 +411,7 @@ def queue_ocr_warmup():
 
 
 def predict_panel(panel, x=0, y=0):
-    """Manual requests and saved-photo events share the resident CPU model."""
+    """Manual requests and saved-photo events share the resident model."""
     started = time.monotonic()
     invoked = False
     try:
@@ -416,12 +428,12 @@ def predict_panel(panel, x=0, y=0):
                     lines.append({'text': text, 'confidence': float(score), 'polygon': poly.tolist(),
                                   'numeric_candidates': re.findall(r'[-+]?\d+(?:\.\d+)?', text)})
         return {'status': 'completed', 'lines': lines, 'model': ocr_state['engine'],
-                'actual_model_invocation': True, 'device': 'cpu',
+                'actual_model_invocation': True, 'device': OCR_DEVICE,
                 'wall_seconds': round(time.monotonic() - started, 3)}
     except Exception as exc:
         ocr_state.update(status='error', error=type(exc).__name__)
         return {'status': 'failed', 'lines': [], 'error': type(exc).__name__,
-                'model': ocr_state['engine'], 'device': 'cpu', 'actual_model_invocation': invoked,
+                'model': ocr_state['engine'], 'device': OCR_DEVICE, 'actual_model_invocation': invoked,
                 'wall_seconds': round(time.monotonic() - started, 3)}
 
 
@@ -442,11 +454,11 @@ def current_readout_binding(document):
         if not asset or asset['scene'] != binding['instrument']['scene']:
             return False
         try:
-            visit = validate_scene(conn, binding['camera_id'], binding['instrument']['scene'])
+            visit = optional_scene(conn, binding['camera_id'], binding['instrument']['scene'])
         except HTTPException:
             return False
         service = conn.execute('SELECT document FROM camera_service_state WHERE camera=?', (binding['camera_id'],)).fetchone()
-        return (visit['visit_id'] == binding['scene_visit_id']
+        return ((visit['visit_id'] if visit else None) == binding.get('scene_visit_id')
                 and (not service or json.loads(service['document'])['online']))
 
 
@@ -482,8 +494,8 @@ def enqueue_ocr(body, *, trigger='explicit_request'):
         current_asset = get_instrument(linked['instrument']['id'])
         if not current_asset or current_asset['scene'] != linked['instrument']['scene']:
             raise HTTPException(409, '仪器所属场景已更改，请重新绑定')
-        visit = validate_scene(conn, binding['camera'], linked['instrument']['scene'])
-        if linked.get('scene_visit_id') != visit['visit_id']:
+        visit = optional_scene(conn, binding['camera'], linked['instrument']['scene'])
+        if linked.get('scene_visit_id') != (visit['visit_id'] if visit else None):
             raise HTTPException(409, '场景已变化，请重新绑定仪器')
         if capture['received_at'] < linked['started_at'] and capture['scan_id'] != linked['scan_id']:
             raise HTTPException(409, '图片早于本次绑定，请重新拍照')
@@ -505,7 +517,9 @@ def enqueue_ocr(body, *, trigger='explicit_request'):
                     'status': 'queued', 'image_url': capture['image_url'],
                     'image_sha256': capture['image_sha256'], 'instrument': linked['instrument'],
                     'operator': linked['operator'], 'camera_id': capture['camera_id'],
-                    'scene_visit_id': visit['visit_id'], 'scene': visit['scene'],
+                    'scene_visit_id': linked.get('scene_visit_id'), 'scene': linked['scene'],
+                    'scene_basis': linked.get('scene_basis', 'decoded_scene_qr'),
+                    'scene_qr_verified': linked.get('scene_qr_verified', bool(linked.get('scene_visit_id'))),
                     'instrument_association': 'same_image_qr' if seen else 'operator_selected_current_binding',
                     'source': capture['source'], 'frame_metadata': capture.get('frame_metadata'),
                     'external_photo': capture.get('external_photo'), 'request_trigger': trigger}

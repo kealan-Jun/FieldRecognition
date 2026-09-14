@@ -1,8 +1,8 @@
-# FieldRecognitionDemo Agent Guide
+# FieldRecognition Agent Guide
 
 ## Scope
 
-- This is an independent local project for scene QR codes, instrument binding, receiver snapshots, and CPU PaddleOCR panel recognition.
+- This is an independent local project for scene QR codes, instrument binding, receiver snapshots, and PaddleOCR panel recognition. The user requested local GPU OCR on 2026-09-14; the current deployment uses the RTX 3090 Ti with FIELD_OCR_DEVICE=gpu:0. CPU remains an explicit portable option.
 - Read `README.md` and `AgentTools.md` before changing runtime or interface behavior. Do not modify VisionCortex or its services as part of work here.
 - Verify the project's Git root, branch, SHA, remotes, and working-tree status before Git changes. No remote repository is configured by default; do not invent a publishing destination.
 - Preserve unrelated work and stage named paths only.
@@ -12,7 +12,7 @@
 - Preserve existing QR identities, source photos, timestamps, bindings, database records, and historical receipts.
 - `Data/`, `Verification/`, `VerificationData/`, `output/`, and `tmp/` are local runtime or delivery material. Keep them, environments, model weights, logs, and secrets out of Git.
 - Credentials belong in environment variables or an untracked local store. Do not print their values.
-- Do not access NAS or start GPU jobs for this project. Live camera access and real OCR invocation must be within the user's requested task.
+- Do not access NAS outside the user's requested task. GPU OCR deployment and bounded GPU inference validation are authorized for this project; do not modify other projects or their GPU services. Live camera access and real OCR invocation must be within the user's requested task.
 - Tests and synthetic panels do not prove real instrument accuracy. Distinguish `PROVEN`, `PARTIAL_EVIDENCE`, and `NOT_PROVEN` with the evidence and missing gate.
 - QR matches must come from decoding; never infer an identity from label text or the registry. Model confidence is not measured accuracy, and OCR text alone does not establish a physical action.
 

@@ -1,5 +1,5 @@
 [Unit]
-Description=FieldLink QR and PaddleOCR independent demo
+Description=FieldRecognition QR binding and panel recognition
 After=network-online.target
 
 [Service]

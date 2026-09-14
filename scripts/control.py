@@ -41,7 +41,7 @@ def main():
     print('现场识别：' + automatic.get('message', '服务已启动'))
     print('实验员登记：' + (automatic.get('operator') or '等待使用者填写'))
     print('相机：' + data.get('camera', {}).get('status', '未配置'))
-    print('OCR：' + data.get('ocr', {}).get('status', '未知'))
+    print('OCR：' + data.get('ocr', {}).get('device', '未知') + ' · ' + data.get('ocr', {}).get('status', '未知'))
     print('照片监控：' + data.get('photo_watch', {}).get('status', '未知'))
     print('页面：' + URL)
     if action == 'open':

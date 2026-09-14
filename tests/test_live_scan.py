@@ -101,7 +101,7 @@ def test_live_blank_scene_then_single_hit_binds_once_with_original_evidence(live
         assert conn.execute('SELECT count(*) FROM bindings').fetchone()[0] == 1
 
 
-def test_live_instrument_before_scene_keeps_scanning(live):
+def test_live_unregistered_instrument_keeps_scanning(live):
     app, client, camera = live
     camera.publish(label(app, 'InstrumentA'))
     sid = start(client)
@@ -204,3 +204,36 @@ def test_live_requires_operator_and_main_stream(app_client):
     assert client.post('/api/camera/scan-sessions', json={'operator': ' '}).status_code == 422
     assert client.post('/api/camera/scan-sessions', json={'operator': 'Tester'}).status_code == 409
     assert client.get('/api/camera/preview.mjpg').status_code == 409
+
+
+def test_single_instrument_video_frame_binds_without_scene(live):
+    app, client, camera = live
+    aid = 'e9434a0a-3319-414a-b988-4cc6884edce4'
+    client.put('/api/instruments/' + aid, json={'name': '称量仪器 A', 'scene': '湿实验实验台'})
+    sid = start(client)
+    camera.publish(label(app, 'InstrumentA'))
+    result = wait_for(client, sid, lambda r: r['status'] == 'bound')
+    assert result['binding']['instrument']['id'] == aid
+    assert result['binding']['scene_visit_id'] is None
+    assert result['binding']['scene_qr_verified'] is False
+    assert result['scan']['operator'] == '测试员'
+    assert result['scan']['scan_session_id'] == sid
+    app.live_scanner.session = None
+    assert client.get('/api/state').json()['last_camera_scan']['scan_id'] == result['scan']['scan_id']
+    assert not client.get('/api/state').json()['scene_visits']
+    assert app.ocr_warmup_future.result(timeout=2)
+    with app.db() as conn:
+        assert conn.execute('SELECT COUNT(*) FROM scans').fetchone()[0] == 1
+        assert conn.execute('SELECT COUNT(*) FROM bindings').fetchone()[0] == 1
+
+
+def test_fresh_frame_clears_waiting_camera_message_without_saving_blank_frames(live):
+    app, client, camera = live
+    sid = start(client)
+    wait_for(client, sid, lambda r: r['status'] == 'waiting_camera')
+    camera.publish(np.full((240, 320, 3), 255, np.uint8))
+    result = wait_for(client, sid, lambda r: r['frames_scanned'] == 1)
+    assert result['status'] == 'scanning'
+    assert '等待相机新画面' not in result['message']
+    with app.db() as conn:
+        assert conn.execute('SELECT COUNT(*) FROM scans').fetchone()[0] == 0

@@ -58,7 +58,7 @@ class LiveScanner:
             self.session = {'session_id': str(uuid.uuid4()), 'status': 'scanning',
                             'camera_id': camera.target, 'operator': operator.strip(), 'owner': owner,
                             'started_at': self.core['now'](), 'frames_scanned': 0,
-                            'message': '连续扫码中：先对准场景码，再对准仪器码',
+                            'message': '连续扫码中：对准仪器码即可绑定；场景码可单独识别',
                             'scan': None, 'binding': None}
             if owner == 'automation':
                 self.session['after_frame_id'] = camera.snapshot().get('decoded_frames', 0)
@@ -133,6 +133,8 @@ class LiveScanner:
                             continue
                     self.session.update(status='scanning', frames_scanned=self.session['frames_scanned'] + 1,
                                         last_frame_metadata=metadata, decode_ms=decoded[2]['elapsed_ms'])
+                    if self.session['message'] == '等待相机新画面，恢复连接后继续扫码':
+                        self.session['message'] = '连续扫码中：对准仪器码即可绑定；场景码可单独识别'
                     # Slow decoding must not commit an old frame as a new observation.
                     if time.monotonic() - acquired + metadata.get('frame_age_ms', 0) / 1000 > 1:
                         continue
@@ -160,7 +162,8 @@ class LiveScanner:
 
     def _accept(self, frame, metadata, decoded, matches):
         # Caller holds the same lock used by stop/reset: no late write after stop returns.
-        result = self.core['save_camera_scan'](frame, metadata, decoded=decoded)
+        result = self.core['save_camera_scan'](frame, metadata, decoded=decoded,
+                                             operator=self.session['operator'], scan_session_id=self.session['session_id'])
         self.session['scan'] = result
         instruments, scenes = matches['matches'], matches['scene_matches']
         if len(instruments) > 1 or len(scenes) > 1 or matches['unknown']:
@@ -171,7 +174,7 @@ class LiveScanner:
             return
         try:
             if scenes:
-                visit = self.core['enter_scene'](self.core['SceneEntry'](scan_id=result['scan_id'], scene_id=scenes[0]['id']), automatic=True)
+                visit = self.core['enter_scene'](self.core['SceneEntry'](scan_id=result['scan_id'], scene_id=scenes[0]['id'], operator=self.session['operator']), automatic=True)
                 self.session.update(scene_visit=visit, message=f'已进入 {visit["scene"]["name"]}，请对准仪器二维码')
             if instruments:
                 binding = self.core['bind'](self.core['BindingRequest'](

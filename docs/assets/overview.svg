@@ -45,7 +45,7 @@
       <text x="61" y="231">Decode scene + instrument QR.</text>
       <text x="61" y="254">One valid frame can bind.</text>
       <text x="349" y="231">Reuse the active relationship.</text>
-      <text x="349" y="254">Keep OCR resident on CPU.</text>
+      <text x="349" y="254">Keep OCR resident on GPU.</text>
       <text x="637" y="231">Use the Agent's saved image.</text>
       <text x="637" y="254">Watch stable NAS files.</text>
       <text x="925" y="231">PaddleOCR first.</text>
