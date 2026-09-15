@@ -72,7 +72,7 @@ def versions():
             pass
     return {'rules': RULE_VERSION, 'packages': packages,
         'code_sha256': {name: hashlib.sha256((base / name).read_bytes()).hexdigest()
-            for name in ('photo_measurements.py', 'panel_regions.py', 'digit_regions.py',
+            for name in ('photo_measurements.py', 'panel_regions.py', 'digit_regions.py', 'led_digits.py', 'panel_layout.py',
                          'reading_results.py', 'measurement_records.py', 'ocr_runtime.py',
                          'readout_context.py', 'instrument_ownership.py')}}
 

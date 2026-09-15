@@ -38,13 +38,20 @@ def predict(core, image, x=0, y=0, *, video=False, allowed_instrument_ids=()):
         local = core['predict_panel'](panel, x+cx, y+cy)
         local = refine_digits(core['predict_panel'], panel, local, x+cx, y+cy,
                               source_image=image,source_offset=(x,y))
+        if box['class_id'] == 0:
+            from led_digits import verify_digits
+            local = verify_digits(panel, local, x+cx, y+cy)
+            raw_lines = local.get('panel_ocr', {}).get('lines', [])
+            if not local.get('lines') and len(raw_lines) == 1 and raw_lines[0].get('text', '').strip().upper() == 'OFF' and (raw_lines[0].get('confidence') or 0) >= .6:
+                local['display_state'] = {'text': 'OFF', 'basis': 'recognized_display_text',
+                                          'confidence': raw_lines[0]['confidence']}
         region = {'panel_id':f"panel-{box['class_id']}-{ordinal}", 'class_id':box['class_id'],
             'measurement_name':roles.get(((str(box['class_id']),box.get('instrument_id')),tuple(box['xyxy']))),
             'instrument_id':box['instrument_id'], 'detector_confidence':box['confidence'],
             'localization_method':box.get('localization_method','original'),
             'localization_supporting_views':box.get('supporting_views',[]),
             'bbox':[x+x1,y+y1,x+x2,y+y2], 'crop':[x+cx,y+cy,ex-cx,ey-cy], 'local_ocr':local,
-            'digit_region':local.get('digit_region')}
+            'digit_region':local.get('digit_region'), 'display_state':local.get('display_state')}
         local['lines'] = [dict(line, panel_id=region['panel_id']) for line in local.get('lines', [])]
         regions.append(region); lines.extend(local['lines'])
     result = {'status':'completed', 'lines':lines, 'panel_regions':regions, 'panel_detection':detection,
@@ -62,9 +69,9 @@ def predict(core, image, x=0, y=0, *, video=False, allowed_instrument_ids=()):
 
 def needs_fallback(local):
     if local.get('panel_regions'):
-        return next((vision.fallback_reason(r['local_ocr'].get('lines', []), r['local_ocr'].get('error'))
-                     for r in local['panel_regions'] if vision.fallback_reason(
-                         r['local_ocr'].get('lines', []), r['local_ocr'].get('error'))), None)
+        return next((reason for r in local['panel_regions'] if not r.get('display_state')
+                     if (reason := vision.fallback_reason(r['local_ocr'].get('lines', []),
+                                                         r['local_ocr'].get('error')))), None)
     return vision.fallback_reason(local.get('lines', []), local.get('error'))
 
 
@@ -100,7 +107,7 @@ def finish(core, document, local, image, *, valid, clock=time.monotonic, started
         region.update(evidence_id=ident, image_url=f'/api/images/{ident}', image_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
         result = region['local_ocr']
         lines = copy.deepcopy(result.get('lines', []))
-        reason = vision.fallback_reason(lines, result.get('error'))
+        reason = None if region.get('display_state') else vision.fallback_reason(lines, result.get('error'))
         if reason and vision.public_config()['available'] and valid():
             attempt = {'panel_id':region['panel_id'], 'trigger':reason}
             if not core['vision_call_lock'].acquire(blocking=False):

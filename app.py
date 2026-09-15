@@ -302,7 +302,7 @@ def index():
 
 @app.get('/api/state')
 def state():
-    from history_records import job_rows, panel_readings
+    from history_records import job_rows, panel_readings, latest_photo_job
     if RUNTIME_ENABLED and SERVICE_ROLE=='api':
         from runtime_rpc import call
         try:ocr_state.update(call('ocr','status'))
@@ -322,9 +322,10 @@ def state():
         if latest_panel_job:
             related = panel_readings(latest_panel_job)
             latest_panel_job = latest_panel_job | {'readings': related, 'lines': related}
+        photo_job = latest_photo_job(conn, receiver_camera.target if receiver_camera else os.environ.get('FIELD_CAMERA_ID'))
     return filter_payload({'scenes': scene_records(), 'scene_visits': scene_visits(), 'instruments': instruments, 'bindings': bindings, 'jobs': jobs, 'ocr': dict(ocr_state),
             'last_camera_scan': json.loads(last_hit['document']) if last_hit else None,
-            'activity': activity, 'latest_panel_job': latest_panel_job,
+            'activity': activity, 'latest_panel_job': latest_panel_job, 'latest_photo_job': photo_job,
             'record_policy': {'mode': RECORD_MODE, 'automatic_write_scope': 'test_only',
                               'production_photo_submission': 'draft_confirmation',
                               'drafts_url': '/photo-measurements'},

@@ -179,14 +179,15 @@ $('#videoOcrToggle').onclick=busy($('#videoOcrToggle'),async()=>{renderVideoOcr(
 pollVideo();
 function readoutPhoto(job){
   const url=job.image_url||job.crop_image_url;
-  return url?`<a class="readout-photo" href="${esc(url)}" target="_blank" rel="noopener"><img src="${esc(url)}" alt="本次语音拍照原图"><span>本次照片 ↗</span></a>`:'';
+  return url?`<a class="readout-photo" href="${esc(url)}" target="_blank" rel="noopener"><img src="${esc(url)}" alt="这条结果对应的原图"><span>对应原图 ↗</span></a>`:'';
+}
+function readoutCaption(job){
+  const old=ReadoutView.historical(job,state?.bindings||[]);
+  return `<p class="caption">${old?'历史结果 · ':''}${esc(job.instrument?.name||'照片识别')}<br>拍摄 ${esc(stamp(ReadoutView.capturedAt(job)))}${job.finished_at?'<br>处理完成 '+esc(stamp(job.finished_at)):''}${old?'<br>归属使用拍摄时的绑定，当前绑定不会改写旧照片。':''}</p>`;
 }
 function readoutLatency(job){
-  const timing=job.timing||{},d=timing.durations_ms||{};
-  const seconds=value=>value===null||value===undefined?'—':(value/1000).toFixed(2)+' 秒';
-  const label=job.request_trigger==='video_stream'?'视频帧至结果':timing.is_backfill?'补处理 · 发现至结果':'写入至结果';
-  const total=job.request_trigger==='video_stream'?d.frame_to_result_ms:timing.is_backfill?d.detect_to_result_ms:d.write_to_result_ms;
-  return `<div class="readout-latency" title="NAS 写入时间取自文件修改时间，尚未独立校准时钟；完整阶段时间保存在结果 JSON"><b>${label} ${seconds(total)}</b><span>${job.request_trigger==='video_stream'?'视频变化证据':timing.is_backfill?'历史照片补处理，不代表实时延迟':'写入至发现 '+seconds(d.write_to_detect_ms)} · OCR ${seconds(d.ocr_ms)}${d.vision_ms!==null&&d.vision_ms!==undefined?' · 进一步识别 '+seconds(d.vision_ms):''}</span></div>`;
+  const t=job.timing||{},d=t.durations_ms||{},v=ReadoutView.timing(job);
+  return `<div class="readout-latency" title="写入时间取自 NAS 文件修改时间，未独立校时；等待与识别分开记录"><b>${v.label} ${ReadoutView.duration(v.total)}</b>${v.delayedIngest?`<span>读取前等待 ${ReadoutView.duration(v.ingestWait)}${v.retries?' · 重试 '+v.retries+' 次':''}；这段等待不属于 OCR 推理。</span>`:''}<span>任务处理 ${ReadoutView.duration(v.processing)} · OCR ${ReadoutView.duration(d.ocr_ms)}${d.vision_ms!==null&&d.vision_ms!==undefined?' · 进一步识别 '+ReadoutView.duration(d.vision_ms):''}</span>${t.is_backfill?'<span>历史照片补处理，不代表实时延迟。</span>':''}</div>`;
 }
 function readoutIssue(job){
   const fallback=job.fallback||{};
@@ -200,16 +201,21 @@ const completeReadout=/^\s*[+-]?(?:\d+(?:[.,]\d+)?|[.,]\d+)(?:[eE][+-]?\d+)?\s*(
 function renderOcr(job){
   const target=$('#ocrResults');
   if(job.record_scope==='draft'){
-    target.innerHTML=readoutPhoto(job)+`<p>拍照 OCR ${['queued','running'].includes(job.status)?'正在处理':'已生成测量草稿'}，确认后提交实验记录。</p><a href="/photo-measurements">查看草稿与校正 ↗</a>`;return;
+    target.innerHTML=readoutPhoto(job)+readoutCaption(job)+`<p>拍照 OCR ${['queued','running'].includes(job.status)?'正在处理':'已生成测量草稿'}，确认后提交实验记录。</p><a href="/photo-measurements">查看草稿与校正 ↗</a>`;return;
   }
   if(['queued','running'].includes(job.status)){
     const phase={local_ocr:'正在识别面板',waiting_readout:'暂未读到数字，继续等待识别结果',extended_reading:'正在进一步识别面板'}[job.phase]||'任务已入队';
-    target.innerHTML=readoutPhoto(job)+`<p>◌ ${phase}…</p>`;return;
+    target.innerHTML=readoutPhoto(job)+readoutCaption(job)+`<p>◌ ${phase}…</p>`;return;
   }
-  if(job.status!=='completed'){target.innerHTML=readoutPhoto(job)+`<p>${job.status==='cancelled'?'这次识别已取消，原因已保存在回执中。':'识别未完成，请稍后重新拍摄。'}</p>${readoutLatency(job)}${readoutIssue(job)}<a href="/api/jobs/${job.job_id}" target="_blank" rel="noopener">结果 JSON ↗</a>`;return;}
-  if(job.recognition_skipped){target.innerHTML=readoutPhoto(job)+`<p>${job.skip_reason==='no_active_instrument_binding'?'拍照时没有有效仪器绑定，已跳过读数识别。':'未检测到已绑定设备的面板，已跳过读数识别。'}</p>`;return;}
-  const lines=(job.lines||[]).filter(line=>job.device==='cloud'?line.numeric_candidates?.length:completeReadout.test(line.text));
-  target.innerHTML=readoutPhoto(job)+`<p class="caption">${esc(job.instrument?.name||(job.association_status==='localized_panels'?'A / B 面板分别定位':job.instrument_candidates?.length?'设备定位中':'未绑定仪器'))} · ${esc(stamp(job.external_photo?.captured_at||job.video_observation?.observed_at||job.submitted_at))}<br>自动识别结果</p>${readoutLatency(job)}${lines.length?(job.readings?.length?job.readings:lines).map(line=>`<div class="ocr-line">${line.instrument?`<small>${esc(line.instrument.name)}</small>`:""}<strong>${esc(line.text)}</strong>${line.panel_image_url?`<a href="${esc(line.panel_image_url)}" target="_blank" rel="noopener">本面板照片 ↗</a>`:""}${line.association_basis==='ambiguous'?'<small>无法确定设备归属，本条未作为设备读数</small>':''}${line.quality_issue?`<small>${line.quality_issue==='possible_display_self_test'?'疑似屏幕自检，不作为测量值':'小数点信息不足，本条未作为有效数值'}</small>`:''}</div>`).join(''):'<p>这次照片未读出数字，请调整角度、清晰度或选框后重新拍摄。</p>'}${readoutIssue(job)}<p><a href="${job.crop_image_url}" target="_blank" rel="noopener">查看面板照片 ↗</a> · <a href="/api/jobs/${job.job_id}" target="_blank" rel="noopener">结果 JSON ↗</a></p>`;
+  if(job.status!=='completed'){target.innerHTML=readoutPhoto(job)+readoutCaption(job)+`<p>${job.status==='cancelled'?'这次识别已取消，原因已保存在回执中。':'识别未完成，请稍后重新拍摄。'}</p>${readoutLatency(job)}${readoutIssue(job)}<a href="/api/jobs/${job.job_id}" target="_blank" rel="noopener">结果 JSON ↗</a>`;return;}
+  if(job.recognition_skipped){target.innerHTML=readoutPhoto(job)+readoutCaption(job)+`<p>${job.skip_reason==='no_active_instrument_binding'?'拍照时没有有效仪器绑定，已跳过读数识别。':'未检测到已绑定设备的面板，已跳过读数识别。'}</p>`;return;}
+  const lines=job.readings?.length?job.readings:(job.lines||[]).filter(line=>job.device==='cloud'?line.numeric_candidates?.length:completeReadout.test(line.text));
+  const states=(job.panel_regions||[]).filter(r=>r.display_state?.text);
+  target.innerHTML=readoutPhoto(job)+readoutCaption(job)+readoutLatency(job)+
+    lines.map(line=>`<div class="ocr-line"><small>${esc(line.instrument?.name||'')} ${esc(line.measurement_name||'')}</small><strong>${esc(line.text)}</strong>${line.panel_image_url?`<a href="${esc(line.panel_image_url)}" target="_blank" rel="noopener">本面板照片 ↗</a>`:''}${line.quality_issue?'<small>数值存在冲突或信息不足，未作为有效测量值。</small>':''}</div>`).join('')+
+    states.map(r=>`<div class="ocr-line"><small>${esc(r.measurement_name||'面板状态')}</small><strong>${esc(r.display_state.text)}</strong><small>屏幕状态，不转换成数值 0</small></div>`).join('')+
+    (!lines.length&&!states.length?'<p>这张照片未取得有效读数。原图与原因已保留，不沿用上一张照片的数值。</p>':'')+
+    readoutIssue(job)+`<p><a href="${esc(job.crop_image_url)}" target="_blank" rel="noopener">查看面板照片 ↗</a> · <a href="/api/jobs/${esc(job.job_id)}" target="_blank" rel="noopener">结果 JSON ↗</a></p>`;
 }
 function watchJob(job){
   renderOcr(job);clearInterval(jobTimer);
@@ -224,9 +230,8 @@ $('#ocr').onclick=busy($('#ocr'),async()=>{watchJob(await api('/api/ocr',json({b
 function renderLatestJob(){
   if(jobTimer)return;
   const camera=previewLive?state.camera.id:scan?.camera_id||state.camera.id;
-  const latest=state.jobs.find(j=>j.camera_id===camera&&['queued','running'].includes(j.status))||
-    (state.latest_panel_job?.camera_id===camera?state.latest_panel_job:null);
-  const key=latest?`${latest.job_id}:${latest.status}:${latest.phase}:${latest.finished_at}`:`no-related:${camera}`;
+  const latest=ReadoutView.selectLatest(state,camera);
+  const key=latest?`${latest.job_id}:${latest.status}:${latest.phase}:${latest.finished_at}:${ReadoutView.historical(latest,state.bindings)}`:`no-related:${camera}`;
   if(key!==displayedJobKey){
     displayedJobKey=key;
     if(latest)renderOcr(latest);else $('#ocrResults').textContent='暂无有效面板读数。正在等待已绑定设备的清晰画面或语音照片。';
@@ -278,13 +283,14 @@ window.addEventListener('pagehide',()=>{stopWebcam();closePreview();clearTimeout
 
 $('#enterScene').onclick=busy($('#enterScene'),async()=>{const chosen=$('input[name="scene"]:checked');if(!chosen)throw Error('请选择场景');await api('/api/scene/enter',json({scan_id:scan.scan_id,scene_id:chosen.value}));await refresh(false);selectBindings(scan.camera_id);renderBinding();message('已进入场景，请拍摄仪器二维码并绑定使用。');});
 
-function duration(value){return value===null||value===undefined?'—':value<1000?Math.round(value)+' ms':(value/1000).toFixed(2)+' 秒';}
+function duration(value){return ReadoutView.duration(value);}
 function historyLatency(event){
   if(event.kind!=='readout')return '—';
   const timing=event.timing||{},d=timing.durations_ms||{};
   const total=event.input_mode==='video'?d.frame_to_result_ms:timing.is_backfill?d.detect_to_result_ms:d.write_to_result_ms;
-  const parts=[['文件发现',d.write_to_detect_ms],['稳定等待',d.file_stability_ms],['读取',d.file_read_ms],['导入等待',d.ingest_wait_ms],['导入',d.import_ms],['任务排队',d.queue_wait_ms],['OCR 等待',d.ocr_wait_ms],['OCR',d.ocr_ms],['进一步识别',d.vision_ms],['写入至归档',event.archive?.write_to_archive_ms]];
-  return `<strong>${event.input_mode==='video'?'视频帧至结果':timing.is_backfill?'补处理':'写入至结果'} ${duration(total)}</strong><small>OCR ${duration(d.ocr_ms)}</small><details class="history-timing"><summary>阶段耗时</summary><dl>${parts.map(([label,value])=>`<div><dt>${label}</dt><dd>${duration(value)}</dd></div>`).join('')}</dl><small>${timing.is_backfill?'历史补处理，不计入实时性能。':'写入时间取自文件 mtime，时钟尚未独立校准。'}</small></details>`;
+  const waitNote=d.ingest_wait_ms>=30000?`<small>读取前等待 ${duration(d.ingest_wait_ms)}</small>`:'';
+  const parts=[['文件发现',d.write_to_detect_ms],['稳定等待',d.file_stability_ms],['读取',d.file_read_ms],['读取前等待',d.ingest_wait_ms],['导入',d.import_ms],['任务排队',d.queue_wait_ms],['OCR 等待',d.ocr_wait_ms],['OCR',d.ocr_ms],['进一步识别',d.vision_ms],['写入至归档',event.archive?.write_to_archive_ms]];
+  return `<strong>${event.input_mode==='video'?'视频帧至结果':timing.is_backfill?'补处理':'写入至结果'} ${duration(total)}</strong>${waitNote}<small>OCR ${duration(d.ocr_ms)}</small><details class="history-timing"><summary>阶段耗时</summary><dl>${parts.map(([label,value])=>`<div><dt>${label}</dt><dd>${duration(value)}</dd></div>`).join('')}</dl><small>${timing.is_backfill?'历史补处理，不计入实时性能。':'写入时间取自文件 mtime，时钟尚未独立校准。'}</small></details>`;
 }
 function historyArchive(event){
   const a=event.archive||{};

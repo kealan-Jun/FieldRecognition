@@ -50,3 +50,18 @@ def job_rows(conn, camera=None, *, limit=20, before=None, recent=False):
              if recent else 'rowid DESC')
     return conn.execute('SELECT rowid AS cursor,* FROM jobs WHERE '+' AND '.join(conditions)+
                         ' ORDER BY '+order+' LIMIT ?',params+[limit]).fetchall()
+
+
+def latest_photo_job(conn, camera):
+    """A newer photo with no digits must still supersede an old successful photo.
+
+    Order by capture time, so late recovery never presents an old measurement
+    as the newest one. Business-history filtering remains separate.
+    """
+    row = conn.execute("""SELECT status,document FROM jobs
+        WHERE json_extract(document,'$.camera_id')=?
+        AND coalesce(json_extract(document,'$.request_trigger'),'')!='video_stream'
+        ORDER BY julianday(coalesce(json_extract(document,'$.external_photo.captured_at'),
+                                   json_extract(document,'$.submitted_at'))) DESC,
+                 rowid DESC LIMIT 1""", (camera,)).fetchone()
+    return json.loads(row['document']) | {'status': row['status']} if row else None

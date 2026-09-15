@@ -47,6 +47,9 @@ def test_nas_read_failure_is_persistent_and_recovers_once(app_client, tmp_path, 
     restarted.step()
     assert len(queued) == 1 and restarted.snapshot()['persisted_pending_files'] == 0
     assert queued[0]['timing']['first_observed_at'] == previous['first_observed_at']
+    assert queued[0]['timing']['ingest_retry_count']==1
+    assert queued[0]['timing']['ingest_last_error']=='NAS IO_DEVICE_ERROR'
+    assert queued[0]['timing']['ingest_first_failed_at']==previous['first_failed_at']
     restarted.step()
     assert len(queued) == 1 and path.read_bytes() == raw
 

@@ -144,3 +144,20 @@ def test_attributable_fallback_reading_keeps_its_display_text(app_client):
         conn.execute('INSERT INTO jobs VALUES(?,?,?)',(doc['job_id'],'completed',json.dumps(doc)))
         event=recent_activity(conn,'ActualCamera')[0]
     assert event['detail']=='温度 179 °C' and event['status']=='自动识别完成'
+
+
+def test_latest_photo_reports_empty_result_and_orders_by_capture_time(app_client,monkeypatch):
+    app,client=app_client
+    monkeypatch.setenv('FIELD_CAMERA_ID','ActualCamera')
+    older=job('old')
+    older.update(external_photo={'captured_at':'2026-09-15T13:21:00+08:00'},finished_at='2026-09-15T10:00:00Z')
+    newer=job('new')
+    newer.update(external_photo={'captured_at':'2026-09-15T17:23:00+08:00'},readings=[],lines=[],recognition_skipped=True)
+    video=job('video');video.update(request_trigger='video_stream',submitted_at='2026-09-15T11:00:00Z')
+    with app.db() as conn:
+        for doc in (newer,older,video):
+            conn.execute('INSERT INTO jobs VALUES(?,?,?)',(doc['job_id'],doc['status'],json.dumps(doc)))
+    state=client.get('/api/state').json()
+    assert state['latest_photo_job']['job_id']=='new'
+    assert state['latest_photo_job']['readings']==[]
+    assert state['latest_panel_job']['job_id']=='old'

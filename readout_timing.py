@@ -41,6 +41,7 @@ def update_timing(document):
         'queue_wait_ms': ('queued_at', 'run_started_at'),
         'ocr_wait_ms': ('run_started_at', 'ocr_started_at'),
         'ocr_ms': ('ocr_started_at', 'ocr_finished_at'),
+        'processing_ms': ('run_started_at', 'result_finished_at'),
         'vision_ms': ('vision_started_at', 'vision_finished_at'),
         'write_to_ocr_ms': ('source_written_at', 'ocr_started_at'),
         'write_to_result_ms': ('source_written_at', 'result_finished_at'),

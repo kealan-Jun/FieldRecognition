@@ -20,6 +20,27 @@ BOXES = [dict(class_id=0, instrument_id=A, confidence=.8, xyxy=[20,30,80,50]),
          dict(class_id=1, instrument_id=B, confidence=.9, xyxy=[210,100,300,140])]
 
 
+def test_off_display_is_a_state_not_zero_or_a_fallback_miss(app_client,monkeypatch):
+    app,_=app_client
+    boxes=[dict(class_id=0,instrument_id=A,confidence=.8,xyxy=[20,30,80,50])]
+    configure(app,monkeypatch,boxes)
+    monkeypatch.setattr(panel_regions,'refine_digits',lambda predict,image,initial,*args,**kwargs:
+        dict(initial, lines=[], panel_ocr=copy.deepcopy(initial)))
+    monkeypatch.setattr(app,'predict_panel',lambda *args:{'status':'completed','lines':[{'text':'OFF','confidence':.9}]})
+    result=panel_regions.predict(vars(app),np.zeros((100,150,3),np.uint8),allowed_instrument_ids=[A])
+    assert result['lines']==[]
+    assert result['panel_regions'][0]['display_state']['text']=='OFF'
+    assert panel_regions.needs_fallback(result) is None
+
+
+def test_small_detector_border_overlap_keeps_temperature_and_speed_roles():
+    from panel_layout import roles_for_boxes
+    boxes=[dict(class_id=0,instrument_id=A,xyxy=box) for box in ([354,315,398,347],[395,313,438,342])]
+    assert list(roles_for_boxes(boxes).values())==['温度','转速']
+    boxes[1]['xyxy']=[360,313,401,342]
+    assert roles_for_boxes(boxes)=={}  # Overlapping instances cannot be guessed apart.
+
+
 def configure(app, monkeypatch, boxes=BOXES):
     # These tests isolate association/crop routing; digit refinement has its own tests.
     monkeypatch.setattr(panel_regions,'refine_digits',lambda predict,image,initial,x=0,y=0,**kw:initial)

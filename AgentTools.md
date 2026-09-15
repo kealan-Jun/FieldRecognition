@@ -145,4 +145,8 @@ NAS 全量索引：`GET /api/archive/files/Index.json` 返回全部已归档版�
 
 `GET /api/jobs/{job_id}/measurements` 按当前规则输出单台仪器的六字段记录，并返回 `rule_version`；完整原始任务仍由 `GET /api/jobs/{job_id}` 查询。搅拌器固定“温度、转速”，天平固定“质量”；单位依据为识别文字或该仪器登记，冲突不写成有效数值；语音采集时间与同步视频帧时间分别注明来源。JSON 契约见 [InstrumentMeasurement.schema.json](schemas/InstrumentMeasurement.schema.json)。
 
+`get_field_state.latest_photo_job` 单独返回该相机按拍摄时间排序的最新照片任务，包括未读出数字、跳过及失败状态；不能用 `latest_panel_job`（最近有归属读数）判断新照片是否处理。迟到旧照片按原拍摄时间排序，归属仍使用拍摄时的绑定。`panel_regions[].display_state` 保留明确识别的 `OFF`，不写成数值零；原 OCR 与红色数码屏笔画校验依据分别保留在 `local_ocr.panel_ocr` 和 `local_ocr.digit_segment_check`。后者只在清晰的分段笔画支持时解决整数的 1/7 混淆，其他冲突沿用兜底／草稿校正规则，不代表实测准确率。
+
+耗时保留完整写入至结果时间，`timing.durations_ms.ingest_wait_ms` 为稳定后至读取前的等待，`processing_ms` 为任务运行至完成；新任务另存 `ingest_retry_count`、最后读取错误和首次／末次读取失败时间。无法从历史数据证明的等待原因不补造。
+
 NAS 以日期与相机分目录，同一明确连拍、重试和确认合并为一个 `Result.json`；逐张照片、逐台仪器和逐字段的原始证据仍完整关联。根导航为 `/api/archive/files/Readme.html`，旧 Records/Objects/Receipts 地址通过持久化映射继续可读。详细位置见 [NAS 文件夹与留存指南](docs/NAS文件夹与留存指南.md)。

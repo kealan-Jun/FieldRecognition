@@ -198,11 +198,17 @@ class SavedPhotoWatcher:
                 job = self.core['read_saved_panel'](body, trigger='voice_photo_directory',
                     observation={'first_observed_at': prior[2], 'stable_at': prior[4],
                                  'is_backfill': prior[3], 'watch_poll_seconds': POLL_SECONDS,
-                                 'file_stable_seconds': STABLE_SECONDS})
+                                 'file_stable_seconds': STABLE_SECONDS,
+                                 'ingest_retry_count': item.get('attempts', 0),
+                                 'ingest_last_error': item.get('last_error'),
+                                 'ingest_first_failed_at': item.get('first_failed_at'),
+                                 'ingest_last_failed_at': item.get('last_failed_at')})
                 status, detail, job_id = 'submitted', None, job['job_id']
             except HTTPException as exc:
                 if exc.status_code in {429, 502, 503, 504} or (exc.status_code == 409 and '仍在写入' in str(exc.detail)):
                     item.update(attempts=item.get('attempts', 0)+1, retry_after=time.time()+(1 if exc.status_code==429 else 3), last_error=str(exc.detail))
+                    item.setdefault('first_failed_at', self.core['now']())
+                    item['last_failed_at'] = self.core['now']()
                     with self.core['db']() as conn:
                         conn.execute('UPDATE photo_ingest_queue SET document=? WHERE camera=? AND path=?', (json.dumps(item), camera, relative))
                     self.update(status='waiting_queue' if exc.status_code == 429 else 'storage_unavailable', detail=str(exc.detail))

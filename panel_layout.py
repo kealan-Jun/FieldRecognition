@@ -44,6 +44,9 @@ def roles_for_boxes(boxes):
         elif len(items)==2 and len(names)==2:
             a,b=[pair[0]['xyxy'] for pair in items]
             overlap=min(a[3],b[3])-max(a[1],b[1])
-            if a[2]<=b[0] and overlap>=.4*min(a[3]-a[1],b[3]-b[1]):
+            # Small detector borders can overlap although the display centers
+            # and digits are distinct. Do not lose both field names for that.
+            width=min(a[2]-a[0],b[2]-b[0])
+            if a[2]-b[0]<=.15*width and overlap>=.4*min(a[3]-a[1],b[3]-b[1]):
                 roles[(group,tuple(a))]=names[0];roles[(group,tuple(b))]=names[1]
     return roles
