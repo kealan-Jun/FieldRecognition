@@ -1,4 +1,5 @@
 import json
+import pytest
 from datetime import datetime, timedelta, timezone
 
 from archive_integrity import ArchiveIntegrity
@@ -24,8 +25,8 @@ def test_daily_check_verifies_deduplicated_objects_and_persists_schedule(archive
     status = client.get('/api/state').json()['archive']['integrity']
     assert status['report_path'] and not status['report_pending']
     assert json.loads((root / status['report_path']).read_text()) == report
-    assert json.loads((root / 'Integrity/Latest.json').read_text())['run_id'] == report['run_id']
-    assert json.loads((root / 'Index.json').read_text())['integrity']['last_report']['run_id'] == report['run_id']
+    assert json.loads((root / '.System/Integrity/Latest.json').read_text())['run_id'] == report['run_id']
+    assert json.loads((root / '.System/Index.json').read_text())['integrity']['last_report']['run_id'] == report['run_id']
     # Tomorrow is due even after constructing a new service instance.
     with app.db() as conn:
         old = report | {'finished_at': (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()}
@@ -37,8 +38,8 @@ def test_missing_and_corrupt_files_are_reported_and_never_repaired(archive):
     app, client, root = archive
     scan(client); scan(client)
     app.archive_store.step()
-    records = sorted(root.glob('Receipts/**/*.json'))
-    artifact = next(root.glob('Objects/**/*.png'))
+    records = sorted(root.glob('.System/Receipts/**/*.json'))
+    artifact = next(root.glob('**/Photos/*.png'))
     artifact.write_bytes(b'corrupt-object')
     missing = records[-1]; missing.unlink()
     report = app.archive_store.integrity.run_once()
@@ -47,14 +48,15 @@ def test_missing_and_corrupt_files_are_reported_and_never_repaired(archive):
     assert any(i['code'] == 'missing' for i in report['issues'])
     assert artifact.read_bytes() == b'corrupt-object' and not missing.exists()
     assert app.archive_store.snapshot()['pending_receipts'] == 0  # Acknowledgement history stays intact.
-    app.archive_store.step()
+    with pytest.raises(ValueError):  # Never rebuild a business view from corrupt evidence.
+        app.archive_store.step()
     assert app.archive_store.snapshot()['integrity']['last_report']['issue_count'] == 2
 
 
 def test_altered_receipt_cannot_redefine_the_expected_object_hash(archive):
     app, client, root = archive
     scan(client); app.archive_store.step()
-    receipt = next(root.glob('Receipts/**/*.json'))
+    receipt = next(root.glob('.System/Receipts/**/*.json'))
     doc = json.loads(receipt.read_text()); doc['document']['operator'] = 'changed'
     receipt.write_text(json.dumps(doc))
     report = app.archive_store.integrity.run_once()

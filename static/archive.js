@@ -22,7 +22,8 @@ if(typeof document!=='undefined'){
   const states={no_qr:'未解出二维码',matched:'二维码已识别',not_registered:'二维码未登记',queued:'排队中',running:'识别中',completed:'处理完成',failed:'处理失败',interrupted:'已中断',cancelled:'已取消'};
   const fmt=t=>t?new Date(t).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false}):'—';
   const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  const safeLink=(path,label)=>typeof path==='string'&&/^(Receipts|Objects|Integrity)\/[a-zA-Z0-9_./-]+$/.test(path)&&!path.split('/').includes('..')?`<a href="${esc(path)}" target="_blank" rel="noopener">${label} ↗</a>`:'';
+  const archivePath=path=>typeof path==='string'&&/^(Receipts|Objects|Integrity|\.System|\d{4}-\d{2}-\d{2}_[A-Za-z0-9_-]+)\/[a-zA-Z0-9_./-]+$/.test(path)&&!path.split('/').includes('..')?(index.archive_base==='../'?'../':'')+path:null;
+  const safeLink=(path,label)=>archivePath(path)?`<a href="${esc(archivePath(path))}" target="_blank" rel="noopener">${label} ↗</a>`:'';
   function option(id,value,label){const el=document.createElement('option');el.value=value;el.textContent=label;$(id).append(el);}
   for(const name of [...new Set(index.items.map(i=>i.operator).filter(Boolean))].sort())option('operator',name,displayOperator(name));
   option('operator','__missing__','当时未记录');
@@ -36,7 +37,7 @@ if(typeof document!=='undefined'){
   $('checkSummary').textContent=report?`${{completed:'校验通过',findings:'发现异常',unavailable:'未完成：存储暂不可用',interrupted:'巡检被中断'}[report.status]||report.status} · ${fmt(report.finished_at)} · 回执 ${report.verified_receipts}/${report.expected_receipts} · 图片 ${report.verified_objects} · 异常 ${report.issue_count}`:'等待首次巡检';
   $('integrity').classList.toggle('warn',!!report&&report.status!=='completed');
   $('checkSchedule').textContent=`每 ${Math.round((integrity.interval_seconds||86400)/3600)} 小时检查一次${integrity.next_check_at?' · 下次计划 '+fmt(integrity.next_check_at):' · 本机服务运行后自动开始'}`;
-  if(integrity.report_path){$('checkReport').hidden=false;$('checkReport').href=integrity.report_path;}
+  if(archivePath(integrity.report_path)){$('checkReport').hidden=false;$('checkReport').href=archivePath(integrity.report_path);}
   if(integrity.issues?.length){
     $('checkIssues').hidden=false;
     const codes={missing:'文件缺失',sha256_mismatch:'SHA-256 不一致',size_mismatch:'文件大小不一致',snapshot_mismatch:'回执与留存记录不一致',changed_during_check:'校验期间文件变化',conflicting_object_metadata:'图片元数据冲突',invalid_or_unreadable:'文件无效或无法读取'};

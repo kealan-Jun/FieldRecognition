@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from archive_store import ArchiveStore, immutable_write
+from archive_integrity import relative_file
 from test_demo import app_client, register, scan  # noqa: F401
 
 
@@ -19,7 +20,7 @@ def archive(app_client, monkeypatch, tmp_path):
 
 
 def receipts(root):
-    return [json.loads(p.read_text()) for p in root.glob('Receipts/**/*.json')]
+    return [json.loads(p.read_text()) for p in root.glob('.System/Receipts/**/*.json')]
 
 
 def test_original_photo_and_decoding_evidence_are_archived(archive):
@@ -30,14 +31,14 @@ def test_original_photo_and_decoding_evidence_are_archived(archive):
     app.archive_store.step()
     record = next(r for r in receipts(root) if r['entity_id'] == capture['scan_id'])
     for artifact in record['artifacts'].values():
-        raw = (root / artifact['path']).read_bytes()
+        raw = relative_file(root, artifact['path']).read_bytes()
         assert hashlib.sha256(raw).hexdigest() == artifact['sha256']
         assert len(raw) == artifact['size_bytes']
     assert record['document']['received_at'] == capture['received_at']
     assert not record['physical_action_confirmed']
     assert record['artifacts']['original']['sha256'] == capture['source_sha256']
     assert client.get('/api/state').json()['archive']['pending_receipts'] == 0
-    assert (root / 'Readme.html').is_file() and (root / 'Index.json').is_file()
+    assert (root / 'Readme.html').is_file() and (root / '.System/Index.json').is_file()
 
 
 def test_outbox_rolls_back_with_business_transaction_and_keeps_versions(archive):
@@ -68,10 +69,10 @@ def test_missing_nas_retains_queue_then_retry_is_idempotent(archive, monkeypatch
     with app.db() as conn:
         conn.execute('UPDATE archive_outbox SET retry_after=0')
     app.archive_store.step()
-    before = {str(p): p.read_bytes() for p in root.glob('Receipts/**/*.json')}
+    before = {str(p): p.read_bytes() for p in root.glob('.System/Receipts/**/*.json')}
     recovered = ArchiveStore(vars(app))
     recovered.step()
-    assert {str(p): p.read_bytes() for p in root.glob('Receipts/**/*.json')} == before
+    assert {str(p): p.read_bytes() for p in root.glob('.System/Receipts/**/*.json')} == before
     assert recovered.snapshot()['pending_receipts'] == 0
 
 
@@ -119,7 +120,7 @@ def test_index_publish_failure_is_retried_after_receipts_acknowledged(archive, m
     assert app.archive_store.snapshot()['pending_receipts'] == 0
     monkeypatch.setattr(app.archive_store, 'write_index', original)
     app.archive_store.step()
-    assert (root / 'Index.json').is_file()
+    assert (root / '.System/Index.json').is_file()
 
 
 def test_legacy_normalized_only_photo_is_marked_explicitly(archive):
@@ -162,7 +163,7 @@ def test_binding_lifecycle_and_ocr_result_retain_linked_photo_and_crop(archive, 
     assert output['artifacts']['panel']['sha256'] == completed['crop_image_sha256']
     assert output['artifacts']['original']['sha256'] == capture['source_sha256']
     for artifact in output['artifacts'].values():
-        assert hashlib.sha256((root / artifact['path']).read_bytes()).hexdigest() == artifact['sha256']
+        assert hashlib.sha256(relative_file(root, artifact['path']).read_bytes()).hexdigest() == artifact['sha256']
     assert app.archive_store.snapshot()['pending_receipts'] == 0
     stored = app.get_job(job['job_id'])
     assert stored['archive']['status'] == 'archived'

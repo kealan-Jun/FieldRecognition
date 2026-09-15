@@ -24,8 +24,8 @@ def test_full_index_filters_old_versions_without_rewriting_evidence(archive):
             doc['revision_note'] = i
             conn.execute('UPDATE scans SET document=? WHERE id=?', (json.dumps(doc), capture['scan_id']))
     app.archive_store.step(batch_size=300)
-    original_receipts = {p: p.read_bytes() for p in root.glob('Receipts/**/*.json')}
-    index = json.loads((root / 'Index.json').read_text())
+    original_receipts = {p: p.read_bytes() for p in root.glob('.System/Receipts/**/*.json')}
+    index = json.loads((root / '.System/Index.json').read_text())
     assert index['schema'] == 'field-recognition-index/2'
     assert index['listed_receipts'] == index['archived_receipts'] == 206
     older = select(index['items'], {'versions': 'all', 'operator': '旧实验员',
@@ -34,9 +34,9 @@ def test_full_index_filters_old_versions_without_rewriting_evidence(archive):
     assert not select(index['items'], {'operator': '旧实验员'})  # Latest first, then filter.
     assert len(select(index['items'], {'operator': '新实验员'})) == 1
     assert not select(index['items'], {'from': '2026-09-15'})
-    (root / 'Audit.html').unlink()
+    (root / '.System/Audit.html').unlink()
     app.archive_store.step()
-    assert (root / 'Audit.html').exists()
+    assert (root / '.System/Audit.html').exists()
     assert all(p.read_bytes() == raw for p, raw in original_receipts.items())
 
 
@@ -48,10 +48,10 @@ def test_index_keeps_unknown_operator_and_instrument_and_escapes_html(archive):
                    'submitted_at': '2026-09-14T01:00:00+00:00', 'status': 'completed', 'lines': []}
             conn.execute('INSERT INTO jobs VALUES(?,?,?)', (ident, 'completed', json.dumps(doc)))
     app.archive_store.step()
-    items = json.loads((root / 'Index.json').read_text())['items']
+    items = json.loads((root / '.System/Index.json').read_text())['items']
     assert [i['entity_id'] for i in select(items, {'operator': '__missing__', 'instrument': '__missing__'})] == ['unknown']
     assert select(items, {'camera': 'Other'}) == []
-    html = (root / 'Audit.html').read_text()
+    html = (root / '.System/Audit.html').read_text()
     assert '</script><img' not in html and '\\u003c/script>' in html
     assert '/*ARCHIVE_DATA*/' not in html and '/*ARCHIVE_SCRIPT*/' not in html
 
@@ -64,6 +64,7 @@ def test_read_only_archive_routes_restrict_scope(archive, tmp_path):
     assert response.headers['cache-control'] == 'no-store'
     assert client.get('/api/archive/files/Index.json').json()['listed_receipts'] > 0
     outside = tmp_path / 'private.json'; outside.write_text('private')
+    (root / 'Objects').mkdir(exist_ok=True)
     (root / 'Objects' / 'escape.json').symlink_to(outside)
     for relative in ['Objects/escape.json', 'Objects/%2e%2e/%2e%2e/private.json', '.env', 'unknown.json']:
         result = client.get('/api/archive/files/' + relative)

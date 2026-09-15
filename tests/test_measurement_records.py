@@ -36,7 +36,7 @@ def test_exact_user_schema_separates_two_devices_without_fabricating_metadata():
     assert a['record']=={'wearer_id':'wearer-7','device_model':'MS-H280-Pro','device_no':'0007','qr_hash':'b'*64,
         'photo_time':{'timestamp_ms':1789364590123,'time':'2026-09-14 13:43:10.123'},
         'values':[{'name':'温度','value':179,'unit':'°C','range':[None,280]},
-                  {'name':'转速','value':250,'unit':'rpm','range':[None,None]}]}
+                  {'name':'转速','value':250,'unit':None,'range':[None,None]}]}
     assert b['record']['wearer_id'] is b['record']['device_model'] is b['record']['device_no'] is b['record']['qr_hash'] is None
     assert b['record']['values']==[{'name':'质量','value':-32.4223,'unit':'g','range':[None,None]}]
     assert a['evidence']['capture_id']==b['evidence']['capture_id']=='photo'
@@ -52,6 +52,31 @@ def test_unknown_or_naive_capture_time_is_not_replaced_by_receipt_time(captured_
 
 def test_beijing_and_utc_are_same_epoch_without_extra_eight_hours():
     assert photo_time({'external_photo':{'captured_at':'2026-09-14T13:43:10.123+08:00'}})==photo_time(document())
+
+
+def test_video_clock_requires_synchronization_and_retains_millisecond_precision():
+    from measurement_records import video_clock
+    metadata = {'global_timestamp_us':1789364590123456, 'clock_sync_valid':True}
+    assert photo_time({'video_observation':video_clock(metadata)}) == photo_time(document())
+    assert photo_time({'video_observation':{'observed_at':'2026-09-14T13:44:00+08:00'},
+                       'frame_metadata':metadata}) == photo_time(document())
+    for valid in (False, None, 1):
+        value = video_clock(metadata | {'clock_sync_valid':valid})
+        assert photo_time({'video_observation':value})['timestamp_ms'] is None
+    assert video_clock(metadata | {'global_timestamp_us':10**30})['captured_at'] is None
+
+
+def test_explicit_unit_conflict_is_not_silently_replaced_and_registry_is_evidence():
+    doc = document()
+    doc['readings'][0]['unit'] = 'rpm'
+    entry = build_records(doc)[0]
+    assert entry['record']['values'][0] == {'name':'温度','value':None,'unit':None,'range':[None,None]}
+    assert entry['evidence']['unit_basis']['温度'] == 'unit_conflict'
+    doc['readings'][0]['unit'] = None
+    assert build_records(doc)[0]['evidence']['unit_basis']['温度'] == 'instrument_registry'
+    doc['readings'][-1]['unit'] = 'kg'
+    doc['panel_regions'][-1]['instrument']['measurement_ranges'] = {'质量':{'unit':'g','range':[0,100]}}
+    assert build_records(doc)[1]['record']['values'][0]['value'] is None
 
 
 @pytest.mark.parametrize('text',['00000','02287','888888.8'])

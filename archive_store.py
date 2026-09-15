@@ -80,8 +80,9 @@ class ArchiveStore:
         self.browse_digests = {}
         self.status = {'status': 'disabled', 'last_error': None, 'last_archived_at': None}
         base = Path(__file__).parent
-        self.index_version = '2:' + hashlib.sha256(b''.join((base / p).read_bytes()
-            for p in ('archive_catalog.py', 'archive_browse.py', 'archive_readable.py', 'archive_layout.py', 'static/archive.html', 'static/archive.js'))).hexdigest()[:16]
+        self.index_version = '3:' + hashlib.sha256(b''.join((base / p).read_bytes()
+            for p in ('archive_catalog.py', 'archive_events.py', 'archive_paths.py', 'archive_migration.py',
+                      'measurement_records.py', 'static/archive.html', 'static/archive.js'))).hexdigest()[:16]
         with core['db']() as conn:
             conn.executescript('''
                 CREATE TABLE IF NOT EXISTS archive_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -185,8 +186,8 @@ class ArchiveStore:
         if hashlib.sha256(raw).hexdigest() != expected:
             raise ValueError('Artifact SHA-256 mismatch')
         destination = Path('Objects') / expected[:2] / (expected + source.suffix)
-        immutable_write(root / destination, raw)
-        return {'path': destination.as_posix(), 'sha256': expected, 'size_bytes': len(raw)}
+        from archive_paths import ArchivePaths
+        return ArchivePaths(root).asset(destination.as_posix(), raw)
 
     def _capture_artifacts(self, root, capture):
         ident = str(uuid.UUID(capture['capture_id']))
@@ -238,7 +239,7 @@ class ArchiveStore:
             camera = 'Camera-' + hashlib.sha256(camera.encode()).hexdigest()[:16]
         timestamp = self.event_time(doc, row['recorded_at'])
         day = datetime.fromisoformat(timestamp).astimezone(ZoneInfo('Asia/Shanghai')).date().isoformat()
-        relative = Path('Receipts') / camera / day / self.instance / f'{row["seq"]:012d}-{digest}.json'
+        relative = Path('.System/Receipts') / camera / day / self.instance / f'{row["seq"]:012d}-{digest}.json'
         immutable_write(root / relative, raw)
         return relative.as_posix()
 
@@ -248,41 +249,14 @@ class ArchiveStore:
                      if doc.get(key)), fallback)
 
     def write_index(self):
-        from archive_catalog import build_index, render_index
-        from archive_browse import build_views
+        from archive_migration import rebuild
         with self.lock:
             self.status.update(status='indexing')
-        root = self._root()
         with self.core['db']() as conn:
             rows = conn.execute('SELECT * FROM archive_outbox WHERE archived_at IS NOT NULL ORDER BY seq DESC').fetchall()
-        index = build_index(rows, self.instance, self.core['now'](), self.integrity.snapshot())
-        replace_view(root / 'Index.json', canonical(index))
-        replace_view(root / 'Audit.html', render_index(index))
-        views = build_views(rows)
-        for relative, content in views.items():
-            digest = hashlib.sha256(content).hexdigest()
-            if self.browse_digests.get(relative) != digest:
-                replace_view(root / relative, content)
-                self.browse_digests[relative] = digest
-        # Only remove obsolete generated navigation files, never receipt/object data
-        # or user files. A corrected target may move a readable record's folder.
-        current = sorted(p for p in views if p.startswith(('Records/', 'Browse/')))
-        with self.core['db']() as conn:
-            previous = conn.execute("SELECT value FROM archive_meta WHERE key='readable_files'").fetchone()
-        from archive_layout import retire_generated_views
-        mappings=retire_generated_views(root,views,json.loads(previous[0]) if previous else [])
-        with self.core['db']() as conn:
-            old_links=conn.execute("SELECT value FROM archive_meta WHERE key='legacy_links'").fetchone()
-        mappings=(json.loads(old_links[0]) if old_links else {}) | mappings
-        if mappings:
-            replace_view(root/'LegacyLinks.json',canonical(mappings))
-            with self.core['db']() as conn:
-                conn.execute('INSERT OR REPLACE INTO archive_meta VALUES(?,?)',('legacy_links',json.dumps(mappings)))
-        with self.core['db']() as conn:
-            conn.execute('INSERT OR REPLACE INTO archive_meta VALUES(?,?)', ('readable_files', json.dumps(current)))
-            conn.execute('INSERT OR REPLACE INTO archive_meta VALUES(?,?)', ('index_count', str(len(rows))))
-            conn.execute('INSERT OR REPLACE INTO archive_meta VALUES(?,?)', ('index_version', self.index_version))
-            conn.execute('INSERT OR REPLACE INTO archive_meta VALUES(?,?)', ('index_integrity', index['integrity'].get('report_path') or ''))
+        # The verifier cannot observe a file between path resolution and rename.
+        with self.integrity.lock:
+            return rebuild(self, rows)
 
     def step(self, batch_size=20):
         if not self.enabled():
@@ -319,8 +293,8 @@ class ArchiveStore:
         root = self._root()
         if (not indexed or int(indexed[0]) != archived or not version or version[0] != self.index_version
                 or not audit or audit[0] != (self.integrity.snapshot()['report_path'] or '')
-                or not (root / 'Readme.html').is_file() or not (root / 'Audit.html').is_file() or not (root / 'Index.json').is_file()
-                or not (root / 'Browse/Readme.html').is_file() or not (root / '00_归档导航.html').is_file()):
+                or not (root / 'Readme.html').is_file() or not (root / '.System/Audit.html').is_file() or not (root / '.System/Index.json').is_file()
+                or not (root / '.System/MigrationMap.json').is_file()):
             self.write_index()
         with self.core['db']() as conn:
             failed = conn.execute('SELECT last_error FROM archive_outbox WHERE archived_at IS NULL AND last_error IS NOT NULL LIMIT 1').fetchone()

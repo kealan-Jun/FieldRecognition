@@ -1,39 +1,116 @@
 # NAS 文件夹与留存指南
 
-服务在本机常驻，读取该相机的 NAS 语音拍照文件，识别结果写入独立目录 `/mnt/realityloop-nas/FieldRecognitionArchive/`。无需在 NAS 部署程序。源目录 `voice_photos/` 和 `VisionCortexExperimentArchive/` 不被本项目修改。
+程序在本机运行。只读相机采集目录，把结果写入 `/mnt/realityloop-nas/FieldRecognitionArchive/`；不更改 `VisionCortexExperimentArchive/`。目录采用“日期＋相机 → 事件 → 照片与结果”的结构，业务文件夹和文件名使用大驼峰格式，已有相机 ID、事件 ID 保持原值。
 
-直接打开归档根目录下 `Browse/Readme.html`，可以选择下面五类记录；每个分类都有 `Readme.html` 列出时间和对象，无需逐个猜编号。也可从本机页面“操作记录 → 文件夹查阅指南”打开。
+## 打开哪里
 
-| 想查什么 | 归档根目录下的文件夹 | 每条记录说明 |
+打开根目录 `Readme.html`，选择日期和相机进入 `DailyReport/DailyReport.html`。HTML 使用相对链接，直接用浏览器打开即可；也可访问 `http://127.0.0.1:8188/api/archive/files/Readme.html`。
+
+```text
+FieldRecognitionArchive/
+├── Readme.html
+├── 2026-09-14_lubancat-52d2ef0c_cam01/
+│   ├── Bindings/
+│   │   └── 13-26-19.000_<绑定或扫码ID>/
+│   │       ├── Binding.json
+│   │       └── Photos/Original<图片摘要>.png
+│   ├── VideoReadings/
+│   │   └── 13-27-02.120_<采集ID>/
+│   │       ├── Result.json
+│   │       ├── Photos/Frame<图片摘要>.png
+│   │       └── Regions/Temperature<图片摘要>.png
+│   ├── VoicePhotoReadings/
+│   │   └── 13-28-01.000_<测量或采集ID>/
+│   │       ├── Result.json
+│   │       ├── Photos/Original<图片摘要>.jpg
+│   │       └── Regions/Mass<图片摘要>.png
+│   ├── PhotoReadings/                 # 手动上传照片，有数据时出现
+│   └── DailyReport/
+│       ├── DailyReport.html
+│       └── DailyReport.json
+└── .System/                           # 隐藏维护目录
+    ├── Receipts/<相机>/<日期>/<实例>/<序号>-<SHA256>.json
+    ├── Integrity/Latest.json
+    ├── Integrity/Reports/<UTC日期>/<检查ID>-<SHA256>.json
+    ├── MigrationMap.json
+    ├── Index.json
+    ├── Audit.html
+    ├── SourceMaterials/              # 历史未分类材料，有数据时出现
+    ├── UnassignedAssets/             # 历史无引用原件，有数据时出现
+    └── PendingAssets/                # 发布过程中待归位图片，完成后移出
+```
+
+这是结构示例，不表示发生过示例时间的测量。没有数据的目录不会创建。没有可靠采集时间的记录使用 `UnknownTime_<ID>`，目录日期取首次归档队列日期，并在 JSON 的 `folder_time_basis` 明确说明，绝不将接收时间填成拍摄时间。目录首次确定后，结果修订、人员变更、绑定结束不会将其重命名。
+
+## 各类事件里的文件
+
+| 想查的内容 | 目录与文件 | 文件内容 |
 |---|---|---|
-| 谁在何时绑定了哪台仪器或哪个场景 | `Browse/Bindings/开始日期/相机编号/关系编号/` | 实验员、相机、仪器或场景、开始及结束时间、扫码证据照片、绑定回执的所有已归档版本 |
-| 何时在设备 A 或 B 识别了什么读数 | `Browse/InstrumentReadings/仪器编号/拍摄日期/任务编号/` | 数字原文、值字符串、单位、仪器关联依据、照片、结果和分阶段时延；归属不能确定的放在 `Unassigned/` |
-| 某次语音拍照文件识别了什么 | `Browse/VoicePhotos/相机编号/拍摄日期/时分秒_任务编号/` | 源文件路径、原拍照编号、拍摄时间、源文件写入时间、识别结果、完整照片与面板图 |
-| 同一个实验台全部 A/B 读数 | `Browse/WorkbenchReadings/场景编号或名称摘要/拍摄日期/任务编号/` | 场景总览，保留仪器候选或未确定归属，不将不同仪器的数值相加 |
-| 查照片原件及哈希 | `Browse/Photos/照片日期/相机编号/时分秒_照片编号/` | 完整图片预览、原始文件链接、SHA-256；任务页另有面板识别图 |
+| 谁在什么时间绑定 A、B 或实验台 | `Bindings/<事件>/Binding.json` | `binding` 保留原绑定、场景、扫码或交接文档，含人员、仪器 ID、起止时间和状态；`sources` 给出二维码来源，`receipt_versions` 给出不可覆盖历史。扫码命中与绑定成功分别保留其含义。 |
+| 视频哪一刻读到哪台设备的数 | `VideoReadings/<采集>/Result.json` | `instrument_measurements` 按仪器分开；`observations` 保留 OCR 原文、区域、模型和时间；`sources.video_observation` 保留视频时间依据。 |
+| 某张语音照片识别了什么 | `VoicePhotoReadings/<测量>/Result.json` | `sources.external_photo` 保留原 NAS 文件路径、源采集编号、拍摄和写入时间；读数与相应照片哈希、区域逐项关联。 |
+| 上传照片的结果 | `PhotoReadings/<测量>/Result.json` | 同上；来源明确区别于语音拍照和视频。 |
+| 一张实验台的总体记录 | `DailyReport/DailyReport.html` | 同日同相机各设备和场景事件的链接。具体实验台关系在结果的 `observations.workbench/workbenches`；不把 A、B 数值相加或复制成第三条测量。 |
+| 原图和实际识别区域 | 事件中的 `Photos/`、`Regions/` | `Original` 为原始字节；`Photo/Frame` 为方向修正、解码后用于处理的整图；`Temperature/Speed/Mass` 为已定位字段的识别图；仅能定位整体面板时用 `Panel`。文件名摘要用于避免重传冲突。 |
 
-每个具体记录文件夹包含：
+`Result.json` 的 `photos` 给出图片相对归档根目录的路径、完整 SHA-256 和字节数，`sources` 将原件/整图关联到采集 ID。`observations.panel_regions` 保留面板 ID、定位框、数字区域和图像哈希，读数字段据此核对。相同图片字节只保存一份；如果扫码和读数共用照片，其中一个目录保存文件，另一个通过路径引用，不再次复制。原始 JPEG 和方向修正后的 PNG 字节不同，是两种证据表示，不是重传造成的副本。
 
-- `Readme.html`：可读记录页、照片预览，以及原始文件、面板图和完整回执的相对链接。
-- `Record.json`：可供程序读取的分类记录；包含 `event_at`、`camera_id`、`operator`、`binding_id` / `binding_ids`、`capture_id`、`job_id`、`readings`、`photos`、`receipt_versions` 等。语音照片额外保存 `source_ref`、`external_capture_id`、`captured_at`、`source_written_at`。
+## 连拍、修订和归属
 
-仪器 A 的编号为 `e9434a0a-3319-414a-b988-4cc6884edce4`，仪器 B 为 `eae17924-9fa7-4445-ac45-3987f5687be9`；二者登记在湿实验实验台。分类以实际记录中的身份为准，不根据显示屏文字猜测。新照片解出唯一已登记的仪器码时，按该仪器归类，不以存在会话绑定为前提；登记关系不会替代多面板的空间定位。旧系统记录中的错误或未确认归属不会被自动改写。
+- 显式 `burst_id` 才合并为一次测量；不按几秒内的时间接近关系猜测连拍。单张照片按采集 ID 归组，重新识别/网络重传共用目录。
+- 一次连拍的多张照片都在同一测量中，`sources` 列出各自时间与原件；草稿、校正和确认共用同一个 `Result.json`，`decision` 保存字段、冲突、修订记录和确认依据，历史版本在回执中。
+- 一图出现 A、B 时，`instrument_measurements` 分别给出两台仪器的记录，各字段通过区域关联原图；不按画面中第一台仪器强行归类。
+- 未绑定或归属不明确的原始材料可以保留；不补造 QR、设备编号、绑定关系或读数。显式人工校正建立的归属注明 `explicit_field_correction`，不会伪装为二维码绑定。
+- 生产模式仍须草稿确认、写入并读回；当前运行模式单独由 `FIELD_RECORD_MODE` 决定。调整文件夹不会把历史测试记录提升为正式实验记录，也不会覆盖原始识别值。
 
-## 照片实际保存在哪里
+## 固定读数结构
 
-原始照片、解码用完整 PNG、面板识别图实际保存在 `Objects/哈希前两位/完整哈希.扩展名`。按 SHA-256 去重，相同内容只保存一份；上述五类文件夹均链接这一份实物文件。`Record.json` 的 `photos.original`、`photos.image`、`photos.panel` 给出相对路径及哈希。缺失的旧版原件不补造；有完整照片也不表示一定保留了当时的原始 JPEG。
+机器契约：[`schemas/InstrumentMeasurement.schema.json`](../schemas/InstrumentMeasurement.schema.json)。每个 `instrument_measurements` 元素的 `record` 只有六个顶层字段，其他溯源信息放在外层 `evidence`。
 
-复制或备份时应保留整个 `FieldRecognitionArchive/`，包括 `Objects/` 和 `Receipts/`。只复制 `Browse/` 会使照片和回执链接失效。
+```json
+{
+  "wearer_id": null,
+  "device_model": null,
+  "device_no": null,
+  "qr_hash": null,
+  "photo_time": {"timestamp_ms": null, "time": null},
+  "values": [
+    {"name": "温度", "value": null, "unit": null, "range": [null, null]},
+    {"name": "转速", "value": null, "unit": null, "range": [null, null]}
+  ]
+}
+```
 
-实时视频普通帧仅在内存处理。没有数字候选、也没有实际解出的仪器码的背景画面不生成照片和 OCR 任务，不调用云端。稳定读数发生变化才保存证据；有仪器码但读不到数字时，按受控异常流程处理，相同异常身份不周期重复保存。语音主动拍照仍按原流程逐文件识别和留存。
+天平的 `values` 固定为一项 `{"name":"质量","value":null,"unit":null,"range":[null,null]}`。
 
-## 原始依据、索引与时间
+| 字段 | 规则 |
+|---|---|
+| `wearer_id` | 采集时佩戴人员稳定 ID，未知 null；不以显示姓名代替。 |
+| `device_model` / `device_no` | 登记型号和资产编号；未知 null，编号为字符串，保留前导零。 |
+| `qr_hash` | 实际解码原始字符串的 SHA-256，64 位小写十六进制；来自当时绑定或同图解码，不从标签文字猜测。 |
+| `photo_time.timestamp_ms` / `time` | 同一瞬间的 Unix 毫秒和北京时间 `YYYY-MM-DD HH:mm:ss.SSS`，不额外加 8 小时。语音照片来自采集元数据；视频仅采用同步有效的 GWHP 全局帧时间，处理/接收时间另记。未知两者都 null。 |
+| `values[].value` | 数字类型，保留正负号与小数；不可读、歧义、冲突为 null。搅拌器固定温度与转速两项，天平固定质量一项。 |
+| `values[].unit` | 温度 °C、转速 rpm、质量按显示 g/mg/kg；必须有识别文本或该仪器登记依据。未知 null，冲突不猜。 |
+| `values[].range` | 来自该仪器登记，单位必须一致；未知边界 null，不用本次读数的极值替代。 |
 
-- `Receipts/相机/事件日期/服务实例/序号-哈希.json`：不可覆盖的原始回执版本，记录绑定、照片、识别过程、结果和所用图片哈希。
-- `Index.json`、根目录 `Readme.html`：全部已确认归档版本的索引，按实验员、日期、仪器、实验台、相机筛选。
-- `Browse/`：由已归档回执重建的最新分类视图，方便人查阅；一条结果可出现在仪器、语音照片、实验台三个视角中，这不代表发生了三次识别。
-- `Integrity/`：定期完整性巡检报告及异常清单。巡检验证留存内容与哈希一致，不等于图中文字识别正确。
+此格式不判断显示的是实际值还是设定值。原始识别文字、单帧分数、多帧一致性和规则版本在 `observations/evidence`，模型分数不等于实测准确率。多图冲突进入校正，正式值与原始候选分开留存。
 
-文件夹日期按北京时间。绑定按开始时间归类，结束后仍在原文件夹；读数按照片拍摄时间或视频观察时间归类，另存识别、完成和归档时间。NAS 写入时间取自文件 mtime，时间来源保留在回执中，不把未校准时间声称为硬件精确时钟。
+## 隐藏维护区与兼容
 
-本机数据库事务同时写入归档队列。NAS 不可用时队列保留，恢复后重试。只有原图和回执写入成功并确认后才进入这些分类目录；“待同步”不能当作已完成留存。网页可关闭，后台监控、识别、归档仍继续。
+`.System/Receipts` 是不可覆盖的原始版本；`.System/Integrity` 保存完整性检查，验证文件存在、字节数、SHA-256 和数据库快照一致。`.System/Index.json` 与 `Audit.html` 是全量版本索引。`.System/MigrationMap.json` 保存旧路径 → 新路径、照片去重位置和稳定事件目录，迁移前先记录映射，再原子移动文件；中断可继续。完整性检查、恢复工具和旧 HTTP 地址均通过该映射读取，历史回执中的旧路径/哈希保持原样。
+
+旧 `Browse/Records/Objects/Receipts` 不再作为当前可见业务结构；已识别的生成视图被替换，未知的手写文件保留。日常仅打开根目录导航。备份应复制整个归档，包括 `.System`；只复制某个事件可能缺少共用照片或历史回执。
+
+## 迁移和断线恢复
+
+本机 SQLite 事务同时写业务记录与持久化归档队列。NAS 不可用时保留本地图片与队列，恢复后重试；容量不足暂停归档。原图和回执写完才能确认已归档；人类导航尚未重建时 `navigation_pending=true`，不冒充整理完成。
+
+手动升级已有归档时只暂停归档 worker，API、采集和 OCR 可继续：
+
+```bash
+systemctl --user stop field-recognition-archive.service
+.venv/bin/python scripts/migrate_archive.py --apply
+systemctl --user start field-recognition-archive.service
+```
+
+脚本使用项目的 `.env`，取得归档进程独占锁，先校验、备份本机数据库和旧文件哈希清单，再迁移并逐一读回校验。备份位于本机 `Verification/ArchiveMigration<时间>/`。不删除源 NAS 采集材料；失败后修复存储问题，重复执行会沿映射继续，不应手工重建空队列。

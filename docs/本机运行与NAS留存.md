@@ -26,19 +26,9 @@
 
 ## NAS 目录与回执
 
-```text
-FieldRecognitionArchive/
-├── Readme.html                    # 可直接打开的中文留存索引
-├── Index.json                     # 全量索引的结构化数据
-├── Integrity/                     # 巡检报告；Latest.json 与 Reports/ 历史版本
-├── Objects/
-│   └── <哈希前两位>/<SHA-256>.<扩展名>
-└── Receipts/
-    └── <camera_id>/<北京时间日期>/<source_instance>/
-        └── <序号>-<回执SHA-256>.json
-```
+当前使用“日期＋相机 → Bindings / VideoReadings / VoicePhotoReadings / PhotoReadings → 照片与结果”的事件目录。根目录仅提供 `Readme.html` 与日期/相机文件夹；维护文件统一放在隐藏 `.System/`。完整目录树、每个子文件、读数格式与迁移命令见 [NAS 文件夹与留存指南](NAS文件夹与留存指南.md)。
 
-`Readme.html` 和 `Index.json` 展示本数据库全部已确认归档的记录版本，同一读数从排队到完成会有多个版本；每个版本均保留在 `Receipts/`。文件中的相对路径指向同一归档根目录，便于整体复制与校验。索引可更新，照片对象和版本回执不覆盖不同内容。
+原始回执移至 `.System/Receipts/`，内容、序号与哈希不变；索引为 `.System/Index.json` 和 `.System/Audit.html`。所有 JSON 图片路径相对于整个归档根目录，HTML 使用页面相对链接。旧路径由 `.System/MigrationMap.json` 兼容解析。
 
 回执结构为 `field-recognition-receipt/1`：
 
@@ -90,21 +80,21 @@ systemctl --user restart field-recognition-demo.service
 
 自动验证使用临时文件系统与模型替身，覆盖事务回滚、原件校验、绑定起止与 OCR 关联、NAS 失联重试、重复写入、坏文件隔离和索引恢复。实际 NAS 写入验证与真实仪器识别验收分别记录；存储成功不能替代物理仪器准确率验收。
 
-每个新照片任务包含 `document.timing`，追踪写入、发现、读取、排队、OCR、视觉模型及结果时间。NAS `Index.json` 和任务查询的 `archive` 字段还提供 `archived_at`、`archive_queue_ms`、`write_to_archive_ms`。完整字段及文件时钟限制见 [识别时延与未绑定照片](识别时延与未绑定照片.md)。
+每个新照片任务包含 `document.timing`，追踪写入、发现、读取、排队、OCR、视觉模型及结果时间。NAS `.System/Index.json` 和任务查询的 `archive` 字段还提供 `archived_at`、`archive_queue_ms`、`write_to_archive_ms`。完整字段及文件时钟限制见 [识别时延与未绑定照片](识别时延与未绑定照片.md)。
 
 
 ## 全量查询与每日巡检（2026-09-14）
 
-NAS `Readme.html` 已升级为可直接打开的全量查询页面。按实验员、仪器、北京时间事件起止日期、相机、记录类型组合筛选；默认显示每条业务记录的最新版本，切换“全部版本”后查询所有历史变化。按时间倒序、每页 50 条，筛选结果可导出 JSON，保留业务 ID、版本序号和回执相对路径。默认模式先选最新快照再筛选；查询旧实验员的历史操作应选择全部版本。仪器筛选使用当时绑定快照或实际二维码解码关联，未关联仪器与未记录人员可单独筛选。日期使用事件时间，照片拍摄时间另存于回执。
+NAS `.System/Audit.html` 是可直接打开的全量查询页面。按实验员、仪器、北京时间事件起止日期、相机、记录类型组合筛选；默认显示每条业务记录的最新版本，切换“全部版本”后查询所有历史变化。按时间倒序、每页 50 条，筛选结果可导出 JSON，保留业务 ID、版本序号和回执相对路径。默认模式先选最新快照再筛选；查询旧实验员的历史操作应选择全部版本。仪器筛选使用当时绑定快照或实际二维码解码关联，未关联仪器与未记录人员可单独筛选。日期使用事件时间，照片拍摄时间另存于回执。
 
-`Index.json` 的 schema 为 `field-recognition-index/2`，`scope=all_acknowledged_versions`；包含全部摘要与 `unique_records`，不再限制 200 条。HTML 内嵌相同数据和脚本，直接打开 NAS 文件时不依赖本机服务或网络请求；刷新后读取新的索引快照。全量摘要随历史增长而增大，当前为单数据库、单写入实例；尚未做跨数据库合并或超大数据分片。
+`.System/Index.json` 的 schema 为 `field-recognition-index/2`，`scope=all_acknowledged_versions`；包含全部摘要与 `unique_records`，不再限制 200 条。HTML 内嵌相同数据和脚本，直接打开 NAS 文件时不依赖本机服务或网络请求；刷新后读取新的索引快照。全量摘要随历史增长而增大，当前为单数据库、单写入实例；尚未做跨数据库合并或超大数据分片。
 
-网页“操作记录”提供 NAS 全量索引入口及最近巡检状态。本机只读路由 `/api/archive/files/Readme.html` 和 `/api/archive/files/Index.json` 可打开索引；同一路由下的 Receipts、Objects、Integrity 仅提供归档根目录内的文件，拒绝越界及任意 NAS 路径。
+网页“操作记录”提供 NAS 全量索引入口及最近巡检状态。本机只读路由 `/api/archive/files/Readme.html` 和 `/api/archive/files/Index.json` 可打开索引；同一路由下的日期事件和 .System 仅提供归档根目录内的文件，并兼容旧路径，拒绝越界及任意 NAS 路径。
 
 启用归档后，独立 `archive-integrity` 线程默认每 24 小时检查一次；首次启动立即执行，以后按持久化报告的完成时间计算下次计划，服务重启不会重置计划。`FIELD_ARCHIVE_CHECK_SECONDS` 可配置间隔，最小 3600 秒。NAS 不可用或检查中断时，保留未完成结果并在 15 分钟后再检查。
 
 巡检以开始时已确认归档的回执集合为范围，逐份核对 SHA-256、业务类型/ID/序号及当时业务快照，并对其中引用的图片对象去重检查字节数与 SHA-256。分块读取并让出执行时间，不进入 OCR 推理队列。巡检期间的新归档在下一轮覆盖；损坏回执无法可靠解析时，其图片引用覆盖可能不完整，此轮明确显示异常。校验不删除、不覆盖、不自动修复证据。
 
-每次报告先写入本机 SQLite 的独立 `archive_integrity_runs` 表，再由归档线程发布到 `Integrity/Reports/<UTC日期>/<run_id>-<SHA-256>.json`；`Integrity/Latest.json` 是可更新的最新报告索引。NAS 失联时，未发布报告继续留在本机并重试。报告区分 completed、findings、unavailable、interrupted，保留检查时间、范围、通过数量、字节数与具体异常文件；页面显示前 50 项异常，报告保留完整列表。业务归档计数不包含巡检报告，旧回执和旧业务状态不改写。
+每次报告先写入本机 SQLite 的独立 `archive_integrity_runs` 表，再由归档线程发布到 `.System/Integrity/Reports/<UTC日期>/<run_id>-<SHA-256>.json`；`.System/Integrity/Latest.json` 是可更新的最新报告索引。NAS 失联时，未发布报告继续留在本机并重试。报告区分 completed、findings、unavailable、interrupted，保留检查时间、范围、通过数量、字节数与具体异常文件；页面显示前 50 项异常，报告保留完整列表。业务归档计数不包含巡检报告，旧回执和旧业务状态不改写。
 
 巡检验证当前归档文件相对本机留存快照的一致性，不提供权限级防篡改、物理仪器准确率证明或数据库灾难恢复备份。NAS 首页可随时刷新；本机网页会自动更新最近巡检状态。

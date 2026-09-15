@@ -252,7 +252,8 @@ class VideoOcr:
                 self.core['receiver_camera'].target, decoded=decoded, metadata=metadata,
                 operator=self.core['automatic_runner'].settings()['operator'])
             elapsed = current - self.no_digits_since if self.no_digits_since is not None else 0
-            capture.update(received_at=observed, video_observation={'observed_at': observed,
+            from measurement_records import video_clock
+            capture.update(received_at=observed, video_observation={**video_clock(metadata), 'observed_at': observed,
                 'evidence_reason': 'reading_changed' if change else 'unreadable_timeout',
                 'stable_samples': min(r['temporal_confirmation']['votes'] for r in changed_panels) if changed_panels else self.stable_count,
                 'confirmation_rule': '2_of_3_distinct_frames' if localized and change else None,

@@ -257,4 +257,4 @@ FieldRecognition/
 
 项目介绍的组织方式参考 [JoyAI-VL-Interaction](https://github.com/RealityLoopAI/JoyAI-VL-Interaction)。FieldRecognition 的功能、技术栈和验证结论均以本仓库实现为依据。
 
-NAS 分类查阅目录和照片留存位置见 [NAS 文件夹与留存指南](docs/NAS文件夹与留存指南.md)。
+NAS 采用“日期＋相机 → 事件 → 照片与结果”的目录，同次连拍、重传和确认共用一个测量目录；历史回执移入隐藏 `.System/`，旧链接保持可解析。搅拌器和天平的六字段结构固定在 [InstrumentMeasurement.schema.json](schemas/InstrumentMeasurement.schema.json)，未知单位/时间保留 null。完整查阅目录和照片留存位置见 [NAS 文件夹与留存指南](docs/NAS文件夹与留存指南.md)。

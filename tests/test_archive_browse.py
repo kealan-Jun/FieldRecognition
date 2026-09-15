@@ -17,45 +17,37 @@ def test_classified_folders_keep_photos_source_times_and_immutable_versions(arch
     job=app.read_saved_panel(app.SavedPhotoRequest(photo=photo(app)),trigger='voice_photo_directory')
     wait_for_job(client,job['job_id'])
     app.archive_store.step(batch_size=100)
-    original={p:p.read_bytes() for p in root.glob('Receipts/**/*.json')}
-    catalog=json.loads((root/'Browse/Catalog.json').read_text())['categories']
-    for key in ('BindingEvents','PanelReadings','VoicePhotoReadings','WorkbenchReadings','SourceMaterials'):
-        assert catalog[key]
-    entry=next(e for e in catalog['VoicePhotoReadings'] if e['entity_id']==job['job_id'])
-    doc=json.loads((root/entry['record']).read_text())
-    assert doc['external_capture_id']==job['external_photo']['capture_id']
-    assert doc['source_ref']==job['external_photo']['source_ref']
-    assert doc['captured_at']==job['external_photo']['captured_at']
-    assert doc['readings'][0]['value']=='0.0000'
-    assert doc['readings'][0]['unit']=='g'
-    assert doc['binding_id']==binding['binding_id']
+    original={p:p.read_bytes() for p in root.glob('.System/Receipts/**/*.json')}
+    reports = [json.loads(p.read_text()) for p in root.glob('*/DailyReport/DailyReport.json')]
+    entries = [e for report in reports for e in report['events']]
+    entry = next(e for e in entries if e['category']=='VoicePhotoReadings')
+    doc = json.loads((root/entry['result']).read_text())
+    source = doc['sources'][0]
+    assert source['external_photo']['capture_id']==job['external_photo']['capture_id']
+    assert source['external_photo']['source_ref']==job['external_photo']['source_ref']
+    assert source['captured_at']==job['external_photo']['captured_at']
+    reading = doc['observations'][0]['readings'][0]
+    assert reading['value']=='0.0000' and reading['unit']=='g'
     for artifact in doc['photos'].values():
         assert hashlib.sha256((root/artifact['path']).read_bytes()).hexdigest()==artifact['sha256']
-    # Every local link and embedded image resolves within the standalone archive.
-    assert (root/'00_归档导航.html').is_file()
     assert not app.archive_store.snapshot()['navigation_pending']
-    record_path = root/entry['record']
-    assert len(list(root.glob('Records/Jobs/'+job['job_id']+'/Record.json'))) == 1
-    readable = json.loads(record_path.read_text())
-    assert readable['readings'][0]['value'] == '0.0000'
-    assert readable['readings'][0]['unit'] == 'g'
-    assert readable['record_scope'] == 'test_only'
-    for path in [*root.glob('Browse/**/*.html'), *root.glob('Records/**/*.html'), root/'00_归档导航.html', root/'Readme.html']:
+    assert len(list(root.glob('*/VoicePhotoReadings/*/Result.json'))) == 1
+    assert doc['record_scope']=='test_only'
+    for path in [*root.glob('*/DailyReport/*.html'), root/'Readme.html']:
         for ref in re.findall(r'(?:href|src)="([^"]+)"',path.read_text()):
             destination=(path.parent/unquote(ref)).resolve()
             destination.relative_to(root.resolve())
             assert destination.is_file(),(path,ref)
-    assert client.get('/api/archive/files/'+entry['page']).status_code==200
     assert client.get('/api/archive/files/00_归档导航.html').status_code == 200
-    assert client.get('/api/archive/files/' + record_path.relative_to(root).as_posix()).status_code == 200
+    old='Records/Jobs/'+job['job_id']+'/Record.json'
+    assert client.get('/api/archive/files/'+old).json()==doc
     assert client.get('/api/archive/files/Browse/%2e%2e/.env').status_code==404
     client.post('/api/bindings/'+binding['binding_id']+'/end')
     app.archive_store.step(batch_size=100)
     assert all(p.read_bytes()==raw for p,raw in original.items())
-    ended=next(e for e in json.loads((root/'Browse/Catalog.json').read_text())['categories']['BindingEvents'] if e['entity_id']==binding['binding_id'])
-    changed=json.loads((root/ended['record']).read_text())
-    assert changed['started_at']==binding['started_at'] and changed['ended_at']
-    assert len(changed['receipt_versions'])==2
+    changed=next(json.loads(p.read_text()) for p in root.glob('*/Bindings/*/Binding.json') if json.loads(p.read_text())['binding'].get('binding_id')==binding['binding_id'])
+    assert changed['binding']['started_at']==binding['started_at'] and changed['binding']['ended_at']
+    assert len([v for v in changed['receipt_versions'] if json.loads((root/v['receipt']).read_text())['entity']=='bindings'])==2
 
 
 def test_readable_views_replace_changed_target_without_touching_evidence_or_user_files(archive):
@@ -64,16 +56,16 @@ def test_readable_views_replace_changed_target_without_touching_evidence_or_user
     iid = capture['matches'][0]['id']; register(client, iid)
     binding = client.post('/api/bindings', json={'scan_id':capture['scan_id'],'instrument_id':iid,'operator':'甲'}).json()
     app.archive_store.step(batch_size=100)
-    old = root/'Records/Bindings'/binding['binding_id']/'Record.json'
+    old = next(p for p in root.glob('*/Bindings/*/Binding.json') if json.loads(p.read_text())['binding'].get('binding_id')==binding['binding_id'])
     note = old.parent/'个人备注.txt'; note.write_text('保留')
-    originals = {p: p.read_bytes() for p in root.glob('Objects/**/*') if p.is_file()}
-    receipts = {p: p.read_bytes() for p in root.glob('Receipts/**/*.json')}
+    originals = {p: p.read_bytes() for p in root.glob('**/Photos/*') if p.is_file()}
+    receipts = {p: p.read_bytes() for p in root.glob('.System/Receipts/**/*.json')}
     with app.db() as conn:
         updated = binding | {'operator':'乙'}
         conn.execute('UPDATE bindings SET document=? WHERE id=?', (json.dumps(updated),binding['binding_id']))
     app.archive_store.step(batch_size=100)
-    assert json.loads(old.read_text())['operator']=='乙' and note.read_text() == '保留'
-    assert len(list(root.glob('Records/Bindings/*/Record.json'))) == 1
+    assert json.loads(old.read_text())['binding']['operator']=='乙' and note.read_text() == '保留'
+    assert len([p for p in root.glob('*/Bindings/*/Binding.json') if json.loads(p.read_text())['binding'].get('binding_id')]) == 1
     assert all(p.read_bytes() == raw for p, raw in (originals | receipts).items())
     app.archive_store.index_version += '-new-layout'
     assert app.archive_store.snapshot()['pending_receipts'] == 0

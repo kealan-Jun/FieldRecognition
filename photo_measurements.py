@@ -13,9 +13,9 @@ from fastapi import HTTPException
 from fastapi.responses import FileResponse
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, FiniteFloat
 
-from measurement_records import number
+from measurement_records import number, unit_evidence
 
-RULE_VERSION = 'photo-measurement/1'
+RULE_VERSION = 'photo-measurement/2'
 TERMINAL = {'completed', 'failed', 'cancelled', 'interrupted'}
 UNITS = {'温度': {'°C'}, '转速': {'rpm'}, '质量': {'g', 'mg', 'kg'}}
 
@@ -141,8 +141,7 @@ def candidates(jobs):
             fid = hashlib.sha256(json.dumps(key).encode()).hexdigest()[:20]
             field = fields.setdefault(fid, {'field_id': fid, 'instrument': asset or None,
                 'name': name, 'original_candidates': [], 'corrected': False})
-            registered_unit = ((asset.get('measurement_ranges') or {}).get(name) or {}).get('unit')
-            unit = reading.get('unit') or registered_unit
+            unit, unit_basis = unit_evidence(name, reading, asset)
             bindings = job.get('all_binding_snapshots', job.get('binding_snapshots', []))
             binding = next((b for b in bindings if b.get('binding_id') == reading.get('binding_id')), {})
             qr = next((q for q in job.get('qr_matches', []) if q.get('id') == iid), {})
@@ -150,8 +149,8 @@ def candidates(jobs):
             field['original_candidates'].append({'job_id': job['job_id'], 'capture_id': job['capture_id'],
                 'image_sha256': job.get('image_sha256'),
                 'raw_text': reading.get('text'), 'raw_value': reading.get('value'), 'value': number(reading),
-                'unit': unit, 'unit_basis': 'recognition_text' if reading.get('unit') else 'instrument_registry' if unit else 'unknown',
-                'quality_issue': reading.get('quality_issue'), 'panel_id': reading.get('panel_id'),
+                'unit': unit, 'unit_basis': unit_basis,
+                'quality_issue': 'unit_conflict' if unit_basis == 'unit_conflict' else reading.get('quality_issue'), 'panel_id': reading.get('panel_id'),
                 'bbox': region.get('bbox'), 'polygon': reading.get('polygon'), 'digit_region': region.get('digit_region'),
                 'panel_image_url': region.get('image_url'), 'panel_image_sha256': region.get('image_sha256'),
                 'confidence': reading.get('confidence'), 'confidence_basis': 'model_score_not_measured_accuracy',

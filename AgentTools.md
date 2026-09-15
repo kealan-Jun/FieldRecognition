@@ -140,3 +140,9 @@ result = tools.call('get_panel_result', {'job_id': job['job_id']})
 
 
 NAS 全量索引：`GET /api/archive/files/Index.json` 返回全部已归档版本摘要；`GET /api/archive/files/Readme.html` 提供可筛选页面。`get_field_state.archive.integrity` 返回每日巡检状态、最近报告摘要、下次计划、最多 50 项异常及报告相对路径；完整报告位于 `/api/archive/files/<report_path>`。检查未完成与已完成但发现异常分别记录，不以 `pending_receipts=0` 替代完整性校验结论。九个 Agent 工具保持不变。
+
+## 标准读数与事件归档
+
+`GET /api/jobs/{job_id}/measurements` 按当前规则输出单台仪器的六字段记录，并返回 `rule_version`；完整原始任务仍由 `GET /api/jobs/{job_id}` 查询。搅拌器固定“温度、转速”，天平固定“质量”；单位依据为识别文字或该仪器登记，冲突不写成有效数值；语音采集时间与同步视频帧时间分别注明来源。JSON 契约见 [InstrumentMeasurement.schema.json](schemas/InstrumentMeasurement.schema.json)。
+
+NAS 以日期与相机分目录，同一明确连拍、重试和确认合并为一个 `Result.json`；逐张照片、逐台仪器和逐字段的原始证据仍完整关联。根导航为 `/api/archive/files/Readme.html`，旧 Records/Objects/Receipts 地址通过持久化映射继续可读。详细位置见 [NAS 文件夹与留存指南](docs/NAS文件夹与留存指南.md)。

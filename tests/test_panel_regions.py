@@ -12,6 +12,7 @@ from test_multi_readout import two_bindings
 from test_unbound_readout import photo
 from test_panel_readout import Clock, cloud_result
 from test_archive_store import archive  # noqa: F401
+from archive_paths import resolve_file
 
 A = 'e9434a0a-3319-414a-b988-4cc6884edce4'
 B = 'eae17924-9fa7-4445-ac45-3987f5687be9'
@@ -48,17 +49,17 @@ def test_two_panels_keep_separate_bindings_polygons_and_archived_crops(archive, 
         raw=client.get(r['panel_image_url']).content
         assert hashlib.sha256(raw).hexdigest()==r['panel_image_sha256']
     app.archive_store.step()
-    documents=[json.loads(p.read_text()) for p in root.glob('Receipts/**/*.json')]
+    documents=[json.loads(p.read_text()) for p in root.glob('.System/Receipts/**/*.json')]
     receipt=next(r for r in documents if r['entity_id']==job['job_id'] and r['document'].get('readings'))
     crops=[a for k,a in receipt['artifacts'].items() if k.startswith('panel_')]
     assert len(crops)==2
-    assert all(hashlib.sha256((root/c['path']).read_bytes()).hexdigest()==c['sha256'] for c in crops)
+    assert all(hashlib.sha256(resolve_file(root,c['path']).read_bytes()).hexdigest()==c['sha256'] for c in crops)
     for iid, text in ((A,'12.3 g'),(B,'200 rpm')):
-        records=list((root/'Records/Jobs'/job['job_id']).glob('Record.json'))
+        records=list(root.glob('*/VoicePhotoReadings/*/Result.json'))
         assert len(records)==1
         r=json.loads(records[0].read_text())
-        assert [v['text'] for v in r['readings'] if v['instrument']['id']==iid]==[text]
-        standard=r['instrument_measurements'][iid]
+        assert [v['text'] for v in r['observations'][0]['readings'] if v['instrument']['id']==iid]==[text]
+        standard=next(v['record'] for v in r['instrument_measurements'] if v['instrument_id']==iid)
         assert set(standard)=={'wearer_id','device_model','device_no','qr_hash','photo_time','values'}
         assert standard['qr_hash']==next(b['qr_hash'] for b in bindings if b['instrument']['id']==iid)
     exported=client.get('/api/jobs/'+job['job_id']+'/measurements').json()

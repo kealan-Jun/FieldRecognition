@@ -756,11 +756,13 @@ def export():
 @app.get('/api/jobs/{job_id}/measurements')
 def get_measurements(job_id: uuid.UUID):
     document = get_job(job_id)
-    return {'job_id':str(job_id),'records':document.get('measurement_records',[]),
+    from measurement_records import build_records, RULE_VERSION
+    records = build_records(document)
+    return {'job_id':str(job_id),'records':records, 'rule_version':RULE_VERSION,
             'status':document['status'],
             'record_scope': document.get('record_scope', 'legacy_test_only'),
             'measurement_id': document.get('measurement_id'),
-            'format_available':'measurement_records' in document}
+            'format_available':'measurement_records' in document or bool(records)}
 
 
 @app.get('/api/readouts')
@@ -785,22 +787,28 @@ def workbenches(limit: int = 200, related_only: bool = False):
 @app.get('/api/archive/files/{relative:path}')
 def archive_file(relative: str):
     from archive_integrity import relative_file
-    with db() as conn:
-        row=conn.execute("SELECT value FROM archive_meta WHERE key='legacy_links'").fetchone()
-    if row:relative=json.loads(row[0]).get(relative,relative)
+    from archive_paths import checked, resolve_name
     if not archive_store.enabled():
         raise HTTPException(404, '未启用 NAS 留存')
     if (relative not in {'Readme.html', 'Audit.html', 'Index.json', '00_归档导航.html'}
             and not re.fullmatch(r'(?:Receipts|Objects|Integrity)/[A-Za-z0-9_./-]+\.(?:json|png|jpg|jpeg|webp|bmp|tiff)', relative)
             and not re.fullmatch(r'(?:Browse|Records)/[A-Za-z0-9_./-]+\.(?:html|json)', relative)
-            and not re.fullmatch(r'01_业务数据/[\w./-]+\.(?:html|json)', relative)):
+            and not re.fullmatch(r'01_业务数据/[\w./-]+\.(?:html|json)', relative)
+            and not re.fullmatch(r'(?:\d{4}-\d{2}-\d{2}_[A-Za-z0-9_-]+|\.System)/[A-Za-z0-9_./-]+\.(?:html|json|png|jpg|jpeg|webp|bmp|tiff)', relative)):
         raise HTTPException(404, '归档文件不存在')
     try:
-        path = relative_file(archive_store._root(create=False), relative)
+        root = archive_store._root(create=False)
+        checked(root, relative)
+        canonical = resolve_name(root, relative)
+        path = relative_file(root, canonical)
         if not path.is_file():
             raise FileNotFoundError()
     except (OSError, ValueError):
         raise HTTPException(404, '归档文件暂不可用')
+    if canonical != relative:
+        from fastapi.responses import RedirectResponse
+        from urllib.parse import quote
+        return RedirectResponse('/api/archive/files/' + quote(canonical, safe='/'), headers={'Cache-Control': 'no-store'})
     return FileResponse(path, headers={'Cache-Control': 'no-store'})
 
 

@@ -24,9 +24,8 @@ def issue_code(exc):
 
 
 def relative_file(root, relative):
-    path = (root / relative).resolve()
-    path.relative_to(root.resolve())
-    return path
+    from archive_paths import resolve_file
+    return resolve_file(root, relative)
 
 
 class ArchiveIntegrity:
@@ -103,6 +102,9 @@ class ArchiveIntegrity:
                   'repair_performed': False}
         try:
             root = self.archive._root(create=False)
+            from archive_paths import load, checked, resolve_name
+            aliases = load(root)['aliases']
+            locate = lambda relative: checked(root, resolve_name(root, relative, aliases))
             with self.core['db']() as conn:
                 rows = conn.execute('SELECT * FROM archive_outbox WHERE archived_at IS NOT NULL ORDER BY seq').fetchall()
             report['expected_receipts'] = len(rows)
@@ -111,7 +113,7 @@ class ArchiveIntegrity:
             for row in rows:
                 relative = row['receipt_path']
                 try:
-                    digest, size, raw = self.digest(relative_file(root, relative), keep=True)
+                    digest, size, raw = self.digest(locate(relative), keep=True)
                     report['bytes_checked'] += size
                     if digest != Path(relative).stem.split('-', 1)[-1]:
                         raise IntegrityError('sha256_mismatch')
@@ -125,7 +127,7 @@ class ArchiveIntegrity:
                     for kind, item in receipt.get('artifacts', {}).items():
                         if not isinstance(item, dict):
                             continue  # Legacy original_status is an explicit string.
-                        relative_file(root, item['path'])
+                        locate(item['path'])
                         if item['path'] in artifacts and artifacts[item['path']] != item:
                             raise IntegrityError('conflicting_object_metadata')
                         artifacts[item['path']] = item
@@ -138,7 +140,7 @@ class ArchiveIntegrity:
             report['expected_objects'] = len(artifacts)
             for relative, item in artifacts.items():
                 try:
-                    digest, size, _ = self.digest(relative_file(root, relative))
+                    digest, size, _ = self.digest(locate(relative))
                     report['bytes_checked'] += size
                     if digest != item['sha256']:
                         raise IntegrityError('sha256_mismatch')
@@ -177,9 +179,9 @@ class ArchiveIntegrity:
         root = self.archive._root(create=False)
         for row in rows:
             report = json.loads(row['document']); raw = canonical(report)
-            relative = f"Integrity/Reports/{report['finished_at'][:10]}/{row['id']}-{hashlib.sha256(raw).hexdigest()}.json"
+            relative = f".System/Integrity/Reports/{report['finished_at'][:10]}/{row['id']}-{hashlib.sha256(raw).hexdigest()}.json"
             immutable_write(root / relative, raw)
-            replace_view(root / 'Integrity/Latest.json', canonical(report | {'report_path': relative}))
+            replace_view(root / '.System/Integrity/Latest.json', canonical(report | {'report_path': relative}))
             with self.core['db']() as conn:
                 conn.execute('UPDATE archive_integrity_runs SET published_path=? WHERE id=?', (relative, row['id']))
 

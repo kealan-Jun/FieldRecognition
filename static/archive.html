@@ -6,7 +6,7 @@
 @media(max-width:900px){main{padding:18px}.filters{grid-template-columns:repeat(2,minmax(120px,1fr))}header{align-items:flex-start;flex-direction:column}}[hidden]{display:none!important}
 </style></head><body><main>
 <header><div><p>FIELD RECOGNITION / ARCHIVE</p><h1>NAS 留存索引</h1><p id="overview"></p></div><div class="links"><a href="Index.json">完整索引 JSON ↗</a><button id="reload">刷新索引</button></div></header>
-<section class="card"><h2><a href="Readme.html">打开归档首页 ↗</a></h2><p>在 Browse 分类索引中按业务类型、日期、实验员、仪器查找。每条记录可直接查看照片、数值、单位和归属。</p></section>
+<section class="card"><h2><a href="../Readme.html">打开归档首页 ↗</a></h2><p>在日期与相机目录中打开 DailyReport，按事件查找绑定、视频读数和语音照片测量。此页用于查询不可覆盖的历史版本。</p></section>
 <section class="card check" id="integrity"><div><h2>完整性巡检</h2><p id="checkSummary"></p><p id="checkSchedule"></p><details id="checkIssues" hidden><summary>异常文件（最多展示 50 项，完整列表见报告）</summary><ul id="issueList"></ul></details></div><a id="checkReport" hidden>查看巡检报告 ↗</a></section>
 <section class="card"><h2>查询历史留存</h2><p>默认显示每条记录的最新版本；切换“全部版本”可查看当时的人员、状态和识别过程。</p>
 <form id="filters" class="filters">

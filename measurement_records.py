@@ -1,12 +1,43 @@
 """One instrument per photograph, with nulls for facts the evidence cannot supply."""
 import math
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
 
+UNITS = {'温度': {'°C'}, '转速': {'rpm'}, '质量': {'g', 'mg', 'kg'}}
+SCHEMA_VERSION = 'instrument-measurement/1'
+RULE_VERSION = 'instrument-measurement/2'
+
+
+def capture_clock(document):
+    """Never treat a receive/processing clock or unsynchronized device tick as UTC."""
+    if document.get('external_photo') is not None:
+        return (document.get('external_photo') or {}).get('captured_at'), 'source_capture_time'
+    video = document.get('video_observation') or {}
+    if video.get('clock_sync_valid') is True and video.get('capture_time_basis') == 'synchronized_frame_timestamp':
+        return video.get('captured_at'), video.get('capture_time_basis')
+    if video or document.get('request_trigger') == 'video_stream':
+        clock = video_clock(document.get('frame_metadata') or {})
+        return clock['captured_at'], clock['capture_time_basis']
+    return None, None
+
+
+def video_clock(metadata):
+    value = metadata.get('global_timestamp_us')
+    if metadata.get('clock_sync_valid') is True and type(value) is int and value > 0:
+        try:
+            moment = datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(microseconds=value)
+            return {'captured_at': moment.isoformat(), 'capture_time_basis': 'synchronized_frame_timestamp',
+                    'global_timestamp_us': value, 'clock_sync_valid': True}
+        except (OverflowError, ValueError):
+            pass
+    return {'captured_at': None, 'capture_time_basis': None,
+            'global_timestamp_us': value, 'clock_sync_valid': metadata.get('clock_sync_valid') is True}
+
+
 def photo_time(document):
-    value = (document.get('external_photo') or {}).get('captured_at')
+    value, _ = capture_clock(document)
     try:
         moment = datetime.fromisoformat(value)
         if moment.tzinfo is None:
@@ -30,8 +61,34 @@ def number(reading):
     # Never turn a missing decimal such as 02287 into 2287.
     if re.fullmatch(r'[+-]?0\d+(?:\.\d+)?',raw):
         return None
-    value = float(raw) if '.' in raw else int(raw)
-    return value if math.isfinite(value) else None
+    try:
+        value = float(raw) if '.' in raw else int(raw)
+        return value if math.isfinite(value) else None
+    except (OverflowError, ValueError):
+        return None
+
+
+def unit_evidence(name, reading, instrument):
+    observed = string(reading.get('unit'))
+    registered = string(((instrument.get('measurement_ranges') or {}).get(name) or {}).get('unit'))
+    allowed = UNITS.get(name, set())
+    conflict = bool((observed and observed not in allowed) or (registered and registered not in allowed)
+                    or (observed and registered and observed != registered))
+    if conflict:
+        return None, 'unit_conflict'
+    return (observed, 'recognition_text') if observed else (registered, 'instrument_registry') if registered else (None, 'unknown')
+
+
+def measurement_value(name, reading, instrument):
+    unit, basis = unit_evidence(name, reading, instrument)
+    bounds = ((instrument.get('measurement_ranges') or {}).get(name) or {})
+    limits = bounds.get('range') if unit and bounds.get('unit') == unit else None
+    if (not isinstance(limits, list) or len(limits) != 2
+            or any(v is not None and (type(v) not in (float, int) or not math.isfinite(v)) for v in limits)
+            or all(v is not None for v in limits) and limits[0] > limits[1]):
+        limits = [None, None]
+    return {'name': name, 'value': None if basis == 'unit_conflict' else number(reading),
+            'unit': unit, 'range': limits}, basis
 
 
 def build_records(document):
@@ -53,18 +110,12 @@ def build_records(document):
         digest = qr['qr_hash'] if qr else binding.get('qr_hash')
         digest = digest if isinstance(digest,str) and re.fullmatch('[a-f0-9]{64}',digest) else None
         candidates = [r for r in document.get('readings',[]) if (r.get('instrument') or {}).get('id')==iid]
-        values = []
+        values, unit_bases = [], {}
         for name in names:
             matches = [r for r in candidates if r.get('measurement_name')==name]
             reading = matches[0] if len(matches)==1 and document.get('status')=='completed' else {}
-            value = number(reading)
-            unit = {'温度':'°C','转速':'rpm'}.get(name) or string(reading.get('unit'))
-            # An explicitly conflicting unit cannot silently become a valid value.
-            if reading.get('unit') and name!='质量' and reading['unit']!=unit:
-                value = None
-            bounds = (instrument.get('measurement_ranges') or {}).get(name,{})
-            limits = bounds.get('range',[None,None]) if unit is not None and bounds.get('unit')==unit else [None,None]
-            values.append({'name':name,'value':value,'unit':unit,'range':limits})
+            value, unit_bases[name] = measurement_value(name, reading, instrument)
+            values.append(value)
         record = {'wearer_id':string(binding.get('wearer_id')) or string((document.get('operator_registration') or {}).get('wearer_id')),
             'device_model':string(instrument.get('model')), 'device_no':string(instrument.get('device_no')),
             'qr_hash':digest,'photo_time':photo_time(document),'values':values}
@@ -74,7 +125,8 @@ def build_records(document):
             'source_ref':(document.get('external_photo') or {}).get('source_ref'),
             'binding_id':regions[0]['binding_id'],'qr_basis':'same_photo_decode' if qr else 'binding_decode' if digest else None,
             'qr_scan_id':document['capture_id'] if qr else binding.get('scan_id') if digest else None,
-            'photo_time_basis':'source_capture_time' if record['photo_time']['timestamp_ms'] is not None else None,
+            'photo_time_basis':capture_clock(document)[1] if record['photo_time']['timestamp_ms'] is not None else None,
+            'schema_version':SCHEMA_VERSION, 'rule_version':RULE_VERSION, 'unit_basis':unit_bases,
             'panel_ids':[r['panel_id'] for r in regions], 'candidate_readings':candidates,
             'human_verified':False,'value_meaning':'displayed_value_setpoint_or_actual_unknown'}})
     return results
