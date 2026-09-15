@@ -10,78 +10,19 @@ def test_ocr_worker_import():
     try:
         import ocr_worker
         print("✓ OCR worker imports successfully")
-        return True
+        return None
     except ImportError as e:
         print(f"✗ OCR worker import failed: {e}")
-        return False
+        raise
 
 
-def test_handoff_service():
-    """Test handoff service functionality."""
-    try:
-        from handoff_service import HandoffService, HandoffState
-        from database import Database
-        import tempfile
-        import os
-
-        # Create temp database
-        with tempfile.NamedTemporaryFile(suffix='.sqlite3', delete=False) as f:
-            db_path = f.name
-
-        db = Database(db_path)
-
-        # Initialize tables
-        with db.transaction() as conn:
-            conn.executescript('''
-                CREATE TABLE bindings(id TEXT PRIMARY KEY, camera TEXT, ended TEXT, document TEXT);
-                CREATE TABLE binding_handoffs(
-                    id TEXT PRIMARY KEY, binding_id TEXT, instrument_id TEXT,
-                    offered_by TEXT, offered_to TEXT, offered_at TEXT,
-                    state TEXT, accepted_at TEXT, rejected_at TEXT,
-                    rejection_reason TEXT, status TEXT, document TEXT
-                );
-            ''')
-
-            # Create test binding
-            import json
-            binding = {
-                'id': 'test-binding',
-                'instrument_id': 'inst1',
-                'operator': 'user1',
-                'camera': 'cam1'
-            }
-            conn.execute(
-                'INSERT INTO bindings VALUES(?,?,?,?)',
-                ('test-binding', 'cam1', None, json.dumps(binding))
-            )
-
-        # Test handoff service
-        service = HandoffService(db)
-
-        # Request handoff
-        handoff = service.request_handoff(
-            'test-binding', 'inst1', 'user1', 'user2', 'Please take over'
-        )
-
-        assert handoff.state == HandoffState.PENDING
-        assert handoff.offered_by == 'user1'
-        assert handoff.offered_to == 'user2'
-
-        # List pending
-        pending = service.list_pending_handoffs('user2')
-        assert len(pending) == 1
-
-        db.close()
-        os.unlink(db_path)
-
-        print("✓ Handoff service works correctly")
-        return True
-
-    except Exception as e:
-        print(f"✗ Handoff service test failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
+def test_handoff_service_cannot_bypass_recipient_scan(tmp_path):
+    import pytest
+    from handoff_service import HandoffService
+    from database import Database
+    with pytest.raises(ValueError, match='recipient QR evidence'):
+        HandoffService(Database(tmp_path/'unused.sqlite3'))
+    assert not (tmp_path/'unused.sqlite3').exists()
 
 
 def test_capture_adapter():
@@ -112,11 +53,11 @@ def test_capture_adapter():
         assert data == b'fake_image_data'
 
         print("✓ Capture adapter works correctly")
-        return True
+        return None
 
     except Exception as e:
         print(f"✗ Capture adapter test failed: {e}")
-        return False
+        raise
 
 
 def test_api_v1():
@@ -141,11 +82,11 @@ def test_api_v1():
         assert params.limit == 10
 
         print("✓ API v1 utilities work correctly")
-        return True
+        return None
 
     except Exception as e:
         print(f"✗ API v1 test failed: {e}")
-        return False
+        raise
 
 
 def test_archive_worker_import():
@@ -153,40 +94,12 @@ def test_archive_worker_import():
     try:
         import archive_worker
         print("✓ Archive worker imports successfully")
-        return True
+        return None
     except ImportError as e:
         print(f"✗ Archive worker import failed: {e}")
-        return False
+        raise
 
 
 if __name__ == '__main__':
-    print("=== Phase 2 Components Test ===\n")
-
-    tests = [
-        test_ocr_worker_import,
-        test_handoff_service,
-        test_capture_adapter,
-        test_api_v1,
-        test_archive_worker_import,
-    ]
-
-    results = []
-    for test_func in tests:
-        print(f"\nRunning {test_func.__name__}...")
-        try:
-            results.append(test_func())
-        except Exception as e:
-            print(f"✗ Test crashed: {e}")
-            results.append(False)
-
-    print(f"\n{'='*50}")
-    passed = sum(results)
-    total = len(results)
-    print(f"Results: {passed}/{total} tests passed")
-
-    if passed == total:
-        print("✓ All phase 2 tests passed")
-        sys.exit(0)
-    else:
-        print("✗ Some tests failed")
-        sys.exit(1)
+    import pytest
+    raise SystemExit(pytest.main([__file__, '-q']))

@@ -1,0 +1,7 @@
+[Unit]
+Description=FieldRecognition managed local services
+Wants=field-recognition-api.service field-recognition-ocr.service field-recognition-archive.service field-recognition-cameras.service
+After=network-online.target
+
+[Install]
+WantedBy=default.target

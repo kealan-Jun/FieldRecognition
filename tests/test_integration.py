@@ -21,10 +21,10 @@ def test_imports():
         import production_bootstrap
         import legacy_adapter
         print("✓ All production modules imported successfully")
-        return True
+        return None
     except ImportError as e:
         print(f"✗ Import failed: {e}")
-        return False
+        raise
 
 
 def test_database_creation():
@@ -36,6 +36,8 @@ def test_database_creation():
 
     try:
         db = Database(db_path)
+        from database import apply_migrations
+        apply_migrations(db)
 
         with db.connection() as conn:
             # Check WAL mode
@@ -45,10 +47,10 @@ def test_database_creation():
         db.close()
         os.unlink(db_path)
         print("✓ Database creation works")
-        return True
+        return None
     except Exception as e:
         print(f"✗ Database creation failed: {e}")
-        return False
+        raise
 
 
 def test_config_validation():
@@ -65,10 +67,10 @@ def test_config_validation():
         else:
             print(f"⚠ Config validation found {len(errors)} issues in production mode")
 
-        return True
+        return None
     except Exception as e:
         print(f"✗ Config validation failed: {e}")
-        return False
+        raise
 
 
 def test_migration_structure():
@@ -76,7 +78,7 @@ def test_migration_structure():
     from database import MIGRATIONS
 
     try:
-        assert len(MIGRATIONS) == 7, f"Expected 7 migrations, got {len(MIGRATIONS)}"
+        assert len(MIGRATIONS) >= 9
 
         # Check all migrations have required fields
         for m in MIGRATIONS:
@@ -86,13 +88,13 @@ def test_migration_structure():
 
         # Check versions are sequential
         versions = [m['version'] for m in MIGRATIONS]
-        assert versions == list(range(1, 8)), f"Versions not sequential: {versions}"
+        assert versions == list(range(1, len(MIGRATIONS)+1)), f"Versions not sequential: {versions}"
 
         print("✓ Migration structure valid")
-        return True
+        return None
     except Exception as e:
         print(f"✗ Migration structure invalid: {e}")
-        return False
+        raise
 
 
 def test_python_compilation():
@@ -119,40 +121,12 @@ def test_python_compilation():
 
     if failed:
         print(f"✗ Compilation failed for: {', '.join(failed)}")
-        return False
+        raise
     else:
         print(f"✓ All {len(files)} production files compile successfully")
-        return True
+        return None
 
 
 if __name__ == '__main__':
-    print("=== Production Components Integration Test ===\n")
-
-    tests = [
-        test_imports,
-        test_database_creation,
-        test_config_validation,
-        test_migration_structure,
-        test_python_compilation
-    ]
-
-    results = []
-    for test_func in tests:
-        print(f"\nRunning {test_func.__name__}...")
-        try:
-            results.append(test_func())
-        except Exception as e:
-            print(f"✗ Test crashed: {e}")
-            results.append(False)
-
-    print(f"\n{'='*50}")
-    passed = sum(results)
-    total = len(results)
-    print(f"Results: {passed}/{total} tests passed")
-
-    if passed == total:
-        print("✓ All integration tests passed")
-        sys.exit(0)
-    else:
-        print("✗ Some tests failed")
-        sys.exit(1)
+    import pytest
+    raise SystemExit(pytest.main([__file__, '-q']))

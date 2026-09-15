@@ -32,12 +32,15 @@ def install(core):
             return [json.loads(r['document']) for r in conn.execute('SELECT document FROM scene_visits WHERE ended IS NULL')]
 
     def enter(body: SceneEntry, *, automatic: bool = False):
+        from security import require_camera,actor_name
+        body=body.model_copy(update={'operator':actor_name(body.operator)})
         with db() as conn:
             conn.execute('BEGIN IMMEDIATE')
             row = conn.execute('SELECT document FROM scans WHERE id=?', (str(body.scan_id),)).fetchone()
             if not row:
                 raise HTTPException(404, '扫码记录不存在')
             scan = json.loads(row['document'])
+            require_camera(scan['camera_id'])
             core['validate_capture_epoch'](conn, scan)
             scene = conn.execute('SELECT * FROM scenes WHERE id=?', (str(body.scene_id),)).fetchone()
             if not scene or not any(s['id'] == str(body.scene_id) for s in scan.get('scene_matches', [])):

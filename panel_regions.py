@@ -17,18 +17,12 @@ def predict(core, image, x=0, y=0, *, video=False, allowed_instrument_ids=()):
     begin = time.monotonic()
     allowed = set(allowed_instrument_ids)
     detection = detector.predict(image) if allowed else {'status':'waiting_binding', 'boxes':[], 'model':'YOLO11n'}
+    from panel_layout import resolve_type_boxes,roles_for_boxes
+    detection['boxes']=resolve_type_boxes(detection['boxes'],allowed,core.get('get_instrument',lambda _:{}))
     detection.update(started_at=started, finished_at=core['now']())
     detection['allowed_instrument_ids'] = sorted(allowed)
     detection['skipped_unbound_panels'] = [b for b in detection['boxes'] if b['instrument_id'] not in allowed]
-    # This model's class 0 is the two-window stirrer. Only a complete, aligned
-    # pair establishes left temperature / right speed; one box is ambiguous.
-    stirrer = sorted([b for b in detection['boxes'] if b['class_id']==0], key=lambda b:b['xyxy'][0])
-    roles = {}
-    if len(stirrer)==2:
-        a,b = [box['xyxy'] for box in stirrer]
-        overlap = min(a[3],b[3])-max(a[1],b[1])
-        if a[2]<=b[0] and overlap >= .4*min(a[3]-a[1],b[3]-b[1]):
-            roles = {tuple(a):'温度',tuple(b):'转速'}
+    roles = roles_for_boxes(detection['boxes'])
     regions, lines, ordinals = [], [], {}
     for box in detection['boxes']:
         if box['instrument_id'] not in allowed:
@@ -45,7 +39,7 @@ def predict(core, image, x=0, y=0, *, video=False, allowed_instrument_ids=()):
         local = refine_digits(core['predict_panel'], panel, local, x+cx, y+cy,
                               source_image=image,source_offset=(x,y))
         region = {'panel_id':f"panel-{box['class_id']}-{ordinal}", 'class_id':box['class_id'],
-            'measurement_name':'质量' if box['class_id']==1 else roles.get(tuple(box['xyxy'])),
+            'measurement_name':roles.get(((str(box['class_id']),box.get('instrument_id')),tuple(box['xyxy']))),
             'instrument_id':box['instrument_id'], 'detector_confidence':box['confidence'],
             'localization_method':box.get('localization_method','original'),
             'localization_supporting_views':box.get('supporting_views',[]),

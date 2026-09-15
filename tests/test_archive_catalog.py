@@ -34,9 +34,9 @@ def test_full_index_filters_old_versions_without_rewriting_evidence(archive):
     assert not select(index['items'], {'operator': '旧实验员'})  # Latest first, then filter.
     assert len(select(index['items'], {'operator': '新实验员'})) == 1
     assert not select(index['items'], {'from': '2026-09-15'})
-    (root / 'Readme.html').unlink()
+    (root / 'Audit.html').unlink()
     app.archive_store.step()
-    assert (root / 'Readme.html').exists()
+    assert (root / 'Audit.html').exists()
     assert all(p.read_bytes() == raw for p, raw in original_receipts.items())
 
 
@@ -51,7 +51,7 @@ def test_index_keeps_unknown_operator_and_instrument_and_escapes_html(archive):
     items = json.loads((root / 'Index.json').read_text())['items']
     assert [i['entity_id'] for i in select(items, {'operator': '__missing__', 'instrument': '__missing__'})] == ['unknown']
     assert select(items, {'camera': 'Other'}) == []
-    html = (root / 'Readme.html').read_text()
+    html = (root / 'Audit.html').read_text()
     assert '</script><img' not in html and '\\u003c/script>' in html
     assert '/*ARCHIVE_DATA*/' not in html and '/*ARCHIVE_SCRIPT*/' not in html
 
@@ -59,7 +59,7 @@ def test_index_keeps_unknown_operator_and_instrument_and_escapes_html(archive):
 def test_read_only_archive_routes_restrict_scope(archive, tmp_path):
     app, client, root = archive
     scan(client); app.archive_store.step()
-    response = client.get('/api/archive/files/Readme.html')
+    response = client.get('/api/archive/files/Audit.html')
     assert response.status_code == 200 and '查询历史留存' in response.text
     assert response.headers['cache-control'] == 'no-store'
     assert client.get('/api/archive/files/Index.json').json()['listed_receipts'] > 0

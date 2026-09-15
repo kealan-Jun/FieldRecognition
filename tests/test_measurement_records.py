@@ -104,11 +104,9 @@ def test_archive_writes_one_exact_measurement_file_per_instrument_with_shared_ph
            'recorded_at':doc['submitted_at'],'receipt_path':f'Receipts/{seq}.json'}
           for seq,(entity,ident,data) in enumerate([('scans','photo',capture),('jobs','job',doc)],1)]
     views=build_views(rows)
+    index=json.loads(views['Records/Jobs/job/Record.json'])
     for iid in ('a','b'):
-        folder=f'Browse/InstrumentReadings/{iid}/2026-09-14/job/'
-        record=json.loads(views[folder+'Measurement.json'])
+        record=index['instrument_measurements'][iid]
         assert set(record)=={'wearer_id','device_model','device_no','qr_hash','photo_time','values'}
-        index=json.loads(views[folder+'Record.json'])
-        assert index['photos']['image']['sha256']=='a'*64
-        assert index['measurement_evidence']['capture_id']=='photo'
-        assert b'Measurement.json' in views[folder+'Readme.html']
+    assert index['photos']['image']['sha256']=='a'*64
+    assert len([p for p in views if p.endswith('/Record.json') and '/Jobs/' in p])==1

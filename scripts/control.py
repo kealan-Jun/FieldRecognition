@@ -6,14 +6,15 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
-UNIT = 'field-recognition-demo.service'
+UNIT = 'field-recognition.target' if (Path.home()/'.config/systemd/user/field-recognition.target').exists() else 'field-recognition-demo.service'
 URL = 'http://127.0.0.1:8188'
 
 
 def status():
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with opener.open(URL + '/api/state', timeout=3) as response:
+    with opener.open(URL + ('/health/live' if UNIT.endswith('.target') else '/api/state'), timeout=3) as response:
         return json.load(response)
 
 
@@ -37,6 +38,11 @@ def main():
                 print('识别服务暂不可用。请运行 systemctl --user status ' + UNIT, file=sys.stderr)
                 sys.exit(1)
             time.sleep(.5)
+    if UNIT.endswith('.target'):
+        print('本机托管服务已启动，登录页面后查看相机、读数与归档状态。')
+        print('页面：'+URL)
+        if action=='open':subprocess.run(['xdg-open',URL],check=True)
+        return
     automatic = data.get('automation', {})
     print('现场识别：' + automatic.get('message', '服务已启动'))
     print('实验员登记：' + (automatic.get('operator') or '等待使用者填写'))

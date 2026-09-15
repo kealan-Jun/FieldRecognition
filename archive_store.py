@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import threading
 import time
 import uuid
@@ -80,7 +81,7 @@ class ArchiveStore:
         self.status = {'status': 'disabled', 'last_error': None, 'last_archived_at': None}
         base = Path(__file__).parent
         self.index_version = '2:' + hashlib.sha256(b''.join((base / p).read_bytes()
-            for p in ('archive_catalog.py', 'archive_browse.py', 'archive_readable.py', 'static/archive.html', 'static/archive.js'))).hexdigest()[:16]
+            for p in ('archive_catalog.py', 'archive_browse.py', 'archive_readable.py', 'archive_layout.py', 'static/archive.html', 'static/archive.js'))).hexdigest()[:16]
         with core['db']() as conn:
             conn.executescript('''
                 CREATE TABLE IF NOT EXISTS archive_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -132,6 +133,13 @@ class ArchiveStore:
             pending, archived = conn.execute('SELECT count(*) FILTER (WHERE archived_at IS NULL), '
                                              'count(*) FILTER (WHERE archived_at IS NOT NULL) FROM archive_outbox').fetchone()
             indexed = dict(conn.execute("SELECT key,value FROM archive_meta WHERE key IN ('index_count','index_version')"))
+        if os.environ.get('FIELD_SERVICE_ROLE') in {'api','capture','ocr'}:
+            with self.core['db']() as conn:
+                runtime=conn.execute("SELECT document,updated_at FROM runtime_status WHERE name='archive'").fetchone()
+            with self.lock:
+                if runtime and time.time()-runtime['updated_at']<30:
+                    self.status.update(json.loads(runtime['document']))
+                elif self.enabled():self.status.update(status='retrying',last_error='archive_worker_unavailable')
         with self.lock:
             status = dict(self.status)
         return status | {'enabled': self.enabled(), 'pending_receipts': pending, 'archived_receipts': archived,
@@ -146,8 +154,13 @@ class ArchiveStore:
         root = Path(configured).resolve()
         # A pre-existing mount can be required so a missing NAS never fills local /mnt.
         required = os.environ.get('FIELD_ARCHIVE_MOUNT')
-        if required and not os.path.ismount(required):
-            raise OSError('Archive mount unavailable')
+        if required:
+            mount = Path(required).resolve()
+            if not os.path.ismount(mount):
+                raise OSError('Archive mount unavailable')
+            root.relative_to(mount)
+        if str(root).startswith('/mnt/') and not required:
+            raise ValueError('NAS archive requires FIELD_ARCHIVE_MOUNT')
         if root.name != 'FieldRecognitionArchive' or 'VisionCortexExperimentArchive' in root.parts:
             raise ValueError('Archive must use its own FieldRecognitionArchive directory')
         if create:
@@ -165,6 +178,9 @@ class ArchiveStore:
         # A decoded 16-megapixel RGB PNG can exceed the compressed upload limit.
         if not source.is_file() or source.stat().st_size > 64 * 1024 * 1024:
             raise ValueError('Invalid archive artifact')
+        reserve = max(0, int(os.environ.get('FIELD_ARCHIVE_MIN_FREE_BYTES', '268435456')))
+        if shutil.disk_usage(root).free < source.stat().st_size + reserve:
+            raise OSError('Archive capacity below reserve; evidence remains queued locally')
         raw = source.read_bytes()
         if hashlib.sha256(raw).hexdigest() != expected:
             raise ValueError('Artifact SHA-256 mismatch')
@@ -241,32 +257,27 @@ class ArchiveStore:
             rows = conn.execute('SELECT * FROM archive_outbox WHERE archived_at IS NOT NULL ORDER BY seq DESC').fetchall()
         index = build_index(rows, self.instance, self.core['now'](), self.integrity.snapshot())
         replace_view(root / 'Index.json', canonical(index))
-        replace_view(root / 'Readme.html', render_index(index))
+        replace_view(root / 'Audit.html', render_index(index))
         views = build_views(rows)
         for relative, content in views.items():
             digest = hashlib.sha256(content).hexdigest()
-            if self.browse_digests.get(relative) != digest or not (root / relative).is_file():
+            if self.browse_digests.get(relative) != digest:
                 replace_view(root / relative, content)
                 self.browse_digests[relative] = digest
         # Only remove obsolete generated navigation files, never receipt/object data
         # or user files. A corrected target may move a readable record's folder.
-        current = sorted(p for p in views if p.startswith('01_业务数据/'))
+        current = sorted(p for p in views if p.startswith(('Records/', 'Browse/')))
         with self.core['db']() as conn:
             previous = conn.execute("SELECT value FROM archive_meta WHERE key='readable_files'").fetchone()
-        for relative in set(json.loads(previous[0]) if previous else []) - set(current):
-            from archive_integrity import relative_file
-            path = relative_file(root, relative)
-            if not relative.startswith('01_业务数据/') or path.suffix not in {'.html', '.json'}:
-                continue
-            path.relative_to((root / '01_业务数据').resolve())
-            path.unlink(missing_ok=True)
-            parent = path.parent
-            while parent != root / '01_业务数据':
-                try:
-                    parent.rmdir()
-                except OSError:
-                    break
-                parent = parent.parent
+        from archive_layout import retire_generated_views
+        mappings=retire_generated_views(root,views,json.loads(previous[0]) if previous else [])
+        with self.core['db']() as conn:
+            old_links=conn.execute("SELECT value FROM archive_meta WHERE key='legacy_links'").fetchone()
+        mappings=(json.loads(old_links[0]) if old_links else {}) | mappings
+        if mappings:
+            replace_view(root/'LegacyLinks.json',canonical(mappings))
+            with self.core['db']() as conn:
+                conn.execute('INSERT OR REPLACE INTO archive_meta VALUES(?,?)',('legacy_links',json.dumps(mappings)))
         with self.core['db']() as conn:
             conn.execute('INSERT OR REPLACE INTO archive_meta VALUES(?,?)', ('readable_files', json.dumps(current)))
             conn.execute('INSERT OR REPLACE INTO archive_meta VALUES(?,?)', ('index_count', str(len(rows))))
@@ -289,7 +300,7 @@ class ArchiveStore:
             except Exception as exc:
                 with self.core['db']() as conn:
                     conn.execute('UPDATE archive_outbox SET attempts=attempts+1,last_error=?,retry_after=? WHERE seq=?',
-                                 (type(exc).__name__, time.time() + 15, row['seq']))
+                                 (type(exc).__name__, time.time() + min(900, 15 * 2 ** min(row['attempts'], 6)), row['seq']))
                 with self.lock:
                     self.status.update(status='retrying', last_error=type(exc).__name__)
                 continue
@@ -308,7 +319,7 @@ class ArchiveStore:
         root = self._root()
         if (not indexed or int(indexed[0]) != archived or not version or version[0] != self.index_version
                 or not audit or audit[0] != (self.integrity.snapshot()['report_path'] or '')
-                or not (root / 'Readme.html').is_file() or not (root / 'Index.json').is_file()
+                or not (root / 'Readme.html').is_file() or not (root / 'Audit.html').is_file() or not (root / 'Index.json').is_file()
                 or not (root / 'Browse/Readme.html').is_file() or not (root / '00_归档导航.html').is_file()):
             self.write_index()
         with self.core['db']() as conn:

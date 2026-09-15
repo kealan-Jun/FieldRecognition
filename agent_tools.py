@@ -65,9 +65,31 @@ def install_tools(app, core):
             '结束指定仪器使用绑定；重复结束保持同一结果。'),
     }
 
+    from photo_measurements import Decision, Revision, Rejection
+    from instrument_ownership import HandoffRequest,HandoffDecision
+    class MeasurementId(Arguments):
+        measurement_id: uuid.UUID
+    class Confirm(Decision):
+        measurement_id: uuid.UUID
+    class Revise(Revision):
+        measurement_id: uuid.UUID
+    class Reject(Rejection):
+        measurement_id: uuid.UUID
+    class Transfer(HandoffDecision):
+        handoff_id: uuid.UUID
+        action: str
+    registry.update({
+        'get_measurement_draft':(MeasurementId,lambda a:core['measurement_actions']['detail'](a.measurement_id),'读取本次测量草稿及每个字段的原图证据。'),
+        'revise_measurement_draft':(Revise,lambda a:core['measurement_actions']['revise'](a.measurement_id,a),'由有权限的审核账号校正指定版本草稿，保留原文和修订原因。'),
+        'confirm_measurement_draft':(Confirm,lambda a:core['measurement_actions']['confirm'](a.measurement_id,a),'审核账号确认当前版本；有冲突则拒绝，成功后读回同一条正式记录。'),
+        'reject_measurement_draft':(Reject,lambda a:core['measurement_actions']['reject'](a.measurement_id,a),'审核账号拒绝草稿并记录原因。'),
+        'request_device_handoff':(HandoffRequest,lambda a:core['handoff_actions']['request'](a),'接收人凭自己的新扫码证据申请交接，不会直接接管。'),
+        'decide_device_handoff':(Transfer,lambda a:core['handoff_actions']['transition'](a.handoff_id,a.action,HandoffDecision(**a.model_dump(exclude={'handoff_id','action'}))),'原使用人明确交出后，指定接收人确认接收；也可取消或拒绝。'),
+    })
+
     @app.get('/api/tools')
     def list_tools():
-        return {'version': '1.1', 'transport': 'http-json', 'tools': [
+        return {'version': '1.2', 'transport': 'http-json', 'tools': [
             {'name': name, 'description': desc, 'input_schema': model.model_json_schema()}
             for name, (model, _, desc) in registry.items()]}
 

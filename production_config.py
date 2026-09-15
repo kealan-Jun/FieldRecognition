@@ -44,7 +44,7 @@ class ProductionConfig(BaseModel):
 
     # Aliyun fallback
     aliyun_fallback_enabled: bool = Field(default=False)
-    dashscope_api_key: str | None = None
+    dashscope_api_key: str | None = Field(default=None,repr=False)
     aliyun_base_url: str = Field(default='https://dashscope.aliyuncs.com/compatible-mode/v1')
     aliyun_model: str = Field(default='qwen3.8-max')
     aliyun_no_digits_seconds: int = Field(default=5, ge=1, le=60)
@@ -121,8 +121,8 @@ class ProductionConfig(BaseModel):
         """Load configuration from environment variables."""
         return cls(
             record_mode=os.environ.get('FIELD_RECORD_MODE', 'test'),
-            database_path=os.environ.get('FIELD_DEMO_DATA', 'Data/Demo.sqlite3'),
-            auth_enabled=os.environ.get('FIELD_AUTH_ENABLED', '0') == '1',
+            database_path=os.environ.get('FIELD_DATABASE_PATH') or str(Path(os.environ.get('FIELD_DEMO_DATA', 'Data')) / 'Demo.sqlite3'),
+            auth_enabled=os.environ.get('FIELD_AUTH_ENABLED', '0') == '1' or os.environ.get('FIELD_PRODUCTION_ENABLED','0')=='1',
             require_device_credentials=os.environ.get('FIELD_REQUIRE_DEVICE_CREDENTIALS', '0') == '1',
             ocr_device=os.environ.get('FIELD_OCR_DEVICE', 'cpu'),
             receiver_url=os.environ.get('FIELD_RECEIVER_URL'),
@@ -158,7 +158,7 @@ def validate_production_deployment() -> bool:
     try:
         config = ProductionConfig.from_environment()
     except Exception as e:
-        print(f"❌ Configuration validation failed: {e}", file=sys.stderr)
+        print(f"Configuration validation failed: {type(e).__name__}; check local settings", file=sys.stderr)
         return False
 
     errors = config.validate_production_requirements()

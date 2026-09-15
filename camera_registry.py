@@ -1,6 +1,7 @@
 """Multi-camera registry and per-camera context management."""
 import json
 import uuid
+import re
 from datetime import datetime, timezone
 from typing import Dict, Optional
 
@@ -113,6 +114,7 @@ class CameraRegistry:
         Raises:
             ValueError: If camera already registered
         """
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,100}',camera_id):raise ValueError('Invalid camera ID')
         with self.db.transaction('IMMEDIATE') as conn:
             existing = conn.execute(
                 'SELECT camera_id FROM camera_registry WHERE camera_id=?',
@@ -214,6 +216,7 @@ class CameraRegistry:
 
     def refresh_bindings_from_db(self):
         """Refresh active bindings from database (call on startup)."""
+        for context in self.contexts.values():context.active_bindings.clear()
         with self.db.connection() as conn:
             rows = conn.execute('''
                 SELECT id, camera, document

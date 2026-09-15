@@ -44,10 +44,25 @@ def now():
     return datetime.now(timezone.utc).isoformat()
 
 
+from database import Database, get_migration_status
+from security import require_camera, require_role, actor_name, current, visible, filter_payload
+
+RUNTIME_ENABLED = os.environ.get('FIELD_PRODUCTION_ENABLED', '0') == '1'
+AUTH_ENABLED = RUNTIME_ENABLED or os.environ.get('FIELD_AUTH_ENABLED', '0') == '1'
+SERVICE_ROLE = os.environ.get('FIELD_SERVICE_ROLE', 'combined')
+database = Database(os.environ.get('FIELD_DATABASE_PATH') or DATA / 'Demo.sqlite3')
+if RECORD_MODE == 'production' and not AUTH_ENABLED:
+    raise RuntimeError('Production mode requires authentication')
+if RUNTIME_ENABLED or AUTH_ENABLED:
+    if get_migration_status(database)['pending']:
+        raise RuntimeError('Pending database migrations; run migrate_db.py before starting')
+    with database.connection() as conn:
+        if not conn.execute("SELECT 1 FROM users WHERE role='admin' AND disabled=0").fetchone():
+            raise RuntimeError('Create the initial administrator before starting')
+
+
 def db():
-    conn = sqlite3.connect(DATA / 'Demo.sqlite3', timeout=15)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return database.connection()
 
 
 with db() as conn:
@@ -68,38 +83,38 @@ with db() as conn:
     for item in json.loads((BASE / 'InstrumentRegistry.json').read_text())['instruments']:
         conn.execute('INSERT OR IGNORE INTO instruments(id,name,scene,model) VALUES(?,?,?,?)',
                      (item['instrument_id'], item['label'], '', ''))
-    # Interrupted jobs stay explicit and cannot be mistaken for completed OCR.
-    conn.execute("UPDATE jobs SET status='interrupted' WHERE status IN ('queued','running')")
 
 receiver_camera = None
-if os.environ.get('FIELD_RECEIVER_URL'):
+if SERVICE_ROLE == 'api':
+    from runtime_rpc import CameraProxy
+    receiver_camera = CameraProxy(os.environ.get('FIELD_CAMERA_ID', 'UnconfiguredNeckCamera'))
+elif SERVICE_ROLE not in {'ocr','archive'} and os.environ.get('FIELD_RECEIVER_URL'):
     from receiver import ReceiverCamera
-    receiver_camera = ReceiverCamera(os.environ['FIELD_RECEIVER_URL'],
-                                     os.environ.get('FIELD_CAMERA_ID', 'lubancat-52d2ef0c_cam01'))
+    receiver_camera = ReceiverCamera(os.environ['FIELD_RECEIVER_URL'], os.environ.get('FIELD_CAMERA_ID', 'lubancat-52d2ef0c_cam01'))
 
 
 @asynccontextmanager
 async def lifespan(application):
-    # Production components integration
-    production_adapter = None
-    if os.environ.get('FIELD_PRODUCTION_ENABLED') == '1':
-        try:
-            from app_production import integrate_production
-            production_adapter = integrate_production(globals(), application)
-            print("✓ Production components enabled")
-        except Exception as e:
-            print(f"⚠ Production components failed to load: {e}")
-
+    if RUNTIME_ENABLED and SERVICE_ROLE == 'combined':
+        raise RuntimeError('Managed deployment requires api/capture/ocr/archive roles')
+    if SERVICE_ROLE == 'api':
+        # Request processes own no camera, filesystem polling, GPU or archive consumers.
+        yield
+        ocr_pool.shutdown(wait=False,cancel_futures=True)
+        readout_pool.shutdown(wait=False,cancel_futures=True)
+        return
     if receiver_camera:
         receiver_camera.start()
     with db() as conn:
         has_binding = conn.execute('SELECT 1 FROM bindings WHERE ended IS NULL LIMIT 1').fetchone()
     if has_binding or saved_photo_watcher.enabled() or video_ocr.enabled():
         queue_ocr_warmup()
-    from photo_job_queue import recover
-    recover(globals())
+    if not RUNTIME_ENABLED:
+        from photo_job_queue import recover
+        recover(globals())
     saved_photo_watcher.start()
-    archive_store.start()
+    if not RUNTIME_ENABLED:
+        archive_store.start()
     automatic_runner.start()
     video_ocr.start()
     yield
@@ -129,7 +144,8 @@ ocr_warmup_future = None
 ocr_state = {'status': 'not_loaded', 'device': OCR_DEVICE, 'engine': 'PaddleOCR / PP-OCRv5 mobile',
              'resident': False, 'load_count': 0, 'loaded_at': None}
 ocr_model = None
-panel_detector = PanelDetector()
+from runtime_rpc import DetectorProxy
+panel_detector = DetectorProxy() if SERVICE_ROLE in {'api','capture'} else PanelDetector()
 
 
 def instrument_record(row):
@@ -145,6 +161,7 @@ def get_instrument(instrument_id):
 
 
 def validate_capture_epoch(conn, scan):
+    require_camera(scan['camera_id'])
     service = conn.execute('SELECT document FROM camera_service_state WHERE camera=?', (scan['camera_id'],)).fetchone()
     if service and not json.loads(service['document'])['online']:
         raise HTTPException(409, '设备采集服务已离线，重新启动后再扫码绑定')
@@ -216,7 +233,9 @@ def qr_matches(values, points):
                         'signature_status': 'unsigned_demo_label'}
 
 
-def scan_image(data, source, camera, *, decoded=None, metadata=None, operator=None, scan_session_id=None):
+def scan_image(data, source, camera, *, decoded=None, metadata=None, operator=None, scan_session_id=None, persist=True):
+    require_camera(camera)
+    operator = actor_name(operator)
     capture = save_image(data, source, camera)
     if decoded is None:
         from qr_decode import decode_qr
@@ -228,8 +247,9 @@ def scan_image(data, source, camera, *, decoded=None, metadata=None, operator=No
     if operator is not None:
         result['operator'] = operator
         result['scan_session_id'] = scan_session_id
-    with db() as conn:
-        conn.execute('INSERT INTO scans VALUES(?,?)', (result['scan_id'], json.dumps(result)))
+    if persist:
+        with db() as conn:
+            conn.execute('INSERT INTO scans VALUES(?,?)', (result['scan_id'], json.dumps(result)))
     return result
 
 
@@ -284,6 +304,10 @@ def index():
 @app.get('/api/state')
 def state():
     from history_records import job_rows, panel_readings
+    if RUNTIME_ENABLED and SERVICE_ROLE=='api':
+        from runtime_rpc import call
+        try:ocr_state.update(call('ocr','status'))
+        except (OSError,HTTPException):ocr_state.update(status='worker_unavailable',resident=False)
     with db() as conn:
         instruments = [instrument_record(row) for row in conn.execute('SELECT * FROM instruments ORDER BY name')]
         bindings = [json.loads(row['document']) for row in conn.execute('SELECT document FROM bindings WHERE ended IS NULL OR rowid IN (SELECT rowid FROM bindings ORDER BY rowid DESC LIMIT 30) ORDER BY rowid DESC')]
@@ -299,7 +323,7 @@ def state():
         if latest_panel_job:
             related = panel_readings(latest_panel_job)
             latest_panel_job = latest_panel_job | {'readings': related, 'lines': related}
-    return {'scenes': scene_records(), 'scene_visits': scene_visits(), 'instruments': instruments, 'bindings': bindings, 'jobs': jobs, 'ocr': dict(ocr_state),
+    return filter_payload({'scenes': scene_records(), 'scene_visits': scene_visits(), 'instruments': instruments, 'bindings': bindings, 'jobs': jobs, 'ocr': dict(ocr_state),
             'last_camera_scan': json.loads(last_hit['document']) if last_hit else None,
             'activity': activity, 'latest_panel_job': latest_panel_job,
             'record_policy': {'mode': RECORD_MODE, 'automatic_write_scope': 'test_only',
@@ -312,11 +336,12 @@ def state():
             'panel_detector': panel_detector.snapshot(),
             'camera': receiver_camera.snapshot() if receiver_camera else {'configured': bool(os.environ.get('FIELD_CAMERA_SNAPSHOT_URL')),
                        'id': os.environ.get('FIELD_CAMERA_ID', 'UnconfiguredNeckCamera'),
-                       'mode': 'http_snapshot'}, 'product': 'FieldRecognition'}
+                       'mode': 'http_snapshot'}, 'product': 'FieldRecognition'})
 
 
 @app.put('/api/instruments/{instrument_id}')
 def edit_instrument(instrument_id: uuid.UUID, body: InstrumentEdit):
+    require_role('admin')
     if not get_instrument(str(instrument_id)):
         raise HTTPException(404, '仪器不存在')
     if not body.name.strip() or not body.scene.strip():
@@ -417,6 +442,11 @@ def persist_binding(conn, body, *, automatic=False, handoff_id=None):
     from instrument_ownership import check_available
     check_available(conn, str(body.instrument_id), scan['camera_id'], handoff_id=handoff_id)
     timestamp = now()
+    owner_id = current().user_id if current() else body.wearer_id
+    if RUNTIME_ENABLED and not owner_id:
+        owner=conn.execute('SELECT user_id FROM camera_users WHERE camera_id=?',(scan['camera_id'],)).fetchone()
+        owner_id=owner[0] if owner else None
+    body = body.model_copy(update={'operator': actor_name(body.operator), 'wearer_id': owner_id})
     result = {'binding_id': str(uuid.uuid4()), 'operator': body.operator.strip(),
               'wearer_id':(body.wearer_id or '').strip() or None,
               'qr_hash':next(item.get('qr_hash') for item in scan['matches'] if item['id']==str(body.instrument_id)),
@@ -447,6 +477,7 @@ def finish_binding(binding_id):
         if not row:
             raise HTTPException(404, '绑定不存在')
         result = json.loads(row['document'])
+        require_camera(result['camera_id'])
         if not row['ended']:
             if receiver_camera and result['camera_id'] == receiver_camera.target:
                 automatic_runner.pause('binding_ended')
@@ -461,6 +492,7 @@ class EndRelations(BaseModel):
 
 @app.post('/api/camera/relations/end')
 def end_relations(body: EndRelations):
+    require_camera(body.camera_id)
     with live_scanner.lock:
         if receiver_camera and body.camera_id == receiver_camera.target:
             automatic_runner.pause('binding_ended')
@@ -622,6 +654,7 @@ def enqueue_ocr(body, *, trigger='explicit_request', precomputed_local=None):
         if not capture:
             raise HTTPException(404, '图片不存在')
         capture = json.loads(capture['document'])
+        require_camera(capture['camera_id'])
         if binding and binding['camera'] != capture['camera_id']:
             raise HTTPException(409, '图片来源与绑定相机不一致')
         linked = json.loads(binding['document']) if binding else None
@@ -658,7 +691,7 @@ def enqueue_ocr(body, *, trigger='explicit_request', precomputed_local=None):
                     and existing['crop'] == crop):
                 check_retry(existing, body.measurement, RECORD_MODE)
                 return existing | {'status': pending['status']}
-        if conn.execute("SELECT count(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0] >= 4:
+        if conn.execute("SELECT count(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0] >= (1000 if RUNTIME_ENABLED else 4):
             raise HTTPException(429, 'OCR 正在处理，请稍候再提交')
         document = {'job_id': str(uuid.uuid4()), 'binding_id': binding_id,
                     'capture_id': str(body.capture_id), 'crop': crop, 'submitted_at': now(),
@@ -691,8 +724,16 @@ def enqueue_ocr(body, *, trigger='explicit_request', precomputed_local=None):
             document['precomputed_local'] = precomputed_local
         update_timing(document)
         attach_measurement(globals(), conn, document, body.measurement)
-        conn.execute('INSERT INTO jobs VALUES(?,?,?)', (document['job_id'], 'queued', json.dumps(document)))
-    readout_pool.submit(run_ocr, dict(document))
+        if RUNTIME_ENABLED:
+            from task_queue import QueueFull
+            try:
+                document = task_queue.enqueue(document, conn)
+            except QueueFull as exc:
+                raise HTTPException(429, str(exc)) from None
+        else:
+            conn.execute('INSERT INTO jobs(id,status,document) VALUES(?,?,?)', (document['job_id'], 'queued', json.dumps(document)))
+    if not RUNTIME_ENABLED:
+        readout_pool.submit(run_ocr, dict(document))
     return document
 
 
@@ -745,11 +786,14 @@ def workbenches(limit: int = 200, related_only: bool = False):
 @app.get('/api/archive/files/{relative:path}')
 def archive_file(relative: str):
     from archive_integrity import relative_file
+    with db() as conn:
+        row=conn.execute("SELECT value FROM archive_meta WHERE key='legacy_links'").fetchone()
+    if row:relative=json.loads(row[0]).get(relative,relative)
     if not archive_store.enabled():
         raise HTTPException(404, '未启用 NAS 留存')
-    if (relative not in {'Readme.html', 'Index.json', '00_归档导航.html'}
+    if (relative not in {'Readme.html', 'Audit.html', 'Index.json', '00_归档导航.html'}
             and not re.fullmatch(r'(?:Receipts|Objects|Integrity)/[A-Za-z0-9_./-]+\.(?:json|png|jpg|jpeg|webp|bmp|tiff)', relative)
-            and not re.fullmatch(r'Browse/[A-Za-z0-9_./-]+\.(?:html|json)', relative)
+            and not re.fullmatch(r'(?:Browse|Records)/[A-Za-z0-9_./-]+\.(?:html|json)', relative)
             and not re.fullmatch(r'01_业务数据/[\w./-]+\.(?:html|json)', relative)):
         raise HTTPException(404, '归档文件不存在')
     try:
@@ -772,7 +816,8 @@ from saved_photo import install as install_saved_photo
 install_saved_photo(globals())
 
 from photo_watch import SavedPhotoWatcher
-saved_photo_watcher = SavedPhotoWatcher(globals())
+from runtime_rpc import camera_component
+saved_photo_watcher = camera_component('watcher', os.environ.get('FIELD_CAMERA_ID')) or SavedPhotoWatcher(globals())
 
 from automation import install as install_automation
 automatic_runner = install_automation(globals())
@@ -790,3 +835,31 @@ archive_store = ArchiveStore(globals())
 
 from agent_tools import install_tools
 install_tools(app, globals())
+
+
+from security import install as install_security
+install_security(globals(), AUTH_ENABLED)
+from production_routes import install as install_production_routes
+install_production_routes(globals())
+
+
+from task_queue import TaskQueue
+task_queue = TaskQueue(database)
+if SERVICE_ROLE in {'api','capture'}:
+    from runtime_rpc import call as worker_call
+    def predict_panel(panel,x=0,y=0):
+        return worker_call('ocr','predict_panel',panel,x,y)
+    def predict_readout(panel,x=0,y=0,**kwargs):
+        return worker_call('ocr','predict_readout',panel,x,y,**kwargs)
+    def remote_warmup():
+        try:
+            worker_call('ocr','warmup')
+            ocr_state.update(worker_call('ocr','status'))
+        except Exception:
+            ocr_state.update(status='worker_unavailable',resident=False)
+    def queue_ocr_warmup():
+        global ocr_warmup_future
+        with ocr_warmup_lock:
+            if ocr_warmup_future is None or ocr_warmup_future.done():
+                ocr_warmup_future = ocr_pool.submit(remote_warmup)
+            return ocr_warmup_future

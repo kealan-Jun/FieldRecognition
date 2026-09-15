@@ -104,7 +104,7 @@ def attach(core, conn, job, context):
             'record_mode': mode, 'record_scope': 'draft' if mode == 'production' else 'test_only',
             'context': metadata, 'status': 'collecting', 'revision': 0, 'job_ids': [],
             'sources': [], 'fields': [], 'corrections': [], 'created_at': core['now']()}
-        conn.execute('INSERT INTO photo_measurements VALUES(?,?,?,?,?)',
+        conn.execute('INSERT INTO photo_measurements(id,camera,burst_key,status,document) VALUES(?,?,?,?,?)',
             (group['measurement_id'], job['camera_id'], context.burst_id, group['status'], json.dumps(group)))
     group['job_ids'].append(job['job_id'])
     group['revision'] += 1
@@ -307,15 +307,15 @@ def install(core):
             CREATE TRIGGER IF NOT EXISTS experiment_records_no_delete BEFORE DELETE ON experiment_records
                 BEGIN SELECT RAISE(ABORT,'Confirmed records are immutable'); END;
         ''')
-        # Jobs interrupted by a local restart still lead to an explicit blocked draft.
-        for row in conn.execute("SELECT id FROM photo_measurements WHERE status='collecting'").fetchall():
-            refresh(core, conn, row[0])
 
     def fetch(conn, mid):
         row = conn.execute('SELECT document FROM photo_measurements WHERE id=?', (str(mid),)).fetchone()
         if not row:
             raise HTTPException(404, '测量草稿不存在')
-        return json.loads(row['document'])
+        from security import require_camera
+        document = json.loads(row['document'])
+        require_camera(document['camera_id'])
+        return document
 
     def store(conn, group):
         group['revision'] += 1
@@ -337,11 +337,12 @@ def install(core):
 
     @core['app'].get('/api/photo-measurements')
     def listing(limit: int = 30):
+        from security import visible
         if not 1 <= limit <= 100:
             raise HTTPException(422, '数量需为 1–100')
         with core['db']() as conn:
             rows = conn.execute('SELECT document FROM photo_measurements ORDER BY rowid DESC LIMIT ?', (limit,)).fetchall()
-        return {'record_mode': core['RECORD_MODE'], 'items': [json.loads(r[0]) for r in rows]}
+        return {'record_mode': core['RECORD_MODE'], 'items': [json.loads(r[0]) for r in rows if visible(json.loads(r[0]))]}
 
     @core['app'].get('/api/photo-measurements/{mid}')
     def detail(mid: uuid.UUID):
@@ -367,6 +368,9 @@ def install(core):
 
     @core['app'].post('/api/photo-measurements/{mid}/revisions')
     def revise(mid: uuid.UUID, body: Revision):
+        from security import require_role, actor_name
+        require_role('admin', 'reviewer')
+        body = body.model_copy(update={'actor': actor_name(body.actor)})
         with core['db']() as conn:
             conn.execute('BEGIN IMMEDIATE')
             group = fetch(conn, mid)
@@ -395,6 +399,9 @@ def install(core):
 
     @core['app'].post('/api/photo-measurements/{mid}/confirm')
     def confirm(mid: uuid.UUID, body: Decision):
+        from security import require_role, actor_name
+        require_role('admin', 'reviewer')
+        body = body.model_copy(update={'actor': actor_name(body.actor)})
         with core['db']() as conn:
             conn.execute('BEGIN IMMEDIATE')
             group = fetch(conn, mid)
@@ -417,7 +424,7 @@ def install(core):
             record = copy.deepcopy(group) | {'record_id': str(mid), 'record_scope': 'production_confirmed',
                 'confirmed_fields': [{k: f[k] for k in ('field_id', 'instrument', 'name', 'value', 'unit')}
                                      for f in group['fields']]}
-            conn.execute('INSERT INTO experiment_records VALUES(?,?)', (str(mid), json.dumps(record)))
+            conn.execute('INSERT INTO experiment_records(id,document) VALUES(?,?)', (str(mid), json.dumps(record)))
             store(conn, group)
         # Read through a fresh connection after COMMIT. A lost response can retry
         # the same decision and receive the same immutable record.
@@ -426,6 +433,9 @@ def install(core):
 
     @core['app'].post('/api/photo-measurements/{mid}/reject')
     def reject(mid: uuid.UUID, body: Rejection):
+        from security import require_role, actor_name
+        require_role('admin', 'reviewer')
+        body = body.model_copy(update={'actor': actor_name(body.actor)})
         with core['db']() as conn:
             conn.execute('BEGIN IMMEDIATE')
             group = fetch(conn, mid)
@@ -436,6 +446,8 @@ def install(core):
 
     @core['app'].get('/api/experiment-records')
     def records(limit: int = 30):
+        from security import require_role
+        require_role('admin','reviewer')
         if not 1 <= limit <= 100:
             raise HTTPException(422, '数量需为 1–100')
         with core['db']() as conn:
@@ -449,3 +461,5 @@ def install(core):
         if not row:
             raise HTTPException(404, '已确认实验记录不存在')
         return json.loads(row[0])
+
+    core['measurement_actions'] = {'detail':detail,'revise':revise,'confirm':confirm,'reject':reject}

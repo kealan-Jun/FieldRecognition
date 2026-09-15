@@ -62,7 +62,9 @@ class PanelDetector:
         config = json.loads(path.read_text())
         weights = Path(config['weights'])
         digest = hashlib.sha256(weights.read_bytes()).hexdigest()
-        if digest != config['weights_sha256'] or set(config['classes']) != {'0', '1'}:
+        from panel_layout import normalize_classes
+        config['classes'] = normalize_classes(config['classes'])
+        if digest != config['weights_sha256']:
             raise ValueError('panel model manifest mismatch')
         self.config = config
         env = {k: os.environ[k] for k in ('PATH', 'HOME', 'LANG') if k in os.environ}
@@ -72,7 +74,7 @@ class PanelDetector:
             str(weights), str(config.get('imgsz', 960)), str(config.get('confidence', .25))],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None, env=env)
         ready = self._receive(60)
-        if ready.get('status') != 'ready' or ready.get('names') != {'0': 'panel_a', '1': 'panel_b'}:
+        if ready.get('status') != 'ready' or ready.get('names') != {key:value['name'] for key,value in config['classes'].items()}:
             raise ValueError('unexpected detector classes')
         self.state.update(status='ready', resident=True, error=None, device='gpu:0',
             weights_sha256=digest, model_version=config['version'],
@@ -114,7 +116,7 @@ class PanelDetector:
                     if x2-x1 < 4 or y2-y1 < 4:
                         continue
                     boxes.append(item | {'xyxy': [x1,y1,x2,y2],
-                        'instrument_id': self.config['classes'][key]['instrument_id']})
+                        **{field:self.config['classes'][key].get(field) for field in ('instrument_id','type_id','layout','measurements')}})
                 boxes.sort(key=lambda b: (b['class_id'], b['xyxy'][0], b['xyxy'][1]))
                 self.state.update(status='ready', error=None, last_seconds=round(time.monotonic()-started, 3),
                                   recovery=result.get('recovery'))

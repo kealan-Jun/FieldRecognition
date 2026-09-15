@@ -1,298 +1,191 @@
-"""Production-ready task queue with leases, retries, and failure handling."""
+"""SQLite job leases. Every publish is fenced by a unique claim token."""
 import json
+import random
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
-from typing import Literal
+from datetime import datetime, timezone
 
 from database import Database
 
 
-TaskStatus = Literal['queued', 'running', 'completed', 'failed', 'cancelled', 'interrupted']
+class LeaseLost(RuntimeError):
+    pass
+
+
+class QueueFull(RuntimeError):
+    pass
+
+
+def utc(epoch=None):
+    return datetime.fromtimestamp(time.time() if epoch is None else epoch, timezone.utc).isoformat()
 
 
 class TaskQueue:
-    """
-    Persistent task queue with worker leases and automatic recovery.
-
-    Features:
-    - Atomic task claiming with worker leases
-    - Automatic recovery of expired leases
-    - Exponential backoff retries with jitter
-    - Dead letter queue for permanently failed tasks
-    - Graceful shutdown support
-    """
-
-    def __init__(self, db: Database, worker_id: str | None = None):
-        """
-        Initialize task queue.
-
-        Args:
-            db: Database instance
-            worker_id: Unique worker identifier (generated if not provided)
-        """
+    def __init__(self, db: Database, worker_id=None):
         self.db = db
-        self.worker_id = worker_id or f'worker-{uuid.uuid4().hex[:8]}'
-        self.lease_seconds = 300  # 5 minutes
-        self.heartbeat_interval = 60  # 1 minute
-        self.max_retries = 3
+        self.worker_id = worker_id or 'worker-' + uuid.uuid4().hex
+        self.lease_seconds = 60
+        self.heartbeat_interval = 15
+        self.max_retries = 3  # three retries AFTER the first attempt
         self.base_backoff_seconds = 5
+        self.claims = {}
 
-    def claim_task(self, task_type: str | None = None) -> dict | None:
-        """
-        Atomically claim the next available task.
+    def enqueue(self, document, conn=None, *, max_pending=1000, per_camera=200):
+        if conn is None:
+            with self.db.transaction('IMMEDIATE') as tx:
+                return self.enqueue(document, tx, max_pending=max_pending, per_camera=per_camera)
+        camera = document.get('camera_id') or 'unknown'
+        existing = conn.execute('SELECT document FROM jobs WHERE id=?', (document['job_id'],)).fetchone()
+        if existing:
+            return json.loads(existing[0])
+        if conn.execute("SELECT count(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0] >= max_pending:
+            raise QueueFull('Global job queue is full')
+        if conn.execute("SELECT count(*) FROM jobs WHERE status IN ('queued','running') AND camera_id=?", (camera,)).fetchone()[0] >= per_camera:
+            raise QueueFull('Camera job queue is full')
+        document = dict(document, task_type='ocr', status='queued')
+        conn.execute('INSERT INTO jobs(id,status,document,camera_id,priority) VALUES(?,?,?,?,?)',
+                     (document['job_id'],'queued',json.dumps(document),camera,20 if document.get('request_trigger')=='video_stream' else 10))
+        return document
 
-        Args:
-            task_type: Optional filter by task type
-
-        Returns:
-            Task document if claimed, None if no tasks available
-        """
+    def claim_task(self, task_type=None):
+        now = time.time()
         with self.db.transaction('IMMEDIATE') as conn:
-            now = datetime.now(timezone.utc).isoformat()
-            expires = (datetime.now(timezone.utc) + timedelta(seconds=self.lease_seconds)).isoformat()
-
-            # Find claimable task: queued OR running with expired lease
-            where_clauses = [
-                "(status='queued' OR (status='running' AND lease_expires_at < ?))",
-                "retry_count < max_retries"
-            ]
-
+            self._expire(conn, now)
+            filters = "j.status='queued' AND j.next_attempt_at<=? AND j.attempt_count<=j.max_retries"
+            args = [now]
             if task_type:
-                where_clauses.append(f"json_extract(document,'$.task_type')='{task_type}'")
-
-            where_sql = ' AND '.join(where_clauses)
-
-            # Atomic claim
-            cursor = conn.execute(f'''
-                UPDATE jobs SET
-                    status='running',
-                    lease_holder=?,
-                    lease_expires_at=?,
-                    document=json_set(document, '$.claimed_at', ?)
-                WHERE id=(
-                    SELECT id FROM jobs
-                    WHERE {where_sql}
-                    ORDER BY rowid LIMIT 1
-                )
-                RETURNING *
-            ''', (self.worker_id, expires, now, now))
-
-            row = cursor.fetchone()
-
-            if not row:
+                filters += " AND coalesce(json_extract(j.document,'$.task_type'),'ocr')=?"
+                args.append(task_type)
+            row = conn.execute(f'''SELECT j.* FROM jobs j LEFT JOIN camera_schedule c ON j.camera_id=c.camera_id
+                WHERE {filters} ORDER BY coalesce(c.last_claimed,0),j.priority,j.rowid LIMIT 1''', args).fetchone()
+            if row is None:
                 return None
-
-            task = json.loads(row['document'])
-            task.update({
-                'job_id': row['id'],
-                'status': row['status'],
-                'lease_holder': row['lease_holder'],
-                'lease_expires_at': row['lease_expires_at'],
-                'retry_count': row['retry_count']
-            })
-
-            return task
-
-    def renew_lease(self, job_id: str) -> bool:
-        """
-        Renew task lease (call from long-running tasks).
-
-        Args:
-            job_id: Task ID
-
-        Returns:
-            True if renewed, False if no longer owns the lease
-        """
-        expires = (datetime.now(timezone.utc) + timedelta(seconds=self.lease_seconds)).isoformat()
-
-        with self.db.transaction() as conn:
-            cursor = conn.execute('''
-                UPDATE jobs SET lease_expires_at=?
-                WHERE id=? AND lease_holder=? AND status='running'
-            ''', (expires, job_id, self.worker_id))
-
-            return cursor.rowcount > 0
-
-    def complete_task(self, job_id: str, result: dict):
-        """
-        Mark task as completed.
-
-        Args:
-            job_id: Task ID
-            result: Result data to merge into task document
-        """
-        with self.db.transaction() as conn:
-            row = conn.execute(
-                'SELECT document FROM jobs WHERE id=?', (job_id,)
-            ).fetchone()
-
-            if not row:
-                return
-
+            token = self.worker_id + ':' + uuid.uuid4().hex
+            generation = row['lease_generation'] + 1
             doc = json.loads(row['document'])
-            doc.update(result)
-            doc['finished_at'] = datetime.now(timezone.utc).isoformat()
+            doc.update(job_id=row['id'],status='running',claimed_at=utc(now),lease_holder=token,
+                       lease_generation=generation,lease_expires_at=utc(now+self.lease_seconds),
+                       attempt_count=row['attempt_count']+1,retry_count=row['retry_count'])
+            conn.execute('''UPDATE jobs SET status='running',lease_holder=?,lease_generation=?,lease_expires_at=?,
+                attempt_count=attempt_count+1,document=? WHERE id=?''',
+                (token,generation,doc['lease_expires_at'],json.dumps(doc),row['id']))
+            conn.execute('INSERT OR REPLACE INTO camera_schedule VALUES(?,?)', (row['camera_id'] or 'unknown',now))
+            self.claims[row['id']] = token
+            return doc
 
-            conn.execute('''
-                UPDATE jobs SET
-                    status='completed',
-                    lease_holder=NULL,
-                    lease_expires_at=NULL,
-                    document=?
-                WHERE id=? AND lease_holder=?
-            ''', (json.dumps(doc), job_id, self.worker_id))
-
-    def fail_task(self, job_id: str, error: str, retry: bool = True):
-        """
-        Mark task as failed and optionally retry.
-
-        Args:
-            job_id: Task ID
-            error: Error message
-            retry: Whether to retry (subject to max_retries)
-        """
-        with self.db.transaction('IMMEDIATE') as conn:
-            row = conn.execute(
-                'SELECT document, retry_count, max_retries FROM jobs WHERE id=?',
-                (job_id,)
-            ).fetchone()
-
-            if not row:
-                return
-
+    def _expire(self, conn, now):
+        rows = conn.execute("SELECT * FROM jobs WHERE status='running' AND (lease_expires_at IS NULL OR lease_expires_at<=?)", (utc(now),)).fetchall()
+        for row in rows:
+            terminal = row['attempt_count'] > row['max_retries']
             doc = json.loads(row['document'])
-            retry_count = row['retry_count']
-            max_retries = row['max_retries']
+            history = doc.setdefault('failure_history', [])
+            history.append({'error':'lease_expired','failed_at':utc(now),'attempt':row['attempt_count']})
+            state = 'failed' if terminal else 'queued'
+            doc.update(status=state,phase='dead_letter' if terminal else 'lease_recovery',last_error='lease_expired')
+            if terminal:
+                doc['finished_at'] = utc(now)
+            conn.execute('''UPDATE jobs SET status=?,document=?,lease_holder=NULL,lease_expires_at=NULL,
+                retry_count=?,next_attempt_at=? WHERE id=?''',
+                (state,json.dumps(doc),max(0,row['attempt_count']),now,row['id']))
+        return len(rows)
 
-            # Record failure
-            failure_record = {
-                'error': error,
-                'failed_at': datetime.now(timezone.utc).isoformat(),
-                'worker_id': self.worker_id,
-                'attempt': retry_count + 1
-            }
-
-            failures = doc.get('failure_history', [])
-            failures.append(failure_record)
-            doc['failure_history'] = failures
-            doc['last_error'] = error
-
-            # Determine if should retry
-            should_retry = retry and retry_count < max_retries
-
-            if should_retry:
-                # Calculate backoff with jitter
-                backoff = self.base_backoff_seconds * (2 ** retry_count)
-                jitter = backoff * 0.2 * (2 * (hash(job_id) % 100) / 100 - 1)
-                retry_after = backoff + jitter
-
-                retry_at = datetime.now(timezone.utc) + timedelta(seconds=retry_after)
-
-                conn.execute('''
-                    UPDATE jobs SET
-                        status='queued',
-                        lease_holder=NULL,
-                        lease_expires_at=NULL,
-                        retry_count=retry_count+1,
-                        document=?
-                    WHERE id=?
-                ''', (json.dumps(doc), job_id))
-
-            else:
-                # Move to failed (dead letter)
-                doc['finished_at'] = datetime.now(timezone.utc).isoformat()
-
-                conn.execute('''
-                    UPDATE jobs SET
-                        status='failed',
-                        lease_holder=NULL,
-                        lease_expires_at=NULL,
-                        document=?
-                    WHERE id=?
-                ''', (json.dumps(doc), job_id))
-
-    def cancel_task(self, job_id: str):
-        """Cancel a task (can only cancel queued or running tasks owned by this worker)."""
-        with self.db.transaction() as conn:
-            conn.execute('''
-                UPDATE jobs SET
-                    status='cancelled',
-                    lease_holder=NULL,
-                    lease_expires_at=NULL
-                WHERE id=? AND (status='queued' OR (status='running' AND lease_holder=?))
-            ''', (job_id, self.worker_id))
-
-    def recover_expired_leases(self) -> int:
-        """
-        Recover tasks with expired leases (call periodically).
-
-        Returns:
-            Number of tasks recovered
-        """
+    def recover_expired_leases(self):
         with self.db.transaction('IMMEDIATE') as conn:
-            now = datetime.now(timezone.utc).isoformat()
+            return self._expire(conn,time.time())
 
-            cursor = conn.execute('''
-                UPDATE jobs SET
-                    status='queued',
-                    lease_holder=NULL,
-                    lease_expires_at=NULL
-                WHERE status='running' AND lease_expires_at < ?
-            ''', (now,))
+    def _owned(self, conn, job_id, token=None):
+        token = token or self.claims.get(job_id)
+        row = conn.execute("SELECT * FROM jobs WHERE id=? AND status='running' AND lease_holder=? AND lease_expires_at>?",
+                           (job_id,token,utc())).fetchone()
+        if row is None:
+            raise LeaseLost(job_id)
+        return row
 
-            return cursor.rowcount
+    def renew_lease(self, job_id, lease_holder=None):
+        try:
+            with self.db.transaction('IMMEDIATE') as conn:
+                self._owned(conn,job_id,lease_holder)
+                conn.execute('UPDATE jobs SET lease_expires_at=? WHERE id=?', (utc(time.time()+self.lease_seconds),job_id))
+            return True
+        except LeaseLost:
+            return False
 
-    def get_queue_stats(self) -> dict:
-        """Get queue statistics."""
+    def publish(self, document, *, refresh=None):
+        job_id = document['job_id']
+        with self.db.transaction('IMMEDIATE') as conn:
+            self._owned(conn,job_id,document.get('lease_holder'))
+            state = document['status']
+            terminal = state in {'completed','failed','cancelled','interrupted'}
+            conn.execute('UPDATE jobs SET status=?,document=? WHERE id=?', (state,json.dumps(document),job_id))
+            if terminal:
+                conn.execute('UPDATE jobs SET lease_holder=NULL,lease_expires_at=NULL WHERE id=?',(job_id,))
+            if refresh:
+                refresh(conn)
+        if terminal:self.claims.pop(job_id,None)
+        return document
+
+    def complete_task(self, job_id, result):
         with self.db.connection() as conn:
-            stats = {}
+            row = self._owned(conn,job_id)
+            doc = json.loads(row['document'])
+        doc.update(result,status='completed',finished_at=utc())
+        return self.publish(doc)
 
-            for status in ['queued', 'running', 'completed', 'failed', 'interrupted']:
-                count = conn.execute(
-                    'SELECT COUNT(*) FROM jobs WHERE status=?', (status,)
-                ).fetchone()[0]
-                stats[status] = count
+    def fail_task(self, job_id, error, retry=True, *, document=None, refresh=None):
+        with self.db.transaction('IMMEDIATE') as conn:
+            row = self._owned(conn,job_id,document.get('lease_holder') if document else None)
+            doc = json.loads(row['document'])
+            if document:doc.update(document)
+            now = time.time()
+            doc.setdefault('failure_history',[]).append({'error':error,'failed_at':utc(now),'attempt':row['attempt_count']})
+            again = retry and row['attempt_count'] <= row['max_retries']
+            state = 'queued' if again else 'failed'
+            doc.update(status=state,last_error=error,phase='retry_wait' if again else 'dead_letter')
+            if not again:
+                doc['finished_at'] = utc(now)
+            delay = min(300,self.base_backoff_seconds*2**max(0,row['attempt_count']-1))*random.uniform(.8,1.2)
+            conn.execute('''UPDATE jobs SET status=?,document=?,retry_count=?,next_attempt_at=?,
+                lease_holder=NULL,lease_expires_at=NULL WHERE id=?''',
+                (state,json.dumps(doc),row['attempt_count'],now+delay if again else 0,job_id))
+            if refresh:refresh(conn)
+        self.claims.pop(job_id,None)
 
-            # Active workers
-            now = datetime.now(timezone.utc).isoformat()
-            active_workers = conn.execute('''
-                SELECT COUNT(DISTINCT lease_holder) FROM jobs
-                WHERE status='running' AND lease_expires_at > ?
-            ''', (now,)).fetchone()[0]
+    def cancel_task(self, job_id):
+        with self.db.transaction('IMMEDIATE') as conn:
+            row = conn.execute('SELECT * FROM jobs WHERE id=?',(job_id,)).fetchone()
+            if not row:
+                return
+            if row['status']=='running':
+                self._owned(conn,job_id)
+            elif row['status']!='queued':
+                return
+            doc=json.loads(row['document']);doc.update(status='cancelled',finished_at=utc())
+            conn.execute("UPDATE jobs SET status='cancelled',document=?,lease_holder=NULL,lease_expires_at=NULL WHERE id=?",(json.dumps(doc),job_id))
 
-            stats['active_workers'] = active_workers
+    def replay(self, job_id, actor, reason):
+        if not actor or not reason.strip():
+            raise ValueError('Replay requires an authorized actor and reason')
+        with self.db.transaction('IMMEDIATE') as conn:
+            row=conn.execute("SELECT * FROM jobs WHERE id=? AND status='failed'",(job_id,)).fetchone()
+            if not row:
+                raise ValueError('Only a failed task can be replayed')
+            doc=json.loads(row['document'])
+            if doc.get('measurement_id'):
+                measurement=conn.execute('SELECT status FROM photo_measurements WHERE id=?',(doc['measurement_id'],)).fetchone()
+                if measurement and measurement[0] in {'confirmed','rejected'}:
+                    raise ValueError('A finalized measurement cannot be replayed')
+            doc.setdefault('replays',[]).append({'actor':actor,'reason':reason,'at':utc(),'previous_document':{k:v for k,v in doc.items() if k!='replays'}})
+            doc.update(status='queued',phase='replayed')
+            conn.execute("UPDATE jobs SET status='queued',document=?,attempt_count=0,retry_count=0,next_attempt_at=0 WHERE id=?",(json.dumps(doc),job_id))
+            return doc
 
-            # Retry stats
-            retry_count = conn.execute('''
-                SELECT COUNT(*) FROM jobs
-                WHERE retry_count > 0 AND status IN ('queued', 'running')
-            ''').fetchone()[0]
+    def get_queue_stats(self):
+        with self.db.connection() as conn:
+            stats={s:conn.execute('SELECT count(*) FROM jobs WHERE status=?',(s,)).fetchone()[0]
+                   for s in ('queued','running','completed','failed','cancelled','interrupted')}
+            stats['active_workers']=conn.execute("SELECT count(DISTINCT lease_holder) FROM jobs WHERE status='running' AND lease_expires_at>?",(utc(),)).fetchone()[0]
+            stats['retry_queue']=conn.execute("SELECT count(*) FROM jobs WHERE status='queued' AND retry_count>0").fetchone()[0]
+        return stats
 
-            stats['retry_queue'] = retry_count
-
-            return stats
-
-    def cleanup_completed_tasks(self, before: datetime, limit: int = 1000) -> int:
-        """
-        Remove old completed tasks (for maintenance).
-
-        Args:
-            before: Remove tasks completed before this time
-            limit: Maximum number to remove in one call
-
-        Returns:
-            Number of tasks removed
-        """
-        with self.db.transaction() as conn:
-            cursor = conn.execute('''
-                DELETE FROM jobs
-                WHERE id IN (
-                    SELECT id FROM jobs
-                    WHERE status='completed'
-                      AND json_extract(document,'$.finished_at') < ?
-                    LIMIT ?
-                )
-            ''', (before.isoformat(), limit))
-
-            return cursor.rowcount
+    def cleanup_completed_tasks(self, before, limit=1000):
+        raise ValueError('Business task receipts are retained; deletion requires a separate retention workflow')

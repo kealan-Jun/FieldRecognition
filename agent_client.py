@@ -12,20 +12,24 @@ class FieldToolsError(RuntimeError):
 
 
 class FieldTools:
-    def __init__(self, base_url='http://127.0.0.1:8188', timeout=20):
+    def __init__(self, base_url='http://127.0.0.1:8188', timeout=20, *, session_token=None, camera_id=None):
         self.base_url = base_url.rstrip('/')
         self.timeout = timeout
         self.opener = build_opener(ProxyHandler({}))
+        self.headers={'Content-Type':'application/json'}
+        if session_token:self.headers['Authorization']='Bearer '+session_token
+        if camera_id:self.headers['X-Camera-Id']=camera_id
 
     def _request(self, path, arguments=None):
         data = None if arguments is None else json.dumps(arguments).encode()
         request = Request(self.base_url + path, data=data,
-                          headers={'Content-Type': 'application/json'})
+                          headers=self.headers)
         try:
             with self.opener.open(request, timeout=self.timeout) as response:
                 return json.load(response)
         except HTTPError as exc:
-            detail = json.loads(exc.read()).get('detail', 'Request failed')
+            payload=json.loads(exc.read())
+            detail = payload.get('detail') or payload.get('error',{}).get('message','Request failed')
             raise FieldToolsError(exc.code, detail) from None
 
     def definitions(self):

@@ -270,7 +270,10 @@ class VideoOcr:
 
 
 def install(core):
-    reader = VideoOcr(core)
-    core['app'].get('/api/video-ocr')(reader.snapshot)
-    core['app'].put('/api/video-ocr')(reader.configure)
+    from runtime_rpc import camera_component
+    reader = camera_component('video', os.environ.get('FIELD_CAMERA_ID')) or VideoOcr(core)
+    @core['app'].get('/api/video-ocr')
+    def status():return reader.snapshot()
+    @core['app'].put('/api/video-ocr')
+    def configure(body: VideoSettings):return reader.configure(body)
     return reader

@@ -40,7 +40,7 @@ class ProductionCore:
         self.auth_service = AuthService(self.db) if config.auth_enabled else None
         self.camera_registry = CameraRegistry(self.db)
         self.instrument_config = InstrumentConfig(self.db)
-        self.measurement_state = MeasurementStateMachine(self.db)
+        self.measurement_state = None  # Installed with the evidence-backed application workflow.
 
         # Task queue (will be initialized per worker)
         self.task_queue_factory = lambda worker_id: TaskQueue(self.db, worker_id)
@@ -67,6 +67,7 @@ class ProductionCore:
             core_dict: Dictionary with app core objects (ocr_state, archive_store, etc.)
         """
         self.monitoring = MonitoringService(self.db, core_dict)
+        self.measurement_state = MeasurementStateMachine(core_dict)
 
     def create_initial_admin_if_needed(self, username: str = None,
                                       display_name: str = None,
@@ -130,7 +131,7 @@ class ProductionCore:
             ).fetchone()
 
             if row:
-                return dict(row)
+                return {key:row[key] for key in ('id','username','display_name','role','created_at','disabled')}
 
         # Create test user
         import uuid

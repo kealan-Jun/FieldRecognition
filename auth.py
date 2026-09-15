@@ -36,13 +36,25 @@ class Session(BaseModel):
 
 
 def hash_password(password: str) -> str:
-    """Hash password using SHA256 (simple version, use bcrypt in production)."""
-    return hashlib.sha256(password.encode()).hexdigest()
+    salt = secrets.token_bytes(16)
+    derived = hashlib.scrypt(password.encode(), salt=salt, n=16384, r=8, p=1)
+    return 'scrypt$16384$' + salt.hex() + '$' + derived.hex()
 
 
 def verify_password(password: str, password_hash: str) -> bool:
-    """Verify password against hash."""
-    return hash_password(password) == password_hash
+    if not password_hash:
+        return False
+    if password_hash.startswith('scrypt$'):
+        try:
+            _, n, salt, expected = password_hash.split('$')
+            if n != '16384':
+                return False
+            actual = hashlib.scrypt(password.encode(),salt=bytes.fromhex(salt),n=16384,r=8,p=1).hex()
+        except (ValueError, TypeError):
+            return False
+        return secrets.compare_digest(actual, expected)
+    # Successful legacy logins upgrade the previous unsalted digest immediately.
+    return secrets.compare_digest(hashlib.sha256(password.encode()).hexdigest(), password_hash)
 
 
 class AuthService:
@@ -111,7 +123,7 @@ class AuthService:
         with self.db.transaction('IMMEDIATE') as conn:
             # Verify creator is admin
             creator = conn.execute(
-                'SELECT role FROM users WHERE id=?', (created_by,)
+                'SELECT role FROM users WHERE id=? AND disabled=0', (created_by,)
             ).fetchone()
             if not creator or creator['role'] != 'admin':
                 raise HTTPException(403, '只有管理员可以创建用户')
@@ -174,6 +186,9 @@ class AuthService:
             if not verify_password(password, user['password_hash']):
                 raise HTTPException(401, '用户名或密码错误')
 
+            if not user['password_hash'].startswith('scrypt$'):
+                conn.execute('UPDATE users SET password_hash=? WHERE id=?', (hash_password(password), user['id']))
+
             # Create session
             session_id = secrets.token_urlsafe(32)
             now = datetime.now(timezone.utc)
@@ -181,7 +196,7 @@ class AuthService:
 
             conn.execute(
                 'INSERT INTO sessions VALUES(?,?,?,?,?,?)',
-                (session_id, user['id'], now.isoformat(),
+                (hashlib.sha256(session_id.encode()).hexdigest(), user['id'], now.isoformat(),
                  expires.isoformat(), now.isoformat(), None)
             )
 
@@ -211,12 +226,12 @@ class AuthService:
         if not session_id:
             raise HTTPException(401, '缺少认证令牌')
 
-        with self.db.transaction() as conn:
+        with self.db.connection() as conn:
             row = conn.execute('''
-                SELECT u.* FROM users u
+                SELECT u.*,s.last_active_at AS session_last_active_at FROM users u
                 JOIN sessions s ON s.user_id = u.id
                 WHERE s.id = ? AND s.expires_at > ?
-            ''', (session_id, datetime.now(timezone.utc).isoformat())).fetchone()
+            ''', (hashlib.sha256(session_id.encode()).hexdigest(), datetime.now(timezone.utc).isoformat())).fetchone()
 
             if not row:
                 raise HTTPException(401, '会话已过期或无效')
@@ -226,18 +241,19 @@ class AuthService:
             if user['disabled']:
                 raise HTTPException(403, '账号已禁用')
 
-            # Update last active time
-            conn.execute(
-                'UPDATE sessions SET last_active_at=? WHERE id=?',
-                (datetime.now(timezone.utc).isoformat(), session_id)
-            )
+            # Polling/stream reads must not upgrade a deferred read transaction
+            # into a write (SQLITE_BUSY_SNAPSHOT with concurrent camera workers).
+            now=datetime.now(timezone.utc)
+            if (now-datetime.fromisoformat(user['session_last_active_at'])).total_seconds()>=60:
+                conn.execute('UPDATE sessions SET last_active_at=? WHERE id=?',
+                    (now.isoformat(),hashlib.sha256(session_id.encode()).hexdigest()))
 
             return User(**{k: user[k] for k in User.model_fields})
 
     def logout(self, session_id: str):
         """Delete session (logout)."""
         with self.db.transaction() as conn:
-            conn.execute('DELETE FROM sessions WHERE id=?', (session_id,))
+            conn.execute('DELETE FROM sessions WHERE id=?', (hashlib.sha256(session_id.encode()).hexdigest(),))
 
     def cleanup_expired_sessions(self):
         """Remove expired sessions (call periodically)."""
@@ -265,7 +281,7 @@ class AuthService:
         with self.db.transaction('IMMEDIATE') as conn:
             # Verify registrar is admin
             registrar = conn.execute(
-                'SELECT role FROM users WHERE id=?', (registered_by,)
+                'SELECT role FROM users WHERE id=? AND disabled=0', (registered_by,)
             ).fetchone()
             if not registrar or registrar['role'] != 'admin':
                 raise HTTPException(403, '只有管理员可以注册设备')
@@ -274,7 +290,7 @@ class AuthService:
             now = datetime.now(timezone.utc).isoformat()
 
             conn.execute(
-                'INSERT OR REPLACE INTO device_credentials VALUES(?,?,?,?,?)',
+                'INSERT INTO device_credentials VALUES(?,?,?,?,?) ON CONFLICT(device_id) DO UPDATE SET credential_hash=excluded.credential_hash,disabled=0',
                 (device_id, device_type, credential_hash, now, 0)
             )
 

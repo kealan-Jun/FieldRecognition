@@ -36,24 +36,24 @@ class InstrumentConfig:
         '温度': MeasurementDefinition(
             name='温度',
             unit='°C',
-            range_min=-50,
-            range_max=200,
+            range_min=None,
+            range_max=None,
             precision=0.1,
             display_format='.1f'
         ),
         '转速': MeasurementDefinition(
             name='转速',
             unit='rpm',
-            range_min=0,
-            range_max=10000,
+            range_min=None,
+            range_max=None,
             precision=1,
             display_format='.0f'
         ),
         '质量': MeasurementDefinition(
             name='质量',
             unit='g',
-            range_min=0,
-            range_max=5000,
+            range_min=None,
+            range_max=None,
             precision=0.001,
             display_format='.3f'
         )

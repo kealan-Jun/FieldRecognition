@@ -269,8 +269,8 @@ def test_archive_one_group_and_originals_and_no_three_production_reading_folders
         row['receipt_path'] = app.archive_store.publish(row)
     views = build_views(rows)
     catalog = json.loads(views['Browse/Catalog.json'])['categories']
-    assert len(catalog['ExperimentRecords']) == 1 and len(catalog['PhotoDrafts']) == 1
-    assert catalog['InstrumentReadings'] == []
+    assert len(catalog['ExperimentRecords']) == 1 and len(catalog['MeasurementDrafts']) == 1
+    assert catalog['PanelReadings'] == []
     receipt = json.loads((tmp_path / 'FieldRecognitionArchive' / rows[-2]['receipt_path']).read_bytes())
     if receipt['entity'] != 'experiment_records':
         receipt = next(json.loads((tmp_path / 'FieldRecognitionArchive' / r['receipt_path']).read_bytes())

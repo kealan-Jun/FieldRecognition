@@ -323,7 +323,7 @@ function renderWorkbenches(){
 function renderHistory(){
   if(!state)return;
   const archive=state.archive||{};
-  $('#archiveStatus').textContent=archive.enabled?`NAS 留存：${archive.status==='ready'?'已连接':archive.status==='retrying'?'等待重试，记录保留在本机':'正在连接'} · 已归档 ${archive.archived_receipts||0} 个版本 · 待同步 ${archive.pending_receipts||0} 个版本${archive.navigation_pending?' · 中文目录待同步':''}`:'NAS 留存未启用，记录保存在本机。';
+  $('#archiveStatus').textContent=archive.enabled?`NAS 留存：${archive.status==='ready'?'已连接':archive.status==='retrying'?'等待重试，记录保留在本机':'正在连接'} · 已归档 ${archive.archived_receipts||0} 个版本 · 待同步 ${archive.pending_receipts||0} 个版本${archive.navigation_pending?' · 分类索引待同步':''}`:'NAS 留存未启用，记录保存在本机。';
   $('#archiveStatus').title=archive.root||'';
   const integrity=archive.integrity||{},check=integrity.last_report;
   $('#integrityStatus').textContent=integrity.status==='running'?'完整性巡检进行中':check?`最近巡检：${{completed:'校验通过',findings:'发现异常',unavailable:'存储暂不可用',interrupted:'检查中断'}[check.status]||check.status} · ${stamp(check.finished_at)} · ${check.issue_count} 项异常`:'等待首次完整性巡检';

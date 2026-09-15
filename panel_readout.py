@@ -19,6 +19,15 @@ def save(core, document):
         if document['resume_pending']:
             document['status'] = 'interrupted'
     update_timing(document)
+    if document.get('lease_holder'):
+        from photo_measurements import refresh
+        callback=(lambda conn: refresh(core,conn,document['measurement_id'])) if document.get('measurement_id') else None
+        if document['status']=='failed':
+            transient=document.get('error') in {'local_ocr_timeout','TimeoutError','OSError','ConnectionError','worker_unavailable'}
+            core['task_queue'].fail_task(document['job_id'],document.get('error','ocr_failed'),retry=transient,document=document,refresh=callback)
+        else:
+            core['task_queue'].publish(document, refresh=callback)
+        return
     with core['db']() as conn:
         conn.execute('UPDATE jobs SET status=?,document=? WHERE id=?',
                      (document['status'], json.dumps(document), document['job_id']))
@@ -174,7 +183,11 @@ def run(core, document, *, clock=time.monotonic, pause=time.sleep):
                 with core['db']() as conn:
                     conn.execute('BEGIN IMMEDIATE')
                     row = conn.execute('SELECT document FROM jobs WHERE id=?', (document['job_id'],)).fetchone()
+                    if not row:return
                     stored = json.loads(row['document'])
+                    if document.get('lease_holder') and stored.get('lease_holder') != document['lease_holder']:
+                        return  # A late attempt cannot replace a newer attempt's evidence.
+                    if stored.get('phase') in {'retry_wait','replayed'}:return
                     stored.update(local_ocr=late, local_ocr_finished_late=True)
                     update_timing(stored)
                     conn.execute('UPDATE jobs SET document=? WHERE id=?', (json.dumps(stored), document['job_id']))

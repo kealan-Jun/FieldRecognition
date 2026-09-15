@@ -37,7 +37,13 @@ class AutomaticRunner:
         with self.core['db']() as conn:
             row = conn.execute('SELECT document FROM automation_settings WHERE camera=?', (self.target(),)).fetchone()
         if row:
-            return json.loads(row['document'])
+            settings = json.loads(row['document'])
+            if self.core.get('RUNTIME_ENABLED'):
+                with self.core['db']() as conn:
+                    owner=conn.execute('SELECT u.id,u.display_name FROM camera_users c JOIN users u ON u.id=c.user_id WHERE c.camera_id=? AND u.disabled=0',(self.target(),)).fetchone()
+                if not owner:return settings | {'enabled':False,'operator':'','pause_reason':'unassigned_camera'}
+                settings.update(operator=owner['display_name'],wearer_id=owner['id'])
+            return settings
         return {'enabled': os.environ.get('FIELD_AUTO_RUN_ENABLED', '0').lower() in {'1', 'true', 'yes'},
                 'operator': '', 'registered_at': None, 'pause_reason': None}
 
@@ -170,7 +176,8 @@ class AutomaticRunner:
 
 
 def install(core):
-    runner = AutomaticRunner(core)
+    from runtime_rpc import camera_component
+    runner = camera_component('automation', os.environ.get('FIELD_CAMERA_ID')) or AutomaticRunner(core)
 
     @core['app'].get('/api/automation')
     def state():

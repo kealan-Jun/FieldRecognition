@@ -66,7 +66,9 @@ def test_bound_camera_watch_waits_for_stable_files_and_survives_restart(app_clie
     restarted.step()
     assert len(queued) == 2
     client.post('/api/bindings/' + binding['binding_id'] + '/end')
-    photo('TestCamera', stamp, '_002')
+    # This is a new capture after ending the binding, not a late-arriving photo
+    # from the earlier capture second (which must retain its historical owner).
+    photo('TestCamera', datetime.now(timezone(timedelta(hours=8))) + timedelta(seconds=2), '_002')
     clock[0] = 10
     restarted.step()
     assert len(queued) == 2 and restarted.snapshot()['status'] == 'watching'

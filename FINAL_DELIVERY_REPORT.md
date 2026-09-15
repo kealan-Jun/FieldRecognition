@@ -1,5 +1,7 @@
 # FieldRecognition 生产工程改造 - 最终交付报告
 
+> 历史阶段记录：本页不作为当前部署或验收依据。旧的可选集成、独立状态机、归档删除/恢复示例已被替换；请使用 [当前托管运行说明](docs/ProductionRuntime.md)。历史文字保留供追溯。
+
 ## 交付概况
 
 **项目**: FieldRecognition 生产工程改造  

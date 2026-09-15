@@ -106,7 +106,7 @@ def install(core):
         conn.execute('CREATE TABLE IF NOT EXISTS imported_photos(camera_id TEXT, source_capture_id TEXT, '
                      'sha256 TEXT NOT NULL, capture_id TEXT NOT NULL, PRIMARY KEY(camera_id,source_capture_id))')
 
-    def read_saved_panel(body, *, trigger='explicit_request', observation=None):
+    def _read_saved_panel(body, *, trigger='explicit_request', observation=None):
         with core['ocr_submit_lock']:
             with core['db']() as conn:
                 row = conn.execute('SELECT document FROM bindings WHERE id=?', (str(body.binding_id),)).fetchone() if body.binding_id else None
@@ -153,7 +153,7 @@ def install(core):
             if capture is None:
                 # The caller resolves NAS access. source_ref is opaque provenance, never
                 # interpreted as a filesystem path or a URL to fetch by this service.
-                capture = core['scan_image'](raw, 'agent_saved_photo', photo.camera_id)
+                capture = core['scan_image'](raw, 'agent_saved_photo', photo.camera_id, persist=False)
                 capture['external_photo'] = external
                 capture['photo_observation'] = dict(observation or {}) | {'imported_at': core['now'](),
                     'read_started_at': read_started, 'photo_read_at': photo_read_at,
@@ -173,7 +173,9 @@ def install(core):
                 else:
                     capture.update(operator=None, operator_basis='not_recorded', operator_registration=None)
                 with core['db']() as conn:
-                    conn.execute('UPDATE scans SET document=? WHERE id=?', (json.dumps(capture), capture['capture_id']))
+                    # Identity and dedup mapping commit together. A crash before this
+                    # transaction cannot create an extra scan/receipt on retransmission.
+                    conn.execute('INSERT INTO scans(id,document) VALUES(?,?)', (capture['capture_id'], json.dumps(capture)))
                     conn.execute('INSERT INTO imported_photos VALUES(?,?,?,?)',
                                  (photo.camera_id, photo.capture_id, digest, capture['capture_id']))
             requested_crop = body.crop if body.crop is not None else [0, 0, capture['width'], capture['height']]
@@ -196,6 +198,18 @@ def install(core):
                     raise
                 return core['enqueue_ocr'](core['OcrRequest'](capture_id=capture['capture_id'], crop=body.crop,
                                          measurement=body.measurement), trigger=trigger)
+
+    def read_saved_panel(body, *, trigger='explicit_request', observation=None):
+        from worker_support import process_mutex
+        from security import require_camera
+        target=body.photo.camera_id if body.photo else core['receiver_camera'].target if core['receiver_camera'] else os.environ.get('FIELD_CAMERA_ID')
+        if body.binding_id:
+            with core['db']() as conn:
+                row=conn.execute('SELECT camera FROM bindings WHERE id=?',(str(body.binding_id),)).fetchone()
+            if row:target=row[0]
+        require_camera(target)
+        with process_mutex(core['DATA'],'photo-import:'+str(target)):
+            return _read_saved_panel(body,trigger=trigger,observation=observation)
 
     core['SavedPhotoRequest'] = SavedPhotoRequest
     core['read_saved_panel'] = read_saved_panel

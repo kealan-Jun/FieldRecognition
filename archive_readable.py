@@ -1,112 +1,106 @@
-"""Chinese business navigation; references immutable evidence without copying photos."""
-import hashlib
+"""A single canonical record plus PascalCase business indexes; no copied evidence."""
 import html
 import json
 import posixpath
-import re
-from pathlib import PurePosixPath
+from collections import OrderedDict
 
-ROOT = '01_业务数据'
-ENTRY = '00_归档导航.html'
+ROOT = 'Browse'
+ENTRY = 'Readme.html'
 FOLDERS = {
-    'Bindings': ('01_绑定记录', '谁在什么时间绑定了哪台仪器或哪个场景'),
-    'Handoffs': ('02_设备交接', '原使用人交出、指定接收人接收的时间和凭证'),
-    'InstrumentReadings': ('03_设备面板读数', '按仪器查看每项指标、数值、单位和照片'),
-    'VoicePhotos': ('04_语音拍照读数', '从一次语音拍照文件追溯到识别结果'),
-    'PhotoDrafts': ('05_测量草稿', '连拍合并后的字段、冲突及校正历史，尚未正式提交'),
-    'ExperimentRecords': ('06_已确认实验记录', '确认后写入并读回的正式测量，一次测量一条记录'),
-    'WorkbenchReadings': ('07_实验台总览', '同一实验台上各台仪器的读数，逐项注明归属'),
-    'Photos': ('08_原始材料', '原始照片及扫码凭证；保留材料不等于确认仪器归属'),
+    'Bindings': ('BindingEvents', '绑定记录', '谁在什么时间绑定了哪台仪器或哪个场景'),
+    'Handoffs': ('DeviceHandoffs', '设备交接', '交出人与接收人、时间及交接凭证'),
+    'InstrumentReadings': ('PanelReadings', '设备面板读数', '按仪器核对指标、数值、单位与照片'),
+    'VoicePhotos': ('VoicePhotoReadings', '语音拍照读数', '从语音拍照文件追溯同一次测量的读数'),
+    'PhotoDrafts': ('MeasurementDrafts', '测量草稿', '连拍合并后的字段、冲突与校正历史'),
+    'ExperimentRecords': ('ExperimentRecords', '已确认实验记录', '确认后写入并读回的正式测量'),
+    'WorkbenchReadings': ('WorkbenchReadings', '实验台总览', '同一实验台的仪器读数，逐项注明归属'),
+    'Photos': ('SourceMaterials', '原始材料', '照片及扫码凭证；保留材料不代表已确认归属'),
 }
 
 
-def segment(value):
-    # Human-readable on Linux/Windows, with no traversal or ambiguous sanitization.
-    raw = str(value or '未指定')
-    clean = re.sub(r'[^\w\u4e00-\u9fff-]', '_', raw).strip('_')[:48] or '未指定'
-    return clean + ('_' + hashlib.sha256(raw.encode()).hexdigest()[:8] if clean != raw else '')
+def raw_json(value):
+    return json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False).encode()
 
 
 def build_readable(records, page):
-    views, groups = {}, {key: [] for key in FOLDERS}
+    views, canonical, groups = {}, OrderedDict(), {key: [] for key in FOLDERS}
     esc = lambda value: html.escape(str(value if value is not None else '未记录'), quote=True)
-    for category, data, canonical_page in records:
+    for category, data, path in records:
+        key = (data['entity'], data['entity_id'])
+        if key not in canonical:
+            canonical[key] = {'data': dict(data), 'path': path, 'categories': [], 'readings': {}, 'measurements': {}, 'evidence':{}, 'targets':[]}
+        item = canonical[key]
+        if category=='InstrumentReadings' and data.get('target') not in item['targets']:item['targets'].append(data.get('target'))
+        item['categories'].append(FOLDERS[category][0])
+        for reading in data.get('readings', []):
+            item['readings'][json.dumps(reading, sort_keys=True, ensure_ascii=False)] = reading
+        if data.get('measurement'):
+            item['measurements'][data.get('folder_instrument_id') or 'Unassigned'] = data['measurement']
+            item['evidence'][data.get('folder_instrument_id') or 'Unassigned'] = data.get('measurement_evidence')
+        # Category-specific fields live in the index; canonical content remains complete.
+        instrument_id = data.get('folder_instrument_id')
+        group_key = (key, instrument_id)
+        if not any(e['_key'] == group_key for e in groups[category]):
+            groups[category].append({'_key': group_key, 'entity': key[0], 'entity_id': key[1],
+                'local_time': data['local_time'], 'operator': data.get('operator'),
+                'camera_id': data.get('camera_id'), 'target': data.get('target'),
+                'instrument_id': instrument_id, 'page': path,
+                'record': posixpath.join(posixpath.dirname(path), 'Record.json')})
+    for item in canonical.values():
+        data = item['data']
+        for key in ('measurement', 'measurement_evidence', 'folder_instrument_id'):
+            data.pop(key, None)
+        data.update(schema='field-recognition-record/2', derived_view=True,
+            categories=list(dict.fromkeys(item['categories'])), readings=list(item['readings'].values()))
+        if item['measurements']:
+            data['instrument_measurements'] = item['measurements']
+            data['instrument_measurement_evidence'] = item['evidence']
+        if item['targets']:data['target']='、'.join(t for t in item['targets'] if t)
+        path = item['path']; directory = posixpath.dirname(path)
+        link = lambda target: esc(posixpath.relpath(target, directory))
+        views[directory + '/Record.json'] = raw_json(data)
         draft = data.get('measurement_draft') or {}
-        # The latest draft view becomes a confirmed record, not a second pending item.
-        if category == 'PhotoDrafts' and draft.get('status') in {'confirmed', 'rejected'}:
-            continue
-        if data['entity'] == 'jobs' and not data.get('readings') and not data.get('measurement_records'):
-            continue  # Empty processing receipts remain in the audit index.
-        sources = draft.get('sources', [])
-        operator = data.get('operator') or '、'.join(dict.fromkeys(s['operator'] for s in sources if s.get('operator'))) or '未登记人员'
-        target = data.get('target') or '、'.join(dict.fromkeys((f.get('instrument') or {}).get('name', '归属待确认') for f in draft.get('fields', []))) or '归属待确认'
-        clock = data['local_time']
-        row_id = segment(data['entity'] + '_' + data['entity_id'])
-        directory = PurePosixPath(ROOT, FOLDERS[category][0], segment(clock[:10]), segment(operator),
-                                 segment(target), segment(clock[11:].replace(':', '-')) + '_' + row_id)
-        link = lambda path: esc(posixpath.relpath(path, str(directory)))
-        fields = []
-        if draft:
-            for f in draft.get('fields', []):
-                fields.append({'instrument': (f.get('instrument') or {}).get('name'), 'instrument_id': (f.get('instrument') or {}).get('id'),
-                    'name': f.get('name'), 'value': f.get('value'), 'unit': f.get('unit'),
-                    'original_text': [r.get('raw_text') for r in f.get('original_candidates', [])],
-                    'corrected': f.get('corrected', False), 'issues': f.get('recognition_issues', [])})
-        else:
-            for r in data.get('readings', []):
-                fields.append({'instrument': (r.get('instrument') or {}).get('name'), 'instrument_id': (r.get('instrument') or {}).get('id'),
-                    'name': r.get('measurement_name'), 'value': r.get('value'), 'unit': r.get('unit'),
-                    'original_text': [r.get('text')], 'corrected': False, 'issues': [r['quality_issue']] if r.get('quality_issue') else []})
-        scope = data.get('record_scope') or ('legacy_test_only' if data['entity'] == 'jobs' else 'evidence')
-        scope_text = {'test_only': '测试识别结果', 'legacy_test_only': '历史测试结果', 'draft': '草稿，尚未提交',
-                      'production_confirmed': '已确认实验记录', 'evidence': '原始事实与凭证'}.get(scope, scope)
-        summary = {'schema': 'field-recognition-readable/1', 'entity': data['entity'], 'entity_id': data['entity_id'],
-            'time_beijing': clock, 'operator': operator, 'camera_id': data.get('camera_id'), 'target': target,
-            'record_scope': scope, 'status': data.get('status'), 'source_ref': data.get('source_ref'),
-            'values': fields, 'photos': data.get('photos', {}), 'detail_page': canonical_page,
-            'receipt_versions': data['receipt_versions'], 'derived_view': True}
-        views[str(directory / '记录.json')] = json.dumps(summary, ensure_ascii=False, indent=2).encode()
-        body = '<p><a href="' + link(ENTRY) + '">归档导航</a> · <a href="记录.json">本条记录 JSON</a> · <a href="' + link(canonical_page) + '">完整证据与修订历史</a></p>'
-        body += '<article><h2>' + esc(target) + '</h2><p>' + esc(clock) + '（北京时间） · ' + esc(operator) + ' · ' + esc(data.get('camera_id')) + '</p><p>' + esc(scope_text) + '</p>'
-        if data.get('source_ref'):
-            body += '<p>语音照片来源：' + esc(data['source_ref']) + '</p>'
-        for key, label in [('started_at', '绑定开始'), ('ended_at', '绑定结束')]:
-            if data.get(key):
-                body += '<p>' + label + '：' + esc(data[key]) + '</p>'
-        handoff = data.get('handoff')
-        if handoff:
-            body += '<p>' + esc(handoff['source_operator']) + ' → ' + esc(handoff['recipient_operator']) + '</p>'
-            for key, label in [('status', '交接状态'), ('released_at', '交出时间'), ('accepted_at', '接收时间')]:
-                body += '<p>' + label + '：' + esc(handoff.get(key)) + '</p>'
+        fields = draft.get('fields') or data.get('readings', [])
+        body = '<p><a href="' + link('Readme.html') + '">归档首页</a> · <a href="Record.json">完整记录 JSON</a></p>'
+        body += '<article><h2>' + esc(data.get('target') or '测量记录') + '</h2><p>' + esc(data['local_time']) + '（北京时间） · ' + esc(data.get('operator')) + ' · ' + esc(data.get('camera_id')) + '</p>'
+        body += '<p>状态：' + esc(data.get('status')) + ' · 用途：' + esc(data.get('record_scope')) + '</p>'
+        for key, label in [('source_ref','语音照片来源'), ('started_at','开始时间'), ('ended_at','结束时间')]:
+            if data.get(key):body += '<p>' + label + '：' + esc(data[key]) + '</p>'
         if fields:
-            body += '<table><thead><tr><th>仪器</th><th>指标</th><th>数值</th><th>单位</th><th>原始识别</th><th>校正</th></tr></thead><tbody>'
+            body += '<table><tr><th>仪器</th><th>指标</th><th>值</th><th>单位</th><th>原始识别 / 校正</th></tr>'
             for f in fields:
-                body += '<tr>' + ''.join('<td>' + esc(v) + '</td>' for v in
-                    (f['instrument'] or '归属待确认', f['name'] or '指标待确认', f['value'], f['unit'] or '未知',
-                     '、'.join(str(t) for t in f['original_text'] if t is not None), '已校正' if f['corrected'] else '未修订')) + '</tr>'
-            body += '</tbody></table>'
+                original = f.get('text') or '、'.join(str(c.get('raw_text') or '') for c in f.get('original_candidates',[]))
+                vals = [(f.get('instrument') or {}).get('name'), f.get('name') or f.get('measurement_name'), f.get('value'), f.get('unit'), str(original) + (' · 已校正' if f.get('corrected') else '')]
+                body += '<tr>' + ''.join('<td>'+esc(v)+'</td>' for v in vals) + '</tr>'
+            body += '</table>'
         if draft.get('blockers') and draft.get('status') != 'confirmed':
-            body += '<p>待处理：' + esc('；'.join(draft['blockers'])) + '</p>'
+            body += '<p>待处理：'+esc('；'.join(draft['blockers']))+'</p>'
         body += '</article>'
-        for name, photo in data.get('photos', {}).items():
-            body += '<article><a href="' + link(photo['path']) + '"><img loading="lazy" src="' + link(photo['path']) + '" alt="留存照片"></a><p>' + esc({'image':'完整照片', 'original':'原始文件', 'panel':'面板区域'}.get(name, name)) + '</p><small>SHA-256 ' + esc(photo['sha256']) + '</small></article>'
-        views[str(directory / '查看记录.html')] = page(target + ' · ' + clock, body)
-        groups[category].append({'time': clock, 'operator': operator, 'target': target,
-            'path': str(directory / '查看记录.html'), 'entity': data['entity'], 'entity_id': data['entity_id']})
-
-    body = '<p>先选业务类型，再按日期、实验员、仪器查找。日期均为北京时间。</p>'
-    body += '<article><h2>每条数据怎么看</h2><p>文件夹顺序：业务类型 → 日期 → 实验员 → 仪器或场景 → 时间与记录编号。</p><p>打开“查看记录.html”核对照片、指标、数值、单位；“记录.json”供程序读取。一次连拍只形成一份测量，内含多张原图和分开的指标。</p></article>'
-    body += '<div class="business-grid">'
-    for category, (folder, description) in FOLDERS.items():
-        entries = sorted(groups[category], key=lambda x: x['time'], reverse=True)
-        category_dir = ROOT + '/' + folder
-        listing = '<p><a href="../../' + ENTRY + '">返回归档导航</a></p><p>' + esc(description) + '</p><p>' + str(len(entries)) + ' 条业务记录</p>'
-        listing += '<label>查找日期、实验员或仪器 <input id="search" placeholder="例如 2026-09-15 徐荣炜"></label><ul id="records">'
+        seen = set()
+        for name, photo in data.get('photos',{}).items():
+            if photo['path'] in seen:continue
+            seen.add(photo['path'])
+            body += '<article><a href="'+link(photo['path'])+'"><img loading="lazy" src="'+link(photo['path'])+'" alt="原始证据"></a><p>'+esc(name)+'</p><small>SHA-256 '+esc(photo['sha256'])+'</small></article>'
+        body += '<details><summary>历史回执与修订</summary><ul>' + ''.join('<li><a href="'+link(v['receipt'])+'">版本 '+str(v['sequence'])+'</a></li>' for v in data['receipt_versions']) + '</ul></details>'
+        views[path] = page(data['local_time']+' · '+str(data.get('target') or '测量'),body)
+    catalog = {}
+    intro = '<p>从下面的业务分类进入，按日期、实验员、相机和仪器查找。每项结果都可打开原图核对。</p><div class="business-grid">'
+    for key, (folder, title, description) in FOLDERS.items():
+        entries = sorted(groups[key], key=lambda e:e['local_time'], reverse=True)
+        catalog[folder] = [{k:v for k,v in e.items() if k!='_key'} for e in entries]
+        directory = ROOT+'/'+folder
+        listing = '<p><a href="../../Readme.html">归档首页</a></p><p>'+esc(description)+'</p><p>'+str(len(entries))+' 条</p><label>筛选 <input id="search" placeholder="日期 / 实验员 / 仪器"></label><ul id="records">'
         for e in entries:
-            listing += '<li><a href="' + esc(posixpath.relpath(e['path'], category_dir)) + '">' + esc(e['time'] + ' · ' + e['operator'] + ' · ' + e['target']) + '</a></li>'
+            label = ' · '.join(str(e[k] or '未记录') for k in ('local_time','operator','camera_id','target'))
+            listing += '<li><a href="'+esc(posixpath.relpath(e['page'],directory))+'">'+esc(label)+'</a></li>'
         listing += '</ul><script>document.getElementById("search").oninput=function(){const words=this.value.trim().toLowerCase().split(/\\s+/);document.querySelectorAll("#records li").forEach(e=>e.hidden=!words.every(w=>e.textContent.toLowerCase().includes(w)));};</script>'
-        views[category_dir + '/打开目录.html'] = page(folder[3:], listing)
-        body += '<article><h2><a href="' + esc(category_dir + '/打开目录.html') + '">' + esc(folder[3:]) + '</a></h2><p>' + esc(description) + '</p><p>' + str(len(entries)) + ' 条 · ' + esc(category_dir) + '</p></article>'
-    body += '</div><details><summary>技术目录含义</summary><p>Objects：照片原件，按哈希去重；Receipts：不可覆盖的历史回执；Integrity：完整性检查；Index.json：程序索引；Browse：兼容的分类视图。</p><p>各业务分类引用同一份照片，不重复复制原件。目录是查阅视图，重传不会新增同一条测量；历史修订另有回执保留。</p><a href="Readme.html">全量版本索引</a></details>'
-    views[ENTRY] = page('现场识别 · 归档导航', body)
+        views[directory+'/Readme.html'] = page(title,listing)
+        intro += '<article><h2><a href="'+directory+'/Readme.html">'+title+'</a></h2><p>'+esc(description)+'</p><code>'+directory+'</code><p>'+str(len(entries))+' 条</p></article>'
+    intro += '</div><details><summary>数据结构与留存原则</summary><ul><li>Browse：分类索引，只保存记录引用。</li><li>Records：每个实体只有一份最新记录，含读数、单位和证据链接。</li><li>Objects：按 SHA-256 去重的照片原件。</li><li>Receipts：不可覆盖的历史版本，是溯源依据。</li><li>Integrity：完整性检查报告。</li></ul><p>一次连拍的正式测量只在 ExperimentRecords 中形成一条记录。分类交叉引用不会重复生成测量或照片。</p><a href="Audit.html">全量版本索引</a></details>'
+    views['Readme.html'] = page('现场识别归档',intro)
+    views['Browse/Catalog.json'] = raw_json({'schema':'field-recognition-folders/2','categories':catalog})
+    # Historical entry URLs remain valid, without a second copy of the navigation.
+    for alias in ('Browse/Readme.html','00_归档导航.html'):
+        target = posixpath.relpath('Readme.html', posixpath.dirname(alias) or '.')
+        views[alias] = page('归档入口','<p><a href="'+target+'">打开归档首页</a></p><meta http-equiv="refresh" content="0;url='+target+'">')
     return views

@@ -1,74 +1,69 @@
-"""Database connection management and migration system for production."""
+"""Explicit SQLite migrations and bounded, committing connection scopes."""
 import json
-import os
 import sqlite3
-import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Generator
 
 
 class Database:
-    """Thread-safe database connection manager with transaction support."""
-
-    def __init__(self, path: str | Path):
+    def __init__(self, path):
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._local = threading.local()
-        self._init_db()
+        if self.path.is_dir():
+            raise ValueError('Database path must be a file, not the data directory')
 
-    def _init_db(self):
-        """Initialize database with WAL mode and basic tables."""
+    def get_connection(self):
+        """Caller owns this connection. Prefer connection()/transaction()."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(self.path), timeout=15)
         conn.row_factory = sqlite3.Row
-        conn.execute('PRAGMA journal_mode=WAL')
         conn.execute('PRAGMA foreign_keys=ON')
-        conn.close()
-
-    def get_connection(self) -> sqlite3.Connection:
-        """Get thread-local connection."""
-        if not hasattr(self._local, 'conn') or self._local.conn is None:
-            self._local.conn = sqlite3.connect(str(self.path), timeout=15)
-            self._local.conn.row_factory = sqlite3.Row
-            self._local.conn.execute('PRAGMA foreign_keys=ON')
-        return self._local.conn
+        conn.execute('PRAGMA busy_timeout=15000')
+        return conn
 
     @contextmanager
-    def transaction(self, mode: str = 'DEFERRED') -> Generator[sqlite3.Connection, None, None]:
-        """
-        Context manager for database transactions.
-
-        Args:
-            mode: DEFERRED (default), IMMEDIATE, or EXCLUSIVE
-
-        Usage:
-            with db.transaction('IMMEDIATE') as conn:
-                conn.execute(...)
-        """
+    def connection(self):
         conn = self.get_connection()
-        conn.execute(f'BEGIN {mode}')
         try:
             yield conn
             conn.commit()
-        except Exception:
+        except BaseException:
             conn.rollback()
             raise
+        finally:
+            conn.close()
 
     @contextmanager
-    def connection(self) -> Generator[sqlite3.Connection, None, None]:
-        """Context manager for non-transactional connection (read-only queries)."""
-        conn = self.get_connection()
-        try:
+    def transaction(self, mode='DEFERRED'):
+        if mode not in {'DEFERRED', 'IMMEDIATE', 'EXCLUSIVE'}:
+            raise ValueError('Invalid transaction mode')
+        with self.connection() as conn:
+            conn.execute('BEGIN ' + mode)
             yield conn
-        finally:
-            pass  # Don't close thread-local connection
 
     def close(self):
-        """Close thread-local connection."""
-        if hasattr(self._local, 'conn') and self._local.conn:
-            self._local.conn.close()
-            self._local.conn = None
+        # Each scope closes its own connection, including connections on other threads.
+        pass
+
+    def _init_db(self):
+        with self.connection() as conn:
+            conn.execute('PRAGMA journal_mode=WAL')
+
+
+def execute_script(conn, script):
+    """Unlike sqlite3.executescript, preserve the caller's transaction."""
+    statement = ''
+    for line in script.splitlines(True):
+        # Split on semicolons, but retain complete CREATE TRIGGER statements.
+        for part in line.split(';')[:-1]:
+            statement += part + ';'
+            if sqlite3.complete_statement(statement):
+                conn.execute(statement)
+                statement = ''
+        statement += line.split(';')[-1]
+    if statement.strip() and not all(not l.strip() or l.strip().startswith('--') for l in statement.splitlines()):
+        conn.execute(statement)
 
 
 MIGRATIONS = [
@@ -315,116 +310,102 @@ MIGRATIONS = [
 ]
 
 
-def apply_migrations(db: Database, dry_run: bool = False) -> list[dict]:
-    """
-    Apply all pending database migrations.
 
-    Args:
-        db: Database instance
-        dry_run: If True, only report pending migrations without applying
-
-    Returns:
-        List of applied migration info
-    """
-    applied_migrations = []
-
-    with db.transaction('IMMEDIATE') as conn:
-        # Create migrations tracking table
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS schema_migrations(
-                version INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                applied_at TEXT NOT NULL,
-                duration_ms INTEGER
-            )
-        ''')
-
-        # Get already applied versions
-        applied_versions = {
-            row[0] for row in conn.execute('SELECT version FROM schema_migrations')
-        }
-
-        # Apply pending migrations
-        for migration in MIGRATIONS:
-            version = migration['version']
-
-            if version in applied_versions:
-                continue
-
-            if dry_run:
-                applied_migrations.append({
-                    'version': version,
-                    'name': migration['name'],
-                    'status': 'pending',
-                    'description': migration.get('description', '')
-                })
-                continue
-
-            start = datetime.now()
-
-            try:
-                # Execute migration SQL
-                conn.executescript(migration['up'])
-
-                # Record migration
-                duration_ms = int((datetime.now() - start).total_seconds() * 1000)
-                conn.execute(
-                    'INSERT INTO schema_migrations VALUES(?,?,?,?)',
-                    (version, migration['name'],
-                     datetime.now(timezone.utc).isoformat(),
-                     duration_ms)
-                )
-
-                applied_migrations.append({
-                    'version': version,
-                    'name': migration['name'],
-                    'status': 'applied',
-                    'duration_ms': duration_ms
-                })
-
-            except Exception as e:
-                applied_migrations.append({
-                    'version': version,
-                    'name': migration['name'],
-                    'status': 'failed',
-                    'error': str(e)
-                })
-                raise
-
-    return applied_migrations
+def _columns(conn, table):
+    return {r['name'] for r in conn.execute('PRAGMA table_info(' + table + ')')}
 
 
-def get_migration_status(db: Database) -> dict:
-    """Get current migration status."""
-    with db.connection() as conn:
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS schema_migrations(
-                version INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                applied_at TEXT NOT NULL,
-                duration_ms INTEGER
-            )
-        ''')
-
-        applied = {
-            row['version']: dict(row)
-            for row in conn.execute('SELECT * FROM schema_migrations ORDER BY version')
-        }
-
-    status = {
-        'current_version': max(applied.keys()) if applied else 0,
-        'latest_version': max(m['version'] for m in MIGRATIONS),
-        'applied_count': len(applied),
-        'total_count': len(MIGRATIONS),
-        'pending': []
+def _compatible_schema(conn):
+    # Canonical tables match the deployed receipt store. New columns are additive.
+    execute_script(conn, """
+        CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,status TEXT,document TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS photo_measurements(id TEXT PRIMARY KEY,camera TEXT NOT NULL,burst_key TEXT,status TEXT NOT NULL,document TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS experiment_records(id TEXT PRIMARY KEY,document TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS binding_handoffs(id TEXT PRIMARY KEY,instrument_id TEXT,status TEXT,document TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS instruments(id TEXT PRIMARY KEY,name TEXT,scene TEXT,model TEXT);
+    """)
+    additions = {
+        'jobs': {'lease_holder':'TEXT','lease_expires_at':'TEXT','retry_count':'INTEGER NOT NULL DEFAULT 0',
+                 'max_retries':'INTEGER NOT NULL DEFAULT 3','lease_generation':'INTEGER NOT NULL DEFAULT 0',
+                 'next_attempt_at':'REAL NOT NULL DEFAULT 0','attempt_count':'INTEGER NOT NULL DEFAULT 0',
+                 'camera_id':'TEXT','priority':'INTEGER NOT NULL DEFAULT 10'},
+        'photo_measurements': {'measurement_state':"TEXT NOT NULL DEFAULT 'draft'",'confirmed_at':'TEXT',
+                               'confirmed_by':'TEXT','updated_at':'TEXT'},
+        'experiment_records': {'created_at':"TEXT NOT NULL DEFAULT ''"},
+        'binding_handoffs': {'binding_id':'TEXT','offered_by':'TEXT','offered_to':'TEXT','offered_at':'TEXT',
+                             'state':"TEXT NOT NULL DEFAULT 'pending'",'accepted_at':'TEXT','rejected_at':'TEXT','rejection_reason':'TEXT'},
+        'instruments': {'device_no':'TEXT','measurement_ranges':"TEXT NOT NULL DEFAULT '{}'",'type_id':'TEXT'}
     }
+    for table, cols in additions.items():
+        existing = _columns(conn, table)
+        for name, declaration in cols.items():
+            if name not in existing:
+                conn.execute(f'ALTER TABLE {table} ADD COLUMN {name} {declaration}')
+    old = _columns(conn, 'archive_outbox')
+    if old and 'seq' not in old:
+        # Retain the incompatible prototype ledger; never manufacture receipt evidence.
+        conn.execute('ALTER TABLE archive_outbox RENAME TO archive_outbox_prototype_backup')
+    execute_script(conn, """
+        CREATE TABLE IF NOT EXISTS archive_outbox(
+            seq INTEGER PRIMARY KEY AUTOINCREMENT,entity TEXT NOT NULL,entity_id TEXT NOT NULL,
+            document TEXT NOT NULL,recorded_at TEXT NOT NULL,archived_at TEXT,receipt_path TEXT,
+            retry_after REAL NOT NULL DEFAULT 0,attempts INTEGER NOT NULL DEFAULT 0,last_error TEXT);
+        CREATE TABLE IF NOT EXISTS camera_users(camera_id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id));
+        CREATE TABLE IF NOT EXISTS runtime_leases(name TEXT PRIMARY KEY,owner TEXT NOT NULL,expires_at REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS runtime_status(name TEXT PRIMARY KEY,document TEXT NOT NULL,updated_at REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS camera_schedule(camera_id TEXT PRIMARY KEY,last_claimed REAL NOT NULL);
+    """)
+    # Existing duplicates need explicit reconciliation; a migration must never delete them.
+    if conn.execute('SELECT 1 FROM photo_measurements WHERE burst_key IS NOT NULL GROUP BY camera,burst_key HAVING count(*)>1').fetchone():
+        raise ValueError('Duplicate burst identities exist; reconcile before migration')
+    conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS measurement_burst_identity ON photo_measurements(camera,burst_key)')
 
-    for migration in MIGRATIONS:
-        if migration['version'] not in applied:
-            status['pending'].append({
-                'version': migration['version'],
-                'name': migration['name'],
-                'description': migration.get('description', '')
-            })
 
-    return status
+MIGRATIONS.append({'version': 9, 'name':'repair_runtime_contracts', 'description':'Compatible schemas, fencing and camera ownership', 'up':'SELECT 1;', 'down':None})
+
+
+MIGRATIONS.append({'version':10,'name':'shared_capture_runtime_tables','description':'API-first boot and persisted queue recovery', 'up':"""
+    CREATE TABLE IF NOT EXISTS automation_settings(camera TEXT PRIMARY KEY,document TEXT NOT NULL);
+    CREATE INDEX IF NOT EXISTS queued_camera_jobs ON jobs(camera_id,status,next_attempt_at);
+    UPDATE jobs SET camera_id=json_extract(document,'$.camera_id') WHERE camera_id IS NULL;
+    UPDATE jobs SET status='queued',document=json_set(document,'$.status','queued','$.phase','restart_recovery')
+      WHERE status='interrupted' AND json_extract(document,'$.resume_pending')=1
+      AND coalesce(json_extract(document,'$.request_trigger'),'')<>'video_stream';
+""",'down':None})
+
+
+def get_migration_status(db):
+    applied = {}
+    if db.path.is_file():
+        conn = sqlite3.connect(db.path.resolve().as_uri() + '?mode=ro', uri=True)
+        try:
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE name='schema_migrations'").fetchone():
+                applied = {r[0]:r for r in conn.execute('SELECT * FROM schema_migrations')}
+        finally:
+            conn.close()
+    return {'current_version':max(applied, default=0), 'latest_version':max(m['version'] for m in MIGRATIONS),
+            'applied_count':len(applied), 'total_count':len(MIGRATIONS),
+            'pending':[{k:m.get(k) for k in ('version','name','description')} for m in MIGRATIONS if m['version'] not in applied]}
+
+
+def apply_migrations(db, dry_run=False):
+    pending = get_migration_status(db)['pending']
+    if dry_run:
+        return [m | {'status':'pending'} for m in pending]
+    db._init_db()
+    results = []
+    with db.transaction('IMMEDIATE') as conn:
+        conn.execute('CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at TEXT NOT NULL,duration_ms INTEGER)')
+        applied = {r[0] for r in conn.execute('SELECT version FROM schema_migrations')}
+        if 9 not in applied:
+            _compatible_schema(conn)
+        for migration in MIGRATIONS:
+            if migration['version'] in applied:
+                continue
+            start = time.monotonic()
+            execute_script(conn, migration['up'])
+            duration = int((time.monotonic()-start)*1000)
+            conn.execute('INSERT INTO schema_migrations VALUES(?,?,?,?)',
+                         (migration['version'],migration['name'],datetime.now(timezone.utc).isoformat(),duration))
+            results.append({'version':migration['version'],'name':migration['name'],'status':'applied','duration_ms':duration})
+    return results

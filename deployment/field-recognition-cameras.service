@@ -1,0 +1,29 @@
+[Unit]
+Description=FieldRecognition cameras
+PartOf=field-recognition.target
+After=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Projects/FieldRecognition
+EnvironmentFile=-%h/Projects/FieldRecognition/Data/Runtime/ServiceEnvironment.env
+EnvironmentFile=%h/Projects/FieldRecognition/.env
+Environment=FIELD_PRODUCTION_ENABLED=1
+Environment=FIELD_SERVICE_ROLE=cameras
+Environment=PYTHONUNBUFFERED=1
+Environment=OMP_NUM_THREADS=2
+Environment=OPENBLAS_NUM_THREADS=2
+ExecStart=%h/Projects/FieldRecognition/.venv/bin/python -m camera_supervisor
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=25
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=true
+LimitNOFILE=4096
+MemoryMax=3G
+
+[Install]
+WantedBy=field-recognition.target

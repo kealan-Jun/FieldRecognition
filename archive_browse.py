@@ -59,39 +59,12 @@ def build_views(rows):
     esc = lambda value: html.escape(str(value if value is not None else '未记录'))
 
     def record(category, parts, title, data):
-        directory = PurePosixPath('Browse', category, *map(token, parts))
-        link = lambda p: html.escape(posixpath.relpath(p, str(directory)), quote=True)
-        data = {'schema': 'field-recognition-browse/1', 'derived_view': True,
-                'timezone': 'Asia/Shanghai', 'category': category, **data}
-        views[str(directory / 'Record.json')] = json.dumps(data, ensure_ascii=False, indent=2).encode()
-        measurement = data.get('measurement')
-        if measurement:
-            views[str(directory / 'Measurement.json')] = json.dumps(measurement,ensure_ascii=False,indent=2).encode()
-        operator = {'Demo验证': '样张验证'}.get(data.get('operator'), data.get('operator'))
-        camera = {'DemoSampleCamera': '样张相机', 'SampleCamera': '样张相机'}.get(data.get('camera_id'), data.get('camera_id'))
-        is_relation = data['entity'] in {'bindings', 'scene_visits'}
-        display_time = lambda value: local_time(value).strftime('%Y-%m-%d %H:%M:%S') if value else None
-        fields = [('时间', data['local_time']), ('实验员', operator), ('相机', camera),
-                  ('仪器 / 场景', data.get('target')), ('结果状态', data.get('status')),
-                  ('读数原文', '、'.join(str(r.get('text', '')) for r in data.get('readings', [])) or '未读到数字 / 非读数记录'),
-                  ('照片来源', data.get('source_ref')), ('绑定开始' if is_relation else '识别开始', display_time(data.get('started_at'))),
-                  ('绑定结束', display_time(data.get('ended_at'))), ('识别完成', display_time(data.get('finished_at')))]
-        body = '<p><a href="'+link('Browse/Readme.html')+'">分类入口</a> · <a href="Record.json">完整分类记录 JSON</a></p><article><dl>'
-        if measurement:
-            body = '<p><a href="Measurement.json">标准仪器读数 JSON</a></p>' + body
-        body += ''.join('<dt>'+esc(k)+'</dt><dd>'+esc(v)+'</dd>' for k, v in fields if v is not None)
-        body += '</dl><p>读数及仪器归属需结合原图核对；原始历史记录不因分类重写。</p></article>'
-        image = data.get('photos', {}).get('image')
-        if image:
-            body += '<article><a href="'+link(image['path'])+'"><img src="'+link(image['path'])+'" alt="识别时的完整照片"></a>'
-            for name, photo in data['photos'].items():
-                body += '<p><a href="'+link(photo['path'])+'">'+esc({'image':'完整照片', 'original':'原始文件', 'panel':'面板识别图'}.get(name, name))+'</a><br><small>SHA-256 '+esc(photo['sha256'])+'</small></p>'
-            body += '</article>'
-        body += '<article><h2>原始回执版本</h2><ul>'+''.join('<li><a href="'+link(v['receipt'])+'">版本 '+str(v['sequence'])+'</a></li>' for v in data['receipt_versions'])+'</ul></article>'
-        views[str(directory / 'Readme.html')] = page(title, body)
+        # One entity has one canonical view. Classification never duplicates its payload.
+        directory = PurePosixPath('Records', ''.join(w.title() for w in data['entity'].split('_')), token(data['entity_id']))
         business.append((category, data, str(directory / 'Readme.html')))
-        catalog[category].append({'title': title, 'local_time': data['local_time'], 'record': str(directory / 'Record.json'),
-                                  'page': str(directory / 'Readme.html'), 'entity_id': data['entity_id']})
+        catalog[category].append({'title': title, 'local_time': data['local_time'],
+            'record': str(directory / 'Record.json'), 'page': str(directory / 'Readme.html'),
+            'entity_id': data['entity_id'], 'instrument_id': data.get('folder_instrument_id')})
 
     for (entity, ident), row in latest.items():
         if entity in {'photo_measurements', 'experiment_records'}:
@@ -190,16 +163,5 @@ def build_views(rows):
         elif photos:
             record('Photos', [day, camera, local.strftime('%H-%M-%S')+'_'+ident], common['local_time']+' · 照片', common)
 
-    body = '<p>每条记录包含时间、实验员、相机、原始照片链接和回执。打开分类后选择具体记录。日期按北京时间。</p>'
-    for key, (title, description) in CATEGORIES.items():
-        items = sorted(catalog[key], key=lambda item:item['local_time'], reverse=True)
-        folder = 'Browse/'+key+'/Readme.html'
-        links = ''.join('<li><a href="'+html.escape(posixpath.relpath(item['page'], 'Browse/'+key))+'">'+esc(item['title'])+'</a></li>' for item in items)
-        views[folder] = page(title, '<p><a href="../Readme.html">返回分类入口</a></p><p>'+esc(description)+'</p><p>'+str(len(items))+' 条记录</p><ul>'+links+'</ul>')
-        body += '<article><h2><a href="'+key+'/Readme.html">'+title+'</a></h2><p>'+description+'</p><code>Browse/'+key+'/</code><p>'+str(len(items))+' 条记录</p></article>'
-    body += '<p>照片原件统一保存在 <code>Objects/</code>，各分类引用同一份文件，避免重复存储。完整历史回执在 <code>Receipts/</code>；巡检在 <code>Integrity/</code>。Browse 是可重建的查阅视图，原始回执才是历史依据。</p><p><a href="../Readme.html">全量检索与完整性巡检</a> · <a href="Catalog.json">分类目录 JSON</a></p>'
-    views['Browse/Readme.html'] = page('NAS 文件夹查阅指南', body)
-    views['Browse/Catalog.json'] = json.dumps({'schema':'field-recognition-folders/1', 'categories':catalog}, ensure_ascii=False, indent=2).encode()
     from archive_readable import build_readable
-    views.update(build_readable(business, page))
-    return views
+    return build_readable(business, page)

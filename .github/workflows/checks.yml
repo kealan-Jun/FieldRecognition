@@ -1,0 +1,25 @@
+name: Checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: python -m venv .venv
+      - run: .venv/bin/python -m pip install -r Requirements.lock.txt
+      - name: Isolated regression tests
+        run: env -u FIELD_RECEIVER_URL -u FIELD_CAMERA_SNAPSHOT_URL OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 .venv/bin/python -m pytest -q tests
+      - run: .venv/bin/python -m compileall -q -x '/(\.venv|\.git)/' .
+      - run: node --check static/app.js && node --check static/auth-session.js && git diff --check

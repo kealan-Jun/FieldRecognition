@@ -272,7 +272,9 @@ def recognition_part(reader, camera, previous):
 
 
 def install(core):
-    scanner = LiveScanner(core)
+    from runtime_rpc import camera_component
+    import os
+    scanner = camera_component('scanner', os.environ.get('FIELD_CAMERA_ID')) or LiveScanner(core)
     app = core['app']
 
     @app.post('/api/camera/scan-sessions')
@@ -300,7 +302,11 @@ def install(core):
             previous = None
             while not await request.is_disconnected():
                 started = time.monotonic()
-                if recognition:
+                from runtime_rpc import CameraProxy
+                if isinstance(camera,CameraProxy):
+                    try:part,previous=await run_in_threadpool(camera.preview_part,recognition,previous)
+                    except (OSError,HTTPException):part=None
+                elif recognition:
                     part, previous = await run_in_threadpool(recognition_part, core['video_ocr'], camera, previous)
                 else:
                     part, previous = await run_in_threadpool(preview_part, camera, previous)

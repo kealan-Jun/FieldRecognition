@@ -11,7 +11,7 @@ def invoke(client, name, args=None):
 def test_tool_flow_reuses_browser_records_and_async_ocr(app_client, monkeypatch):
     app, client = app_client
     definitions = client.get('/api/tools').json()['tools']
-    assert len(definitions) == 9
+    assert len(definitions) == 15
     assert all(t['input_schema']['additionalProperties'] is False for t in definitions)
     image = Path(__file__).parents[1] / 'static/labels/InstrumentA.png'
     scan = invoke(client, 'scan_photo', {'camera_id': 'ToolCamera',

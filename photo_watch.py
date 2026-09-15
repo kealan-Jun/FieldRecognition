@@ -31,7 +31,7 @@ class SavedPhotoWatcher:
                          'status TEXT, job_id TEXT, detail TEXT, observed_at TEXT, PRIMARY KEY(camera,path))')
             conn.execute('CREATE TABLE IF NOT EXISTS photo_watch_windows(camera TEXT PRIMARY KEY, started_at TEXT NOT NULL)')
             conn.execute('CREATE TABLE IF NOT EXISTS photo_ingest_queue(camera TEXT,path TEXT,signature TEXT,document TEXT NOT NULL,PRIMARY KEY(camera,path))')
-            for row in conn.execute('SELECT path,signature,document FROM photo_ingest_queue'):
+            for row in conn.execute('SELECT path,signature,document FROM photo_ingest_queue WHERE camera=?',(os.environ.get('FIELD_CAMERA_ID'),)):
                 item = json.loads(row['document'])
                 self.pending[row['path']] = (row['signature'], self.clock(), item['first_observed_at'], item['is_backfill'], item.get('stable_at'))
 
@@ -42,7 +42,7 @@ class SavedPhotoWatcher:
         with self.lock:
             result = copy.deepcopy(self.state)
         with self.core['db']() as conn:
-            queued = conn.execute('SELECT count(*) FROM photo_ingest_queue').fetchone()[0]
+            queued = conn.execute('SELECT count(*) FROM photo_ingest_queue WHERE camera=?',(os.environ.get('FIELD_CAMERA_ID'),)).fetchone()[0]
         return result | {'enabled': self.enabled(), 'configured': bool(os.environ.get('FIELD_SAVED_PHOTO_ROOT')),
                          'persisted_pending_files': queued,
                          'poll_seconds': POLL_SECONDS, 'stable_seconds': STABLE_SECONDS, 'reads_existing_photos_only': True}
