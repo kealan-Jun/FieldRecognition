@@ -109,8 +109,8 @@ def test_task_queue_claim_and_complete(test_db):
 
     with test_db.transaction() as conn:
         conn.execute(
-            'INSERT INTO jobs VALUES(?,?,?)',
-            (task_id, 'queued', json.dumps(task_doc))
+            'INSERT INTO jobs VALUES(?,?,?,?,?,?,?)',
+            (task_id, 'queued', json.dumps(task_doc), None, None, 0, 3)
         )
 
     # Claim task
@@ -142,13 +142,8 @@ def test_task_queue_lease_expiry(test_db):
 
     with test_db.transaction() as conn:
         conn.execute(
-            'INSERT INTO jobs VALUES(?,?,?)',
-            (task_id, 'queued', json.dumps(task_doc))
-        )
-        conn.execute(
-            '''UPDATE jobs SET status='running', lease_holder='dead-worker',
-               lease_expires_at=? WHERE id=?''',
-            (past_time, task_id)
+            'INSERT INTO jobs VALUES(?,?,?,?,?,?,?)',
+            (task_id, 'running', json.dumps(task_doc), 'dead-worker', past_time, 0, 3)
         )
 
     # New worker can claim expired lease
@@ -192,6 +187,8 @@ def test_measurement_state_machine(test_db):
 
     # Create measurement in draft state
     measurement_id = str(uuid.uuid4())
+    instrument_uuid = str(uuid.uuid4())
+
     measurement = sm.create_measurement(
         measurement_id=measurement_id,
         burst_id=None,
@@ -203,24 +200,23 @@ def test_measurement_state_machine(test_db):
 
     assert measurement['state'] == 'draft'
 
-    # Submit for confirmation
-    measurement = sm.submit_for_confirmation(measurement_id, 'test_user')
-    assert measurement['state'] == 'pending_confirmation'
-
-    # Confirm measurement
+    # Add fields first
     from measurement_state import FieldValue
     fields = [FieldValue(
         field_id='f1',
-        instrument_id=uuid.uuid4(),
+        instrument_id=instrument_uuid,
         name='温度',
         value=25.5,
         unit='°C'
     )]
 
-    # Add fields first
     measurement = sm.update_fields(measurement_id, fields, 'test_user', 'Initial reading')
-    measurement = sm.submit_for_confirmation(measurement_id, 'test_user')
 
+    # Submit for confirmation
+    measurement = sm.submit_for_confirmation(measurement_id, 'test_user')
+    assert measurement['state'] == 'pending_confirmation'
+
+    # Confirm measurement
     measurement, record_id = sm.confirm_measurement(
         measurement_id, 'reviewer', measurement['revision']
     )

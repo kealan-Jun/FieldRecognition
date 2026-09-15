@@ -23,7 +23,7 @@ class MeasurementState(str, Enum):
 class FieldValue(BaseModel):
     """Single field measurement value."""
     field_id: str
-    instrument_id: uuid.UUID
+    instrument_id: str  # UUID as string for JSON serialization
     name: str
     value: FiniteFloat
     unit: str = Field(min_length=1, max_length=20)
@@ -306,9 +306,9 @@ class MeasurementStateMachine:
 
             # Insert experiment record (production table)
             conn.execute('''
-                INSERT INTO experiment_records(id, document)
-                VALUES(?,?)
-            ''', (record_id, json.dumps(experiment_record)))
+                INSERT INTO experiment_records(id, document, created_at)
+                VALUES(?,?,?)
+            ''', (record_id, json.dumps(experiment_record), now))
 
             # Update measurement to confirmed state
             measurement['state'] = MeasurementState.CONFIRMED.value

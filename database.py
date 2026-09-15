@@ -281,6 +281,36 @@ MIGRATIONS = [
             CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity_type, entity_id);
         ''',
         'down': 'DROP TABLE IF EXISTS audit_log;'
+    },
+    {
+        'version': 8,
+        'name': 'add_archive_management',
+        'description': 'Add archive outbox and catalog for capacity control',
+        'up': '''
+            CREATE TABLE IF NOT EXISTS archive_outbox(
+                entity TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                archived_at TEXT,
+                notes TEXT,
+                PRIMARY KEY (entity, entity_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_archive_outbox_archived ON archive_outbox(archived_at);
+
+            CREATE TABLE IF NOT EXISTS archive_catalog(
+                entity TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                manifest TEXT NOT NULL,
+                indexed_at TEXT NOT NULL,
+                PRIMARY KEY (entity, entity_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_archive_catalog_indexed ON archive_catalog(indexed_at);
+        ''',
+        'down': '''
+            DROP TABLE IF EXISTS archive_outbox;
+            DROP TABLE IF EXISTS archive_catalog;
+        '''
     }
 ]
 
