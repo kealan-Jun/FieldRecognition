@@ -18,34 +18,14 @@ from instrument_config import InstrumentConfig
 
 @pytest.fixture
 def test_db():
-    """Create temporary test database."""
+    """Create temporary test database with fresh schema."""
     with tempfile.NamedTemporaryFile(suffix='.sqlite3', delete=False) as f:
         db_path = f.name
 
-    # Initialize base tables first
-    conn = sqlite3.connect(db_path)
-    conn.execute('PRAGMA journal_mode=WAL')
-    conn.executescript('''
-        CREATE TABLE IF NOT EXISTS instruments(
-            id TEXT PRIMARY KEY, name TEXT, scene TEXT, model TEXT, device_no TEXT,
-            measurement_ranges TEXT NOT NULL DEFAULT '{}', type_id TEXT
-        );
-        CREATE TABLE IF NOT EXISTS bindings(
-            id TEXT PRIMARY KEY, camera TEXT, ended TEXT, document TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS jobs(
-            id TEXT PRIMARY KEY, status TEXT, document TEXT NOT NULL,
-            lease_holder TEXT, lease_expires_at TEXT,
-            retry_count INTEGER NOT NULL DEFAULT 0, max_retries INTEGER NOT NULL DEFAULT 3
-        );
-        CREATE TABLE IF NOT EXISTS photo_measurements(
-            id TEXT PRIMARY KEY, camera TEXT NOT NULL, burst_key TEXT NOT NULL,
-            status TEXT NOT NULL, document TEXT NOT NULL
-        );
-    ''')
-    conn.close()
-
+    # Initialize empty database
     db = Database(db_path)
+
+    # Apply all migrations to fresh database
     apply_migrations(db)
 
     yield db

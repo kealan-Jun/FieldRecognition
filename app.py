@@ -80,6 +80,16 @@ if os.environ.get('FIELD_RECEIVER_URL'):
 
 @asynccontextmanager
 async def lifespan(application):
+    # Production components integration
+    production_adapter = None
+    if os.environ.get('FIELD_PRODUCTION_ENABLED') == '1':
+        try:
+            from app_production import integrate_production
+            production_adapter = integrate_production(globals(), application)
+            print("✓ Production components enabled")
+        except Exception as e:
+            print(f"⚠ Production components failed to load: {e}")
+
     if receiver_camera:
         receiver_camera.start()
     with db() as conn:

@@ -119,8 +119,8 @@ MIGRATIONS = [
         'name': 'add_task_queue_leases',
         'description': 'Add worker lease and retry management to jobs table',
         'up': '''
-            -- Add columns only if they don't exist
-            CREATE TABLE IF NOT EXISTS jobs_new(
+            -- Create jobs table if not exists with all required columns
+            CREATE TABLE IF NOT EXISTS jobs(
                 id TEXT PRIMARY KEY,
                 status TEXT,
                 document TEXT NOT NULL,
@@ -129,17 +129,6 @@ MIGRATIONS = [
                 retry_count INTEGER NOT NULL DEFAULT 0,
                 max_retries INTEGER NOT NULL DEFAULT 3
             );
-
-            INSERT OR IGNORE INTO jobs_new(id, status, document, lease_holder, lease_expires_at, retry_count, max_retries)
-            SELECT id, status, document,
-                   COALESCE(lease_holder, NULL),
-                   COALESCE(lease_expires_at, NULL),
-                   COALESCE(retry_count, 0),
-                   COALESCE(max_retries, 3)
-            FROM jobs;
-
-            DROP TABLE jobs;
-            ALTER TABLE jobs_new RENAME TO jobs;
 
             CREATE INDEX IF NOT EXISTS idx_jobs_lease ON jobs(status, lease_expires_at);
             CREATE INDEX IF NOT EXISTS idx_jobs_retry ON jobs(status, retry_count);
@@ -171,7 +160,7 @@ MIGRATIONS = [
         'name': 'add_measurement_state_machine',
         'description': 'Add explicit measurement lifecycle states',
         'up': '''
-            CREATE TABLE IF NOT EXISTS photo_measurements_new(
+            CREATE TABLE IF NOT EXISTS photo_measurements(
                 id TEXT PRIMARY KEY,
                 camera TEXT NOT NULL,
                 burst_key TEXT NOT NULL,
@@ -182,15 +171,6 @@ MIGRATIONS = [
                 confirmed_by TEXT,
                 updated_at TEXT
             );
-
-            INSERT INTO photo_measurements_new(id, camera, burst_key, status, document, measurement_state)
-            SELECT id, camera, burst_key, status, document, 'draft'
-            FROM photo_measurements
-            WHERE EXISTS(SELECT 1 FROM photo_measurements LIMIT 1);
-
-            DROP TABLE IF EXISTS photo_measurements_old;
-            ALTER TABLE photo_measurements RENAME TO photo_measurements_old;
-            ALTER TABLE photo_measurements_new RENAME TO photo_measurements;
 
             CREATE INDEX IF NOT EXISTS idx_measurements_state ON photo_measurements(measurement_state);
             CREATE INDEX IF NOT EXISTS idx_measurements_camera ON photo_measurements(camera);
@@ -222,8 +202,8 @@ MIGRATIONS = [
         'name': 'add_instrument_handoff',
         'description': 'Add explicit instrument handoff workflow',
         'up': '''
-            -- Migrate existing binding_handoffs table if needed
-            CREATE TABLE IF NOT EXISTS binding_handoffs_new(
+            -- Create binding_handoffs table
+            CREATE TABLE IF NOT EXISTS binding_handoffs(
                 id TEXT PRIMARY KEY,
                 binding_id TEXT,
                 instrument_id TEXT,
@@ -238,19 +218,17 @@ MIGRATIONS = [
                 document TEXT NOT NULL
             );
 
-            -- Copy existing data if table exists
-            INSERT OR IGNORE INTO binding_handoffs_new(id, instrument_id, status, document, state, accepted_at, rejected_at, rejection_reason)
-            SELECT id, instrument_id, status, document,
-                   COALESCE(state, 'pending'), accepted_at, rejected_at, rejection_reason
-            FROM binding_handoffs
-            WHERE EXISTS(SELECT 1 FROM binding_handoffs LIMIT 1);
-
-            DROP TABLE IF EXISTS binding_handoffs;
-            ALTER TABLE binding_handoffs_new RENAME TO binding_handoffs;
-
             CREATE INDEX IF NOT EXISTS idx_handoffs_state ON binding_handoffs(state);
             CREATE INDEX IF NOT EXISTS idx_handoffs_binding ON binding_handoffs(binding_id);
             CREATE INDEX IF NOT EXISTS idx_handoffs_instrument ON binding_handoffs(instrument_id);
+
+            -- Create bindings table if not exists
+            CREATE TABLE IF NOT EXISTS bindings(
+                id TEXT PRIMARY KEY,
+                camera TEXT,
+                ended TEXT,
+                document TEXT NOT NULL
+            );
         ''',
         'down': None
     },
@@ -267,7 +245,16 @@ MIGRATIONS = [
                 updated_at TEXT NOT NULL
             );
 
-            ALTER TABLE instruments ADD COLUMN type_id TEXT;
+            CREATE TABLE IF NOT EXISTS instruments(
+                id TEXT PRIMARY KEY,
+                name TEXT,
+                scene TEXT,
+                model TEXT,
+                device_no TEXT,
+                measurement_ranges TEXT NOT NULL DEFAULT '{}',
+                type_id TEXT
+            );
+
             CREATE INDEX IF NOT EXISTS idx_instruments_type ON instruments(type_id);
         ''',
         'down': 'DROP TABLE IF EXISTS instrument_types;'
