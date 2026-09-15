@@ -13,6 +13,7 @@
     <a class="nav active" href="#workspace">◉ 扫码与读数</a>
     <a class="nav" href="#registry">▤ 仪器登记</a>
     <a class="nav" href="#history">◷ 操作记录</a>
+    <a class="nav" href="/photo-measurements">▤ 拍照测量草稿</a>
   </nav>
   <div class="aside-note"><span class="dot"></span> 本地识别服务</div>
 </aside>
@@ -50,7 +51,7 @@
         <div id="videoOcrStatus" class="caption" role="status"></div><div id="videoReadings" class="video-readings"></div>
         <details class="readout-record" open><summary>最近保存的识别结果</summary><p id="photoWatchState" class="caption"></p>
         <div id="ocrResults" class="empty-text">扫码绑定后，自动定位对应设备面板并读取数字。</div>
-        <a href="#history" class="caption">查看全部识别记录 ↗</a></details>
+        <a href="#history" class="caption">查看全部识别记录 ↗</a> · <a href="/photo-measurements" class="caption" id="recordPolicy">拍照测量草稿 ↗</a></details>
         <button id="ocr" class="secondary full" disabled>识别当前照片中的面板</button>
       </section>
     </div>
@@ -59,8 +60,8 @@
 <section class="card page-view" id="registry" hidden><div class="card-title"><div><h2>仪器登记</h2><p class="caption">管理名称、型号与所属场景，查看对应二维码。</p></div></div><div id="instrumentForms" class="registry-grid"></div></section>
 <section class="card page-view" id="history" hidden><div class="card-title"><div><h2>操作记录</h2><p class="caption">仅记录二维码识别、绑定与有明确面板归属的读数；照片作为对应记录的凭证。</p></div><button id="export" class="secondary">导出状态 JSON</button></div>
 <div class="history-toolbar"><label>记录范围 <select id="historyMode"><option value="all">最近操作</option><option value="readouts">面板读数</option><option value="workbenches">按实验台与仪器分类</option></select></label><span id="historyScope" class="caption"></span><div id="historyPager" hidden><button id="historyPrevious" class="secondary">上一页</button><button id="historyNext" class="secondary">下一页</button></div></div>
-<p id="archiveStatus" class="caption" role="status">正在检查 NAS 留存</p><p class="caption"><a href="/api/archive/files/Readme.html" target="_blank" rel="noopener">打开 NAS 全量索引 ↗</a> · <a href="/api/archive/files/Browse/Readme.html" target="_blank" rel="noopener">文件夹查阅指南 ↗</a> · <span id="integrityStatus">正在读取巡检状态</span></p><div id="historyRows" class="empty-text">正在读取记录</div></section>
+<p id="archiveStatus" class="caption" role="status">正在检查 NAS 留存</p><p class="caption"><a href="/api/archive/files/00_归档导航.html" target="_blank" rel="noopener">打开 NAS 中文归档 ↗</a> · <a href="/api/archive/files/Readme.html" target="_blank" rel="noopener">完整历史版本 ↗</a> · <span id="integrityStatus">正在读取巡检状态</span></p><div id="historyRows" class="empty-text">正在读取记录</div></section>
 <footer>FieldRecognition <span>现场设备识别与面板读数</span></footer>
 </main>
-<script src="/static/app.js?v=71445de91eba"></script>
+<script src="/static/app.js?v=f4f522dca646"></script>
 </body></html>

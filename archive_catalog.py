@@ -39,6 +39,8 @@ def build_index(rows, instance, timestamp, integrity):
                 if (doc.get('instrument') or {}).get('scene') else doc.get('scene')),
             'workbenches': doc.get('workbenches', []),
             'input_mode': 'video' if doc.get('request_trigger') == 'video_stream' else 'photo',
+            'record_scope': doc.get('record_scope', 'legacy_test_only') if row['entity'] == 'jobs' else doc.get('record_scope'),
+            'measurement_id': doc.get('measurement_id'),
             'receipt': row['receipt_path'], 'image': image, 'archived_at': row['archived_at'],
             'archive_queue_ms': elapsed_ms(row['recorded_at'], row['archived_at']),
             'write_to_archive_ms': elapsed_ms((doc.get('timing') or {}).get('source_written_at'), row['archived_at'])})

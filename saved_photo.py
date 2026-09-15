@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+from photo_measurements import MeasurementContext, check_retry
 
 
 class PhotoResult(BaseModel):
@@ -32,11 +33,26 @@ class SavedPhotoRequest(BaseModel):
     photo: PhotoResult | None = None
     image_path: str | None = Field(default=None, min_length=1, max_length=2000)
     crop: list[int] | None = None
+    measurement: MeasurementContext | None = None
 
     @model_validator(mode='after')
     def one_photo(self):
         if (self.photo is None) == (self.image_path is None):
             raise ValueError('Provide exactly one of photo or image_path')
+        return self
+
+
+class BurstRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    burst_id: str = Field(min_length=1, max_length=100)
+    photos: list[PhotoResult] = Field(min_length=1, max_length=3)
+    experiment_context_ref: str = Field(min_length=1, max_length=2000)
+    instrument_ids: list[uuid.UUID] = Field(default_factory=list, max_length=16)
+
+    @model_validator(mode='after')
+    def same_camera(self):
+        if len({p.camera_id for p in self.photos}) != 1 or len({p.capture_id for p in self.photos}) != len(self.photos):
+            raise ValueError('一次连拍必须来自同一相机，照片编号不能重复')
         return self
 
 
@@ -52,7 +68,9 @@ def load_saved_photo(image_path, *, expected_camera, max_bytes):
         relative = path.relative_to(root)
         # Actual voice_photos layout, not a recursive or latest-file search.
         camera, day, moment, filename = relative.parts
-    except (OSError, ValueError):
+    except OSError:
+        raise HTTPException(503, '照片存储暂不可读，保留队列等待恢复') from None
+    except ValueError:
         raise HTTPException(422, '照片路径不存在或不在已配置的语音拍照目录内') from None
     if camera != expected_camera:
         raise HTTPException(409, '拍照文件所属相机与当前绑定不一致')
@@ -72,7 +90,9 @@ def load_saved_photo(image_path, *, expected_camera, max_bytes):
         after = path.stat()
         if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns) or len(raw) != after.st_size:
             raise HTTPException(409, '照片仍在写入，请等待拍照保存完成')
-    except (OSError, ValueError, KeyError):
+    except OSError:
+        raise HTTPException(503, '照片读取失败，保留队列等待存储恢复') from None
+    except (ValueError, KeyError):
         raise HTTPException(422, '无法读取完整照片或解析其拍摄时间') from None
     return PhotoResult(capture_id=relative.as_posix(), camera_id=camera, captured_at=captured,
                        source_ref=str(path), image_base64=base64.b64encode(raw).decode(),
@@ -88,13 +108,11 @@ def install(core):
 
     def read_saved_panel(body, *, trigger='explicit_request', observation=None):
         with core['ocr_submit_lock']:
-            if body.binding_id and not core['current_readout_binding']({'binding_id': str(body.binding_id)}):
-                raise HTTPException(409, '请先建立有效的仪器绑定')
             with core['db']() as conn:
                 row = conn.execute('SELECT document FROM bindings WHERE id=?', (str(body.binding_id),)).fetchone() if body.binding_id else None
             binding = json.loads(row['document']) if row else None
             camera = core['receiver_camera']
-            target = (binding['camera_id'] if binding else camera.target if camera else
+            target = (binding['camera_id'] if binding else body.photo.camera_id if body.photo else camera.target if camera else
                       os.environ.get('FIELD_CAMERA_ID') or (body.photo.camera_id if body.photo else None))
             if not target:
                 raise HTTPException(409, '请先配置语音照片所属相机')
@@ -103,6 +121,10 @@ def install(core):
             photo_read_at = core['now']()
             if photo.camera_id != target:
                 raise HTTPException(409, '拍照结果的相机与当前绑定不一致')
+            if body.binding_id:
+                from readout_context import binding_contains_photo
+                if not binding or not binding_contains_photo(binding, {'external_photo': {'captured_at': photo.captured_at.isoformat()}}):
+                    raise HTTPException(409, '照片拍摄时间不属于该仪器绑定时段')
             if ((binding and photo.captured_at < datetime.fromisoformat(binding['started_at'])) or
                     photo.captured_at > datetime.now(timezone.utc) + timedelta(seconds=60)):
                 raise HTTPException(409, '拍照时间早于本次绑定或在未来，请核对拍照回执')
@@ -162,19 +184,41 @@ def install(core):
                     job = json.loads(row['document'])
                     if (job['capture_id'] == capture['capture_id']
                             and job['crop'] == requested_crop):
+                        check_retry(job, body.measurement, core['RECORD_MODE'])
                         return job | {'status': row['status']}
             try:
                 return core['enqueue_ocr'](core['OcrRequest'](binding_id=binding['binding_id'] if binding else None,
-                                        capture_id=capture['capture_id'], crop=body.crop), trigger=trigger)
+                                        capture_id=capture['capture_id'], crop=body.crop, measurement=body.measurement), trigger=trigger)
             except HTTPException as exc:
                 # A photo must still be read if its optional automatic association is
                 # stale or conflicts with a decoded QR. Explicit binding requests stay strict.
                 if exc.status_code != 409 or body.binding_id or not binding:
                     raise
-                return core['enqueue_ocr'](core['OcrRequest'](capture_id=capture['capture_id'], crop=body.crop), trigger=trigger)
+                return core['enqueue_ocr'](core['OcrRequest'](capture_id=capture['capture_id'], crop=body.crop,
+                                         measurement=body.measurement), trigger=trigger)
 
     core['SavedPhotoRequest'] = SavedPhotoRequest
     core['read_saved_panel'] = read_saved_panel
     @core['app'].post('/api/ocr/photo-result', status_code=202)
     def endpoint(body: SavedPhotoRequest):
         return read_saved_panel(body)
+
+    @core['app'].post('/api/ocr/photo-burst', status_code=202)
+    def burst(body: BurstRequest):
+        context = MeasurementContext(burst_id=body.burst_id, expected_photos=len(body.photos),
+            experiment_context_ref=body.experiment_context_ref, instrument_ids=body.instrument_ids)
+        jobs = []
+        # Partial submissions are resumable by replaying the SAME burst and photo IDs.
+        # Earlier members keep their raw receipts and never become separate records.
+        with core['ocr_submit_lock']:
+            for photo in body.photos:
+                try:
+                    jobs.append(read_saved_panel(SavedPhotoRequest(photo=photo, measurement=context)))
+                except HTTPException as exc:
+                    raise HTTPException(exc.status_code, {'message': exc.detail,
+                        'measurement_id': jobs[0].get('measurement_id') if jobs else None,
+                        'accepted_job_ids': [j['job_id'] for j in jobs],
+                        'retry': '保留 burst_id 和每张照片编号，原样重试可继续未完成的提交'}) from None
+        return {'measurement_id': jobs[0]['measurement_id'], 'job_ids': [j['job_id'] for j in jobs],
+                'record_mode': core['RECORD_MODE'], 'status': 'collecting',
+                'draft_url': '/api/photo-measurements/' + jobs[0]['measurement_id']}

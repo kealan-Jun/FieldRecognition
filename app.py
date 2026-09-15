@@ -28,9 +28,11 @@ from ocr_runtime import configured_device, create_model, OcrDeviceUnavailable
 from activity import recent_activity, readout_page
 from readout_timing import update_timing
 from panel_detector import PanelDetector
+from photo_measurements import MeasurementContext, configured_mode, attach as attach_measurement, check_retry
 
 BASE = Path(__file__).parent
 OCR_DEVICE = configured_device()
+RECORD_MODE = configured_mode()
 DATA = Path(os.environ.get('FIELD_DEMO_DATA', str(BASE / 'Data')))
 DATA.mkdir(parents=True, exist_ok=True)
 (DATA / 'Images').mkdir(exist_ok=True)
@@ -84,6 +86,8 @@ async def lifespan(application):
         has_binding = conn.execute('SELECT 1 FROM bindings WHERE ended IS NULL LIMIT 1').fetchone()
     if has_binding or saved_photo_watcher.enabled() or video_ocr.enabled():
         queue_ocr_warmup()
+    from photo_job_queue import recover
+    recover(globals())
     saved_photo_watcher.start()
     archive_store.start()
     automatic_runner.start()
@@ -259,6 +263,7 @@ class OcrRequest(BaseModel):
     capture_id: uuid.UUID
     crop: list[int] | None = None
     auto_associate: bool = False
+    measurement: MeasurementContext | None = None
 
 
 @app.get('/')
@@ -287,6 +292,9 @@ def state():
     return {'scenes': scene_records(), 'scene_visits': scene_visits(), 'instruments': instruments, 'bindings': bindings, 'jobs': jobs, 'ocr': dict(ocr_state),
             'last_camera_scan': json.loads(last_hit['document']) if last_hit else None,
             'activity': activity, 'latest_panel_job': latest_panel_job,
+            'record_policy': {'mode': RECORD_MODE, 'automatic_write_scope': 'test_only',
+                              'production_photo_submission': 'draft_confirmation',
+                              'drafts_url': '/photo-measurements'},
             'archive': archive_store.snapshot(),
             'vision_fallback': aliyun_vision.public_config(), 'photo_watch': saved_photo_watcher.snapshot(),
             'automation': automatic_runner.snapshot(),
@@ -370,44 +378,50 @@ def bind(body: BindingRequest, *, automatic: bool = False):
 def save_binding(body: BindingRequest, *, automatic: bool = False):
     with db() as conn:
         conn.execute('BEGIN IMMEDIATE')
-        row = conn.execute('SELECT document FROM scans WHERE id=?', (str(body.scan_id),)).fetchone()
-        if not row:
-            raise HTTPException(404, '扫码记录不存在')
-        scan = json.loads(row['document'])
-        validate_capture_epoch(conn, scan)
-        if not any(item['id'] == str(body.instrument_id) for item in scan['matches']):
-            raise HTTPException(409, '该图片没有识别到此仪器码')
-        asset = get_instrument(str(body.instrument_id))
-        if not asset['scene']:
-            raise HTTPException(409, '先在仪器登记中填写所属场景')
-        visit = optional_scene(conn, scan['camera_id'], asset['scene'])
-        for row in conn.execute('SELECT document FROM scene_visits WHERE camera=? AND ended IS NULL', (scan['camera_id'],)):
-            operator = json.loads(row['document']).get('operator')
-            if operator and operator != body.operator.strip():
-                raise HTTPException(409, '请先结束该相机的已有场景关联，再更换实验员')
-        previous = conn.execute('SELECT document FROM bindings WHERE camera=? AND ended IS NULL', (scan['camera_id'],)).fetchall()
-        for row in previous:
-            existing = json.loads(row['document'])
-            if existing['operator'] != body.operator.strip():
-                raise HTTPException(409, '请先结束该相机的已有绑定，再更换实验员')
-            if existing['instrument']['id'] == str(body.instrument_id):
-                return existing
-        timestamp = now()
-        result = {'binding_id': str(uuid.uuid4()), 'operator': body.operator.strip(),
-                  'wearer_id':(body.wearer_id or '').strip() or None,
-                  'qr_hash':next(item.get('qr_hash') for item in scan['matches'] if item['id']==str(body.instrument_id)),
-                  'camera_id': scan['camera_id'], 'instrument': asset, 'started_at': timestamp,
-                  'ended_at': None, 'scan_id': scan['scan_id'], 'image_url': scan['image_url'],
-                  'identity_basis': 'unsigned_qr_and_continuous_scan_opt_in' if automatic else 'unsigned_qr_and_operator_confirmation',
-                  'activity_confirmed': False, 'scene_visit_id': visit['visit_id'] if visit else None,
-                  'scene': visit['scene'] if visit else {'id': None, 'name': asset['scene']},
-                  'scene_qr_verified': visit is not None,
-                  'scene_basis': 'decoded_scene_qr' if visit else 'instrument_registration'}
-        service = conn.execute('SELECT document FROM camera_service_state WHERE camera=?', (scan['camera_id'],)).fetchone()
-        result['device_service'] = json.loads(service['document']) if service else None
-        if not result['operator']:
-            raise HTTPException(422, '实验员不能为空')
-        conn.execute('INSERT INTO bindings VALUES(?,?,NULL,?)', (result['binding_id'], result['camera_id'], json.dumps(result)))
+        return persist_binding(conn, body, automatic=automatic)
+
+
+def persist_binding(conn, body, *, automatic=False, handoff_id=None):
+    row = conn.execute('SELECT document FROM scans WHERE id=?', (str(body.scan_id),)).fetchone()
+    if not row:
+        raise HTTPException(404, '扫码记录不存在')
+    scan = json.loads(row['document'])
+    validate_capture_epoch(conn, scan)
+    if not any(item['id'] == str(body.instrument_id) for item in scan['matches']):
+        raise HTTPException(409, '该图片没有识别到此仪器码')
+    asset = get_instrument(str(body.instrument_id))
+    if not asset['scene']:
+        raise HTTPException(409, '先在仪器登记中填写所属场景')
+    visit = optional_scene(conn, scan['camera_id'], asset['scene'])
+    for row in conn.execute('SELECT document FROM scene_visits WHERE camera=? AND ended IS NULL', (scan['camera_id'],)):
+        operator = json.loads(row['document']).get('operator')
+        if operator and operator != body.operator.strip():
+            raise HTTPException(409, '请先结束该相机的已有场景关联，再更换实验员')
+    previous = conn.execute('SELECT document FROM bindings WHERE camera=? AND ended IS NULL', (scan['camera_id'],)).fetchall()
+    for row in previous:
+        existing = json.loads(row['document'])
+        if existing['operator'] != body.operator.strip():
+            raise HTTPException(409, '请先结束该相机的已有绑定，再更换实验员')
+        if existing['instrument']['id'] == str(body.instrument_id):
+            return existing
+    from instrument_ownership import check_available
+    check_available(conn, str(body.instrument_id), scan['camera_id'], handoff_id=handoff_id)
+    timestamp = now()
+    result = {'binding_id': str(uuid.uuid4()), 'operator': body.operator.strip(),
+              'wearer_id':(body.wearer_id or '').strip() or None,
+              'qr_hash':next(item.get('qr_hash') for item in scan['matches'] if item['id']==str(body.instrument_id)),
+              'camera_id': scan['camera_id'], 'instrument': asset, 'started_at': timestamp,
+              'ended_at': None, 'scan_id': scan['scan_id'], 'image_url': scan['image_url'], 'handoff_id': handoff_id,
+              'identity_basis': 'unsigned_qr_and_continuous_scan_opt_in' if automatic else 'unsigned_qr_and_operator_confirmation',
+              'activity_confirmed': False, 'scene_visit_id': visit['visit_id'] if visit else None,
+              'scene': visit['scene'] if visit else {'id': None, 'name': asset['scene']},
+              'scene_qr_verified': visit is not None,
+              'scene_basis': 'decoded_scene_qr' if visit else 'instrument_registration'}
+    service = conn.execute('SELECT document FROM camera_service_state WHERE camera=?', (scan['camera_id'],)).fetchone()
+    result['device_service'] = json.loads(service['document']) if service else None
+    if not result['operator']:
+        raise HTTPException(422, '实验员不能为空')
+    conn.execute('INSERT INTO bindings VALUES(?,?,NULL,?)', (result['binding_id'], result['camera_id'], json.dumps(result)))
     return result
 
 
@@ -551,7 +565,8 @@ def current_readout_binding(document):
     if stopping.is_set():
         return False
     if (document.get('job_id') and document.get('capture_id')
-            and document.get('request_trigger') in {'voice_photo_directory', 'video_stream'}):
+            and (document.get('request_trigger') in {'voice_photo_directory', 'video_stream'} or
+                 document.get('binding_time_basis') == 'source_capture_time')):
         # The persisted photograph and its binding-at-capture snapshot survive a
         # later device disconnect. Do not discard a requested historical reading.
         return True
@@ -594,15 +609,18 @@ def enqueue_ocr(body, *, trigger='explicit_request', precomputed_local=None):
     with db() as conn:
         binding = conn.execute('SELECT * FROM bindings WHERE id=?', (str(body.binding_id),)).fetchone()
         capture = conn.execute('SELECT document FROM scans WHERE id=?', (str(body.capture_id),)).fetchone()
-        if body.binding_id is not None and (not binding or binding['ended']):
-            raise HTTPException(409, '请先建立有效的仪器绑定')
         if not capture:
             raise HTTPException(404, '图片不存在')
         capture = json.loads(capture['document'])
         if binding and binding['camera'] != capture['camera_id']:
             raise HTTPException(409, '图片来源与绑定相机不一致')
         linked = json.loads(binding['document']) if binding else None
-        if linked:
+        from readout_context import binding_contains_photo
+        historical_binding = bool(linked and binding_contains_photo(linked, capture))
+        if body.binding_id is not None and (not binding or
+                ((binding['ended'] or capture.get('external_photo')) and not historical_binding)):
+            raise HTTPException(409, '照片不属于该仪器的有效使用时段')
+        if linked and not historical_binding:
             current_asset = get_instrument(linked['instrument']['id'])
             if not current_asset or current_asset['scene'] != linked['instrument']['scene']:
                 raise HTTPException(409, '仪器所属场景已更改，请重新绑定')
@@ -616,17 +634,20 @@ def enqueue_ocr(body, *, trigger='explicit_request', precomputed_local=None):
             raise HTTPException(409, '图片仪器二维码与当前绑定冲突，请重新选择仪器')
         from readout_context import at_capture
         context = at_capture(globals(), conn, capture, linked=linked,
-                             automatic=body.auto_associate or bool(capture['matches']) or trigger in {'voice_photo_directory', 'video_stream'})
+                             automatic=body.auto_associate or bool(capture['matches']) or bool(capture.get('external_photo')) or trigger in {'voice_photo_directory', 'video_stream'})
         linked = context.pop('resolved_binding')
         binding_id = linked['binding_id'] if linked else None
         crop = body.crop if body.crop is not None else [0, 0, capture['width'], capture['height']]
         if len(crop) != 4 or min(crop[:2]) < 0 or min(crop[2:]) < 16 or crop[0]+crop[2] > capture['width'] or crop[1]+crop[3] > capture['height']:
             raise HTTPException(422, '面板选框超出图片，或区域太小')
-        for pending in conn.execute("SELECT document FROM jobs WHERE status IN ('queued','running')"):
+        repeatable = RECORD_MODE == 'production' or body.measurement is not None
+        lookup = 'SELECT status,document FROM jobs' + ('' if repeatable else " WHERE status IN ('queued','running')")
+        for pending in conn.execute(lookup):
             existing = json.loads(pending['document'])
             if (existing['binding_id'] == binding_id and existing['capture_id'] == str(body.capture_id)
                     and existing['crop'] == crop):
-                return existing
+                check_retry(existing, body.measurement, RECORD_MODE)
+                return existing | {'status': pending['status']}
         if conn.execute("SELECT count(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0] >= 4:
             raise HTTPException(429, 'OCR 正在处理，请稍候再提交')
         document = {'job_id': str(uuid.uuid4()), 'binding_id': binding_id,
@@ -643,6 +664,7 @@ def enqueue_ocr(body, *, trigger='explicit_request', precomputed_local=None):
                     'source': capture['source'], 'frame_metadata': capture.get('frame_metadata'),
                     'timing': dict(capture.get('photo_observation') or {}),
                     'external_photo': capture.get('external_photo'), 'request_trigger': trigger}
+        document['resume_pending'] = trigger != 'video_stream'
         document['video_observation'] = capture.get('video_observation')
         document.update(context)
         if not linked and context['instrument_candidates']:
@@ -658,6 +680,7 @@ def enqueue_ocr(body, *, trigger='explicit_request', precomputed_local=None):
         if precomputed_local is not None:
             document['precomputed_local'] = precomputed_local
         update_timing(document)
+        attach_measurement(globals(), conn, document, body.measurement)
         conn.execute('INSERT INTO jobs VALUES(?,?,?)', (document['job_id'], 'queued', json.dumps(document)))
     readout_pool.submit(run_ocr, dict(document))
     return document
@@ -685,6 +708,8 @@ def get_measurements(job_id: uuid.UUID):
     document = get_job(job_id)
     return {'job_id':str(job_id),'records':document.get('measurement_records',[]),
             'status':document['status'],
+            'record_scope': document.get('record_scope', 'legacy_test_only'),
+            'measurement_id': document.get('measurement_id'),
             'format_available':'measurement_records' in document}
 
 
@@ -712,9 +737,10 @@ def archive_file(relative: str):
     from archive_integrity import relative_file
     if not archive_store.enabled():
         raise HTTPException(404, '未启用 NAS 留存')
-    if (relative not in {'Readme.html', 'Index.json'}
+    if (relative not in {'Readme.html', 'Index.json', '00_归档导航.html'}
             and not re.fullmatch(r'(?:Receipts|Objects|Integrity)/[A-Za-z0-9_./-]+\.(?:json|png|jpg|jpeg|webp|bmp|tiff)', relative)
-            and not re.fullmatch(r'Browse/[A-Za-z0-9_./-]+\.(?:html|json)', relative)):
+            and not re.fullmatch(r'Browse/[A-Za-z0-9_./-]+\.(?:html|json)', relative)
+            and not re.fullmatch(r'01_业务数据/[\w./-]+\.(?:html|json)', relative)):
         raise HTTPException(404, '归档文件不存在')
     try:
         path = relative_file(archive_store._root(create=False), relative)
@@ -744,7 +770,12 @@ automatic_runner = install_automation(globals())
 from video_ocr import install as install_video_ocr
 video_ocr = install_video_ocr(globals())
 
+from instrument_ownership import install as install_ownership
+install_ownership(globals())
+
 from archive_store import ArchiveStore
+from photo_measurements import install as install_measurements
+install_measurements(globals())
 archive_store = ArchiveStore(globals())
 
 from agent_tools import install_tools

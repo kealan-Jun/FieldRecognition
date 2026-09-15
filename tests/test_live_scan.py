@@ -181,9 +181,11 @@ def test_service_session_lifetime_survives_app_recreation_then_invalidates_evide
     recreated.observe_service({'online': True, 'media_session_id': 13})
     assert client.post('/api/bindings', json=args).json()['binding_id'] == bound['binding_id']
     # Another camera's binding must survive this camera's service restart.
-    other = scan(client, camera='OtherCamera')
+    other = scan(client, 'InstrumentB', camera='OtherCamera')
     enter_scene(client, camera='OtherCamera')
-    other_bound = client.post('/api/bindings', json=args | {'scan_id': other['scan_id']}).json()
+    other_id = other['matches'][0]['id']
+    client.put('/api/instruments/'+other_id, json={'name': '另一仪器', 'scene': '湿实验实验台'})
+    other_bound = client.post('/api/bindings', json=args | {'scan_id': other['scan_id'], 'instrument_id': other_id}).json()
     recreated.observe_service({'online': False, 'media_session_id': 13})
     preserved=next(b for b in client.get('/api/state').json()['bindings'] if b['binding_id']==bound['binding_id'])
     assert not preserved['ended_at']

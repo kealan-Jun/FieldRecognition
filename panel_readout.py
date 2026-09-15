@@ -13,10 +13,18 @@ from readout_timing import update_timing
 
 
 def save(core, document):
+    if document['status'] in {'completed', 'failed', 'cancelled', 'interrupted'}:
+        shutdown = bool(core.get('stopping') and core['stopping'].is_set())
+        document['resume_pending'] = shutdown and document.get('request_trigger') != 'video_stream'
+        if document['resume_pending']:
+            document['status'] = 'interrupted'
     update_timing(document)
     with core['db']() as conn:
         conn.execute('UPDATE jobs SET status=?,document=? WHERE id=?',
                      (document['status'], json.dumps(document), document['job_id']))
+        if document.get('measurement_id'):
+            from photo_measurements import refresh
+            refresh(core, conn, document['measurement_id'])
 
 
 def run(core, document, *, clock=time.monotonic, pause=time.sleep):

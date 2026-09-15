@@ -49,7 +49,9 @@ def test_existing_photo_tool_preserves_receipt_and_reuses_even_completed_job(sav
     changed = photo | {'image_base64': base64.b64encode(b'changed').decode(), 'sha256': None}
     assert client.post('/api/ocr/photo-result', json=args | {'photo': changed}).status_code == 409
     client.post('/api/bindings/' + bound['binding_id'] + '/end')
-    assert client.post('/api/ocr/photo-result', json=args).status_code == 409
+    # A late retransmission belongs to its capture-time binding even after handoff/end.
+    late = client.post('/api/ocr/photo-result', json=args)
+    assert late.status_code == 202 and late.json()['job_id'] == first['job_id']
 
 
 @pytest.mark.parametrize('changes,status', [

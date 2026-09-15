@@ -199,6 +199,9 @@ function readoutIssue(job){
 const completeReadout=/^\s*[+-]?(?:\d+(?:[.,]\d+)?|[.,]\d+)(?:[eE][+-]?\d+)?\s*(?:%|°?[CF]|℃|℉|[μµu]?g|kg|mg|ml|mL|L|rpm|r\/min|[mkM]?[AVW]|[kM]?Hz|Pa|kPa|MPa|bar|mm|cm|m|s|min|h|pH|ppm)?\s*$/i;
 function renderOcr(job){
   const target=$('#ocrResults');
+  if(job.record_scope==='draft'){
+    target.innerHTML=readoutPhoto(job)+`<p>拍照 OCR ${['queued','running'].includes(job.status)?'正在处理':'已生成测量草稿'}，确认后提交实验记录。</p><a href="/photo-measurements">查看草稿与校正 ↗</a>`;return;
+  }
   if(['queued','running'].includes(job.status)){
     const phase={local_ocr:'正在识别面板',waiting_readout:'暂未读到数字，继续等待识别结果',extended_reading:'正在进一步识别面板'}[job.phase]||'任务已入队';
     target.innerHTML=readoutPhoto(job)+`<p>◌ ${phase}…</p>`;return;
@@ -230,6 +233,7 @@ function renderLatestJob(){
   }
 }
 function renderPhotoWatch(){
+  $('#recordPolicy').textContent=state.record_policy?.mode==='production'?'生产拍照草稿 · 确认提交 ↗':'测试用途 · 查看测量草稿 ↗';
   const watch=state.photo_watch;
   if(!watch){$('#photoWatchState').textContent='';return;}
   const labels={disabled:'照片监控未开启',waiting_binding:'正在准备照片监控',watching:'正在等待新的语音拍照文件',waiting_photo:'等待这台相机的第一张语音照片',waiting_queue:'已有照片正在识别，稍后处理新照片',storage_unavailable:'拍照存储暂不可用，正在等待恢复',storage_unconfigured:'尚未配置拍照存储',watch_error:'照片监控暂不可用',invalid_camera_directory:'相机照片目录不可用'};
@@ -319,7 +323,7 @@ function renderWorkbenches(){
 function renderHistory(){
   if(!state)return;
   const archive=state.archive||{};
-  $('#archiveStatus').textContent=archive.enabled?`NAS 留存：${archive.status==='ready'?'已连接':archive.status==='retrying'?'等待重试，记录保留在本机':'正在连接'} · 已归档 ${archive.archived_receipts||0} 个版本 · 待同步 ${archive.pending_receipts||0} 个版本`:'NAS 留存未启用，记录保存在本机。';
+  $('#archiveStatus').textContent=archive.enabled?`NAS 留存：${archive.status==='ready'?'已连接':archive.status==='retrying'?'等待重试，记录保留在本机':'正在连接'} · 已归档 ${archive.archived_receipts||0} 个版本 · 待同步 ${archive.pending_receipts||0} 个版本${archive.navigation_pending?' · 中文目录待同步':''}`:'NAS 留存未启用，记录保存在本机。';
   $('#archiveStatus').title=archive.root||'';
   const integrity=archive.integrity||{},check=integrity.last_report;
   $('#integrityStatus').textContent=integrity.status==='running'?'完整性巡检进行中':check?`最近巡检：${{completed:'校验通过',findings:'发现异常',unavailable:'存储暂不可用',interrupted:'检查中断'}[check.status]||check.status} · ${stamp(check.finished_at)} · ${check.issue_count} 项异常`:'等待首次完整性巡检';

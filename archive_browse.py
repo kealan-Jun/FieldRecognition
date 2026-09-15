@@ -15,6 +15,9 @@ CATEGORIES = {
     'VoicePhotos': ('语音拍照读数', '按相机、拍摄日期查原语音照片文件及识别结果。'),
     'WorkbenchReadings': ('实验台总览', '按实验台、日期汇总仪器读数和未确定仪器归属的读数。'),
     'Photos': ('照片留存', '按照片日期、相机查看原图、面板图及 SHA-256。'),
+    'PhotoDrafts': ('拍照测量草稿', '一次连拍对应一份草稿，保留原文、字段证据和修订历史；不代表已提交。'),
+    'ExperimentRecords': ('已确认实验记录', '仅包含生产模式人工确认的测量，每次测量只提交一条记录。'),
+    'Handoffs': ('设备交接', '查看谁申请接收、原使用人何时交出、接收人何时确认，原绑定不会被覆盖。'),
 }
 
 
@@ -37,7 +40,9 @@ def page(title, body):
     return ('<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
         '<title>'+html.escape(title)+'</title><style>body{max-width:1100px;margin:32px auto;padding:0 20px;font:15px/1.7 system-ui;color:#183c43;background:#f4f8f8}'
         'a{color:#246a70}article{background:white;border:1px solid #dce7e8;border-radius:12px;padding:24px;margin:16px 0}'
-        'dt{color:#61787e}dd{margin:0 0 12px;overflow-wrap:anywhere}img{max-width:100%;max-height:650px;object-fit:contain}li{margin:10px 0}small{color:#61787e}</style>'
+        'dt{color:#61787e}dd{margin:0 0 12px;overflow-wrap:anywhere}img{max-width:100%;max-height:650px;object-fit:contain}li{margin:10px 0}small{color:#61787e}'
+        'table{width:100%;border-collapse:collapse}td,th{text-align:left;border-bottom:1px solid #dce7e8;padding:10px;overflow-wrap:anywhere}input{font:inherit;padding:8px;max-width:100%}[hidden]{display:none!important}'
+        '.business-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.business-grid article{margin:0;padding:16px 20px}.business-grid h2{font-size:18px;margin:0 0 8px}.business-grid p{margin:5px 0;overflow-wrap:anywhere}@media(max-width:650px){.business-grid{grid-template-columns:1fr}}</style>'
         '<h1>'+html.escape(title)+'</h1>'+body+'</html>').encode()
 
 
@@ -50,7 +55,7 @@ def build_views(rows):
         if key not in latest or row['seq'] > latest[key]['seq']:
             latest[key] = row
     captures = {ident: json.loads(row['document']) for (entity, ident), row in latest.items() if entity == 'scans'}
-    views, catalog = {}, {key: [] for key in CATEGORIES}
+    views, catalog, business = {}, {key: [] for key in CATEGORIES}, []
     esc = lambda value: html.escape(str(value if value is not None else '未记录'))
 
     def record(category, parts, title, data):
@@ -84,11 +89,36 @@ def build_views(rows):
             body += '</article>'
         body += '<article><h2>原始回执版本</h2><ul>'+''.join('<li><a href="'+link(v['receipt'])+'">版本 '+str(v['sequence'])+'</a></li>' for v in data['receipt_versions'])+'</ul></article>'
         views[str(directory / 'Readme.html')] = page(title, body)
+        business.append((category, data, str(directory / 'Readme.html')))
         catalog[category].append({'title': title, 'local_time': data['local_time'], 'record': str(directory / 'Record.json'),
                                   'page': str(directory / 'Readme.html'), 'entity_id': data['entity_id']})
 
     for (entity, ident), row in latest.items():
-        if entity not in {'bindings', 'scene_visits', 'jobs', 'scans'}:
+        if entity in {'photo_measurements', 'experiment_records'}:
+            doc = json.loads(row['document'])
+            local = local_time(doc.get('confirmed_at') or doc.get('created_at') or row['recorded_at'])
+            category = 'ExperimentRecords' if entity == 'experiment_records' else 'PhotoDrafts'
+            photos = {}
+            for source in doc.get('sources', []):
+                for kind, digest, suffix in [('image', source.get('image_sha256'), '.png'),
+                        ('original', source.get('source_sha256'), PurePosixPath(source.get('original_blob') or '').suffix)]:
+                    path = artifact_path(digest, suffix)
+                    if path:
+                        photos.setdefault('image' if not photos and kind == 'image' else source['capture_id'] + '_' + kind,
+                                          {'path': path, 'sha256': digest})
+                for region in source.get('panel_regions', []):
+                    path = artifact_path(region.get('image_sha256'))
+                    if path:
+                        photos[source['capture_id'] + '_' + region['panel_id']] = {'path': path, 'sha256': region['image_sha256']}
+            title = local.strftime('%Y-%m-%d %H:%M:%S') + ' · ' + ('已确认测量' if entity == 'experiment_records' else '测量草稿')
+            record(category, [local.date().isoformat(), doc['camera_id'], ident], title, {
+                'entity': entity, 'entity_id': ident, 'camera_id': doc['camera_id'],
+                'local_time': local.strftime('%Y-%m-%d %H:%M:%S'), 'status': doc['status'],
+                'record_scope': doc['record_scope'], 'measurement_draft': doc, 'photos': photos,
+                'operator': (doc.get('confirmation') or {}).get('actor'),
+                'receipt_versions': versions[(entity, ident)]})
+            continue
+        if entity not in {'bindings', 'scene_visits', 'jobs', 'scans', 'binding_handoffs'}:
             continue
         doc = json.loads(row['document'])
         capture = doc if entity == 'scans' else captures.get(doc.get('capture_id') or doc.get('scan_id'), {})
@@ -123,13 +153,20 @@ def build_views(rows):
             'instrument_candidates': doc.get('instrument_candidates', []), 'workbench': workbench,
             'readings': readings, 'panel_regions':doc.get('panel_regions', []), 'panel_detection':doc.get('panel_detection'), 'source_ref': external.get('source_ref'), 'external_capture_id': external.get('capture_id'),
             'measurement_records':doc.get('measurement_records',[]),
+            'record_scope':doc.get('record_scope', 'legacy_test_only') if entity == 'jobs' else 'evidence',
             'captured_at': external.get('captured_at'), 'source_written_at': external.get('source_written_at'),
             'input_mode': 'voice_photo' if external else 'video' if doc.get('request_trigger') == 'video_stream' else 'other',
             'timing': doc.get('timing'), 'photos': photos, 'receipt_versions': sorted(versions[(entity, ident)], key=lambda v:v['sequence'])}
         title = common['local_time']+' · '+target
-        if entity in {'bindings', 'scene_visits'}:
+        if entity == 'binding_handoffs':
+            record('Handoffs', [day, camera, ident], title, common | {'handoff': doc})
+        elif entity in {'bindings', 'scene_visits'}:
             record('Bindings', [day, camera, ident], title+' · '+str(doc.get('operator') or '未登记人员').replace('Demo验证', '样张验证'), common)
         elif entity == 'jobs':
+            if doc.get('record_scope') == 'draft':
+                # Production OCR receipts stay in Receipts; the grouped draft/confirmed
+                # record, not every image, is the business browsing unit.
+                continue
             groups = {}
             measurements = {r['instrument_id']:r for r in doc.get('measurement_records',[])}
             for reading in readings:
@@ -163,4 +200,6 @@ def build_views(rows):
     body += '<p>照片原件统一保存在 <code>Objects/</code>，各分类引用同一份文件，避免重复存储。完整历史回执在 <code>Receipts/</code>；巡检在 <code>Integrity/</code>。Browse 是可重建的查阅视图，原始回执才是历史依据。</p><p><a href="../Readme.html">全量检索与完整性巡检</a> · <a href="Catalog.json">分类目录 JSON</a></p>'
     views['Browse/Readme.html'] = page('NAS 文件夹查阅指南', body)
     views['Browse/Catalog.json'] = json.dumps({'schema':'field-recognition-folders/1', 'categories':catalog}, ensure_ascii=False, indent=2).encode()
+    from archive_readable import build_readable
+    views.update(build_readable(business, page))
     return views

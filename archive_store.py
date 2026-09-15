@@ -12,7 +12,9 @@ from zoneinfo import ZoneInfo
 from readout_timing import elapsed_ms
 
 
-TABLES = {'scans': 'id', 'bindings': 'id', 'scene_visits': 'id', 'jobs': 'id', 'automation_settings': 'camera'}
+TABLES = {'scans': 'id', 'bindings': 'id', 'scene_visits': 'id', 'jobs': 'id', 'automation_settings': 'camera',
+          'photo_measurements': 'id', 'experiment_records': 'id'}
+TABLES['binding_handoffs'] = 'id'
 
 
 def receipt_status(conn, entity, entity_id, source_written_at=None):
@@ -78,7 +80,7 @@ class ArchiveStore:
         self.status = {'status': 'disabled', 'last_error': None, 'last_archived_at': None}
         base = Path(__file__).parent
         self.index_version = '2:' + hashlib.sha256(b''.join((base / p).read_bytes()
-            for p in ('archive_catalog.py', 'archive_browse.py', 'static/archive.html', 'static/archive.js'))).hexdigest()[:16]
+            for p in ('archive_catalog.py', 'archive_browse.py', 'archive_readable.py', 'static/archive.html', 'static/archive.js'))).hexdigest()[:16]
         with core['db']() as conn:
             conn.executescript('''
                 CREATE TABLE IF NOT EXISTS archive_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -96,6 +98,8 @@ class ArchiveStore:
             conn.execute('INSERT OR IGNORE INTO archive_meta VALUES(?,?)', ('source_instance', str(uuid.uuid4())))
             self.instance = conn.execute("SELECT value FROM archive_meta WHERE key='source_instance'").fetchone()[0]
             for table, key in TABLES.items():
+                if not conn.execute('SELECT 1 FROM sqlite_master WHERE type=\'table\' AND name=?', (table,)).fetchone():
+                    continue
                 document = "json_set(NEW.document,'$.status',NEW.status)" if table == 'jobs' else 'NEW.document'
                 changed = 'NEW.document != OLD.document' + (' OR NEW.status != OLD.status' if table == 'jobs' else '')
                 for action, suffix in [('INSERT', ''), ('UPDATE', ' WHEN ' + changed)]:
@@ -105,6 +109,8 @@ class ArchiveStore:
                         VALUES('{table}',NEW.{key},{document},strftime('%Y-%m-%dT%H:%M:%fZ','now')); END''')
             if not conn.execute("SELECT 1 FROM archive_meta WHERE key='backfilled'").fetchone():
                 for table, key in TABLES.items():
+                    if not conn.execute('SELECT 1 FROM sqlite_master WHERE type=\'table\' AND name=?', (table,)).fetchone():
+                        continue
                     document = "json_set(document,'$.status',status)" if table == 'jobs' else 'document'
                     conn.execute(f'''INSERT INTO archive_outbox(entity,entity_id,document,recorded_at)
                         SELECT ?,{key},{document},? FROM {table}''', (table, core['now']()))
@@ -125,9 +131,11 @@ class ArchiveStore:
         with self.core['db']() as conn:
             pending, archived = conn.execute('SELECT count(*) FILTER (WHERE archived_at IS NULL), '
                                              'count(*) FILTER (WHERE archived_at IS NOT NULL) FROM archive_outbox').fetchone()
+            indexed = dict(conn.execute("SELECT key,value FROM archive_meta WHERE key IN ('index_count','index_version')"))
         with self.lock:
             status = dict(self.status)
         return status | {'enabled': self.enabled(), 'pending_receipts': pending, 'archived_receipts': archived,
+                         'navigation_pending': self.enabled() and (indexed.get('index_count') != str(archived) or indexed.get('index_version') != self.index_version),
                          'root': os.environ.get('FIELD_ARCHIVE_ROOT'), 'source_instance': self.instance,
                          'ordinary_video_frames_saved': False, 'integrity': self.integrity.snapshot()}
 
@@ -195,6 +203,14 @@ class ArchiveStore:
             if region.get('image_sha256'):
                 ident = str(uuid.UUID(region['evidence_id']))
                 artifacts['panel_' + ident] = self._artifact(root, Path('Images') / (ident + '.png'), region['image_sha256'])
+        if row['entity'] in {'photo_measurements', 'experiment_records'}:
+            for source in doc.get('sources', []):
+                for kind, artifact in self._capture_artifacts(root, source).items():
+                    artifacts[source['capture_id'] + '_' + kind] = artifact
+                for region in source.get('panel_regions', []):
+                    if region.get('image_sha256'):
+                        ident = str(uuid.UUID(region['evidence_id']))
+                        artifacts['panel_' + ident] = self._artifact(root, Path('Images') / (ident + '.png'), region['image_sha256'])
         receipt = {'schema': 'field-recognition-receipt/1', 'source_instance': self.instance,
                    'sequence': row['seq'], 'entity': row['entity'], 'entity_id': row['entity_id'],
                    'recorded_at': row['recorded_at'], 'document': doc, 'artifacts': artifacts,
@@ -218,18 +234,41 @@ class ArchiveStore:
     def write_index(self):
         from archive_catalog import build_index, render_index
         from archive_browse import build_views
+        with self.lock:
+            self.status.update(status='indexing')
         root = self._root()
         with self.core['db']() as conn:
             rows = conn.execute('SELECT * FROM archive_outbox WHERE archived_at IS NOT NULL ORDER BY seq DESC').fetchall()
         index = build_index(rows, self.instance, self.core['now'](), self.integrity.snapshot())
         replace_view(root / 'Index.json', canonical(index))
         replace_view(root / 'Readme.html', render_index(index))
-        for relative, content in build_views(rows).items():
+        views = build_views(rows)
+        for relative, content in views.items():
             digest = hashlib.sha256(content).hexdigest()
             if self.browse_digests.get(relative) != digest or not (root / relative).is_file():
                 replace_view(root / relative, content)
                 self.browse_digests[relative] = digest
+        # Only remove obsolete generated navigation files, never receipt/object data
+        # or user files. A corrected target may move a readable record's folder.
+        current = sorted(p for p in views if p.startswith('01_业务数据/'))
         with self.core['db']() as conn:
+            previous = conn.execute("SELECT value FROM archive_meta WHERE key='readable_files'").fetchone()
+        for relative in set(json.loads(previous[0]) if previous else []) - set(current):
+            from archive_integrity import relative_file
+            path = relative_file(root, relative)
+            if not relative.startswith('01_业务数据/') or path.suffix not in {'.html', '.json'}:
+                continue
+            path.relative_to((root / '01_业务数据').resolve())
+            path.unlink(missing_ok=True)
+            parent = path.parent
+            while parent != root / '01_业务数据':
+                try:
+                    parent.rmdir()
+                except OSError:
+                    break
+                parent = parent.parent
+        with self.core['db']() as conn:
+            conn.execute('INSERT OR REPLACE INTO archive_meta VALUES(?,?)', ('readable_files', json.dumps(current)))
             conn.execute('INSERT OR REPLACE INTO archive_meta VALUES(?,?)', ('index_count', str(len(rows))))
             conn.execute('INSERT OR REPLACE INTO archive_meta VALUES(?,?)', ('index_version', self.index_version))
             conn.execute('INSERT OR REPLACE INTO archive_meta VALUES(?,?)', ('index_integrity', index['integrity'].get('report_path') or ''))
@@ -270,7 +309,7 @@ class ArchiveStore:
         if (not indexed or int(indexed[0]) != archived or not version or version[0] != self.index_version
                 or not audit or audit[0] != (self.integrity.snapshot()['report_path'] or '')
                 or not (root / 'Readme.html').is_file() or not (root / 'Index.json').is_file()
-                or not (root / 'Browse/Readme.html').is_file()):
+                or not (root / 'Browse/Readme.html').is_file() or not (root / '00_归档导航.html').is_file()):
             self.write_index()
         with self.core['db']() as conn:
             failed = conn.execute('SELECT last_error FROM archive_outbox WHERE archived_at IS NULL AND last_error IS NOT NULL LIMIT 1').fetchone()

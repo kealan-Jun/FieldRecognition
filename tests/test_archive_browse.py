@@ -32,12 +32,22 @@ def test_classified_folders_keep_photos_source_times_and_immutable_versions(arch
     for artifact in doc['photos'].values():
         assert hashlib.sha256((root/artifact['path']).read_bytes()).hexdigest()==artifact['sha256']
     # Every local link and embedded image resolves within the standalone archive.
-    for path in root.glob('Browse/**/*.html'):
+    assert (root/'00_归档导航.html').is_file()
+    assert not app.archive_store.snapshot()['navigation_pending']
+    chinese = list(root.glob('01_业务数据/04_语音拍照读数/*/甲/*/*/记录.json'))
+    assert len(chinese) == 1
+    readable = json.loads(chinese[0].read_text())
+    assert readable['values'][0]['value'] == '0.0000'
+    assert readable['values'][0]['unit'] == 'g'
+    assert readable['record_scope'] == 'test_only'
+    for path in [*root.glob('Browse/**/*.html'), *root.glob('01_业务数据/**/*.html'), root/'00_归档导航.html']:
         for ref in re.findall(r'(?:href|src)="([^"]+)"',path.read_text()):
             destination=(path.parent/unquote(ref)).resolve()
             destination.relative_to(root.resolve())
             assert destination.is_file(),(path,ref)
     assert client.get('/api/archive/files/'+entry['page']).status_code==200
+    assert client.get('/api/archive/files/00_归档导航.html').status_code == 200
+    assert client.get('/api/archive/files/' + chinese[0].relative_to(root).as_posix()).status_code == 200
     assert client.get('/api/archive/files/Browse/%2e%2e/.env').status_code==404
     client.post('/api/bindings/'+binding['binding_id']+'/end')
     app.archive_store.step(batch_size=100)
@@ -46,6 +56,30 @@ def test_classified_folders_keep_photos_source_times_and_immutable_versions(arch
     changed=json.loads((root/ended['record']).read_text())
     assert changed['started_at']==binding['started_at'] and changed['ended_at']
     assert len(changed['receipt_versions'])==2
+
+
+def test_readable_views_replace_changed_target_without_touching_evidence_or_user_files(archive):
+    app, client, root = archive
+    capture = scan(client)
+    iid = capture['matches'][0]['id']; register(client, iid)
+    binding = client.post('/api/bindings', json={'scan_id':capture['scan_id'],'instrument_id':iid,'operator':'甲'}).json()
+    app.archive_store.step(batch_size=100)
+    old = next(root.glob('01_业务数据/01_绑定记录/*/甲/*/*/记录.json'))
+    note = old.parent/'个人备注.txt'; note.write_text('保留')
+    originals = {p: p.read_bytes() for p in root.glob('Objects/**/*') if p.is_file()}
+    receipts = {p: p.read_bytes() for p in root.glob('Receipts/**/*.json')}
+    with app.db() as conn:
+        updated = binding | {'operator':'乙'}
+        conn.execute('UPDATE bindings SET document=? WHERE id=?', (json.dumps(updated),binding['binding_id']))
+    app.archive_store.step(batch_size=100)
+    assert not old.exists() and note.read_text() == '保留'
+    assert len(list(root.glob('01_业务数据/01_绑定记录/*/乙/*/*/记录.json'))) == 1
+    assert all(p.read_bytes() == raw for p, raw in (originals | receipts).items())
+    app.archive_store.index_version += '-new-layout'
+    assert app.archive_store.snapshot()['pending_receipts'] == 0
+    assert app.archive_store.snapshot()['navigation_pending']
+    for relative in ['01_业务数据/../../.env','01_业务数据/../Receipts/unknown.json']:
+        assert client.get('/api/archive/files/' + relative).status_code == 404
 
 
 def test_unassigned_multicode_readout_is_not_filed_as_first_instrument():

@@ -183,7 +183,12 @@ class LiveScanner:
                 self.core['bind'](self.core['BindingRequest'](scan_id=result['scan_id'],
                     instrument_id=instrument['id'], operator=self.session['operator']), automatic=True)
             except HTTPException as exc:
-                errors.append(str(exc.detail))
+                if isinstance(exc.detail, dict):
+                    detail = exc.detail
+                    errors.append(detail.get('message', '需要处理交接') +
+                        (f"：{detail['operator']} · {detail['camera_id']} · 开始于 {detail['started_at']}" if detail.get('operator') else ''))
+                else:
+                    errors.append(str(exc.detail))
         self.refresh_bindings()
         self.session.update(status='scanning', binding_errors=errors)
         if errors:

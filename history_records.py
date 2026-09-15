@@ -10,6 +10,8 @@ from reading_results import build_readings
 
 
 def panel_readings(document, status=None):
+    if document.get('record_scope') == 'draft':
+        return []
     if (status or document.get('status')) != 'completed' or document.get('recognition_skipped'):
         return []
     regions = {r['panel_id']: r for r in document.get('panel_regions', [])}

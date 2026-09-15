@@ -30,6 +30,10 @@ class SavedPhotoWatcher:
             conn.execute('CREATE TABLE IF NOT EXISTS photo_watch_files(camera TEXT, path TEXT, signature TEXT, '
                          'status TEXT, job_id TEXT, detail TEXT, observed_at TEXT, PRIMARY KEY(camera,path))')
             conn.execute('CREATE TABLE IF NOT EXISTS photo_watch_windows(camera TEXT PRIMARY KEY, started_at TEXT NOT NULL)')
+            conn.execute('CREATE TABLE IF NOT EXISTS photo_ingest_queue(camera TEXT,path TEXT,signature TEXT,document TEXT NOT NULL,PRIMARY KEY(camera,path))')
+            for row in conn.execute('SELECT path,signature,document FROM photo_ingest_queue'):
+                item = json.loads(row['document'])
+                self.pending[row['path']] = (row['signature'], self.clock(), item['first_observed_at'], item['is_backfill'], item.get('stable_at'))
 
     def enabled(self):
         return os.environ.get('FIELD_SAVED_PHOTO_WATCH_ENABLED', '0').lower() in {'1', 'true', 'yes'}
@@ -37,7 +41,10 @@ class SavedPhotoWatcher:
     def snapshot(self):
         with self.lock:
             result = copy.deepcopy(self.state)
+        with self.core['db']() as conn:
+            queued = conn.execute('SELECT count(*) FROM photo_ingest_queue').fetchone()[0]
         return result | {'enabled': self.enabled(), 'configured': bool(os.environ.get('FIELD_SAVED_PHOTO_ROOT')),
+                         'persisted_pending_files': queued,
                          'poll_seconds': POLL_SECONDS, 'stable_seconds': STABLE_SECONDS, 'reads_existing_photos_only': True}
 
     def start(self):
@@ -157,9 +164,22 @@ class SavedPhotoWatcher:
             if not prior or prior[0] != signature:
                 self.pending[relative] = (signature, self.clock(), self.core['now'](),
                                           time.time() - written > 30, None)
+                with self.core['db']() as conn:
+                    stored = conn.execute('SELECT signature,document FROM photo_ingest_queue WHERE camera=? AND path=?', (camera, relative)).fetchone()
+                if stored and stored['signature'] == signature:
+                    item = json.loads(stored['document'])
+                    self.pending[relative] = (signature, self.clock(), item['first_observed_at'], item['is_backfill'], None)
             prior = self.pending[relative]
             if self.clock() - prior[1] >= STABLE_SECONDS and prior[4] is None:
                 self.pending[relative] = prior[:4] + (self.core['now'](),)
+            prior = self.pending[relative]
+            with self.core['db']() as conn:
+                row = conn.execute('SELECT signature,document FROM photo_ingest_queue WHERE camera=? AND path=?', (camera, relative)).fetchone()
+                item = json.loads(row['document']) if row and row['signature'] == signature else {'attempts': 0, 'retry_after': 0}
+                item.update(first_observed_at=prior[2], stable_at=prior[4], is_backfill=prior[3])
+                raw = json.dumps(item)
+                if not row or row['signature'] != signature or row['document'] != raw:
+                    conn.execute('INSERT OR REPLACE INTO photo_ingest_queue VALUES(?,?,?,?)', (camera, relative, signature, raw))
         if queue_full:
             self.update(status='waiting_queue')
             return
@@ -169,6 +189,10 @@ class SavedPhotoWatcher:
                 continue
             if self.stop.is_set():
                 return
+            with self.core['db']() as conn:
+                item = json.loads(conn.execute('SELECT document FROM photo_ingest_queue WHERE camera=? AND path=?', (camera, relative)).fetchone()[0])
+            if item.get('retry_after', 0) > time.time():
+                continue
             try:
                 body = self.core['SavedPhotoRequest'](image_path=relative)
                 job = self.core['read_saved_panel'](body, trigger='voice_photo_directory',
@@ -177,13 +201,17 @@ class SavedPhotoWatcher:
                                  'file_stable_seconds': STABLE_SECONDS})
                 status, detail, job_id = 'submitted', None, job['job_id']
             except HTTPException as exc:
-                if exc.status_code == 429:
-                    self.update(status='waiting_queue')
+                if exc.status_code in {429, 502, 503, 504} or (exc.status_code == 409 and '仍在写入' in str(exc.detail)):
+                    item.update(attempts=item.get('attempts', 0)+1, retry_after=time.time()+(1 if exc.status_code==429 else 3), last_error=str(exc.detail))
+                    with self.core['db']() as conn:
+                        conn.execute('UPDATE photo_ingest_queue SET document=? WHERE camera=? AND path=?', (json.dumps(item), camera, relative))
+                    self.update(status='waiting_queue' if exc.status_code == 429 else 'storage_unavailable', detail=str(exc.detail))
                     return
                 status, detail, job_id = 'rejected', str(exc.detail), None
             with self.core['db']() as conn:
                 conn.execute('INSERT OR REPLACE INTO photo_watch_files VALUES(?,?,?,?,?,?,?)',
                              (camera, relative, signature, status, job_id, detail, self.core['now']()))
+                conn.execute('DELETE FROM photo_ingest_queue WHERE camera=? AND path=?', (camera, relative))
             self.pending.pop(relative, None)
             self.update(last_photo=relative, last_job_id=job_id, last_photo_status=status, detail=detail)
             # At most one new photo per poll, with the existing global queue bound.
