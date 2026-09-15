@@ -14,7 +14,7 @@ class ProductionConfig(BaseModel):
     record_mode: Literal['test', 'production'] = Field(default='test')
     database_path: str = Field(default='Data/Demo.sqlite3')
 
-    # Authentication (required in production)
+    # Optional account login; independent of process and record modes.
     auth_enabled: bool = Field(default=False)
     require_device_credentials: bool = Field(default=False)
     session_duration_hours: int = Field(default=8, ge=1, le=72)
@@ -84,16 +84,12 @@ class ProductionConfig(BaseModel):
         if self.record_mode != 'production':
             return errors  # Only validate production mode
 
-        # Authentication must be enabled in production
-        if not self.auth_enabled:
-            errors.append('auth_enabled must be true in production mode')
-
         # Archive should be enabled in production
         if not self.archive_enabled:
             errors.append('Warning: archive_enabled should be true in production')
 
         # Device credentials should be required
-        if not self.require_device_credentials:
+        if self.auth_enabled and not self.require_device_credentials:
             errors.append('Warning: require_device_credentials should be true in production')
 
         # Photo watch recommended
@@ -122,7 +118,7 @@ class ProductionConfig(BaseModel):
         return cls(
             record_mode=os.environ.get('FIELD_RECORD_MODE', 'test'),
             database_path=os.environ.get('FIELD_DATABASE_PATH') or str(Path(os.environ.get('FIELD_DEMO_DATA', 'Data')) / 'Demo.sqlite3'),
-            auth_enabled=os.environ.get('FIELD_AUTH_ENABLED', '0') == '1' or os.environ.get('FIELD_PRODUCTION_ENABLED','0')=='1',
+            auth_enabled=os.environ.get('FIELD_AUTH_ENABLED', '0') == '1',
             require_device_credentials=os.environ.get('FIELD_REQUIRE_DEVICE_CREDENTIALS', '0') == '1',
             ocr_device=os.environ.get('FIELD_OCR_DEVICE', 'cpu'),
             receiver_url=os.environ.get('FIELD_RECEIVER_URL'),

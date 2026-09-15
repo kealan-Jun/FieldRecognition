@@ -1,6 +1,6 @@
 # 现场识别 Agent 工具 v1
 
-2026-09-15：托管部署所有业务工具要求会话身份，使用 `Authorization: Bearer <session>`；多相机请求用 `X-Camera-Id` 选择本人相机。`FieldTools(..., session_token=..., camera_id=...)` 支持这两个参数。增加测量读取、修订、确认、拒绝及交接申请、决策六个工具，共 15 个，精确参数以 `/api/tools` 为准。它们与网页共用证据事务和权限。队列支持持久化重试及租约恢复；参阅 [托管运行说明](docs/ProductionRuntime.md)。
+2026-09-15：托管部署默认免登录，业务工具可直接调用；多相机请求用 `X-Camera-Id` 选择已登记相机。仅显式设置 `FIELD_AUTH_ENABLED=1` 时要求 `Authorization: Bearer <session>` 并按账号限制相机。`FieldTools(..., session_token=..., camera_id=...)` 支持这两个参数。增加测量读取、修订、确认、拒绝及交接申请、决策六个工具，共 15 个，精确参数以 `/api/tools` 为准。它们与网页共用证据事务；免登录时使用登记的实验员与请求声明的操作人，不标记为已认证账号。队列支持持久化重试及租约恢复；参阅 [托管运行说明](docs/ProductionRuntime.md)。
 
 2026-09-14 更新：原有九个工具保持兼容，新增多关联、实时视频 OCR 和实验台分类 HTTP 接口，见 [多二维码与实时视频 OCR](docs/多二维码与实时视频OCR.md)。以下单绑定字段是兼容字段；多候选使用 `binding_ids` / `instrument_candidates` / `readings`，不可取第一条作为默认归属。
 

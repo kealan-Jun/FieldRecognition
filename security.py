@@ -255,12 +255,14 @@ def install(core, enabled):
 
     @app.get('/login',include_in_schema=False)
     def login_page():
+        if not enabled:
+            return RedirectResponse('/',status_code=303,headers={'Cache-Control':'no-store'})
         return FileResponse(core['BASE']/'static'/'login.html',headers={'Cache-Control':'no-store'})
 
     @app.post('/api/auth/login')
     def login(body:dict, request:Request):
         if not enabled:
-            raise HTTPException(503,'此隔离实例未启用账号认证')
+            raise HTTPException(404,'登录功能已关闭，请直接打开工作台')
         username=body.get('username','');password=body.get('password','')
         if not isinstance(username,str) or not isinstance(password,str) or len(username)>100 or len(password)>1000:
             raise HTTPException(422,'登录参数无效')
@@ -282,26 +284,34 @@ def install(core, enabled):
 
     @app.get('/api/auth/me')
     def me(request:Request):
+        if not enabled:
+            return {'auth_enabled':False,'user_id':None,'csrf_token':None}
         p=current()
         if not p:
             raise HTTPException(401,'请登录')
         token=request.cookies.get('field_session','')
-        return {'user_id':p.user_id,'display_name':p.display_name,'role':p.role,'camera_ids':sorted(p.cameras),'csrf_token':hashlib.sha256(token.encode()).hexdigest() if token else None}
+        return {'auth_enabled':True,'user_id':p.user_id,'display_name':p.display_name,'role':p.role,'camera_ids':sorted(p.cameras),'csrf_token':hashlib.sha256(token.encode()).hexdigest() if token else None}
 
     @app.post('/api/auth/logout')
     def logout(request:Request):
         token=request.cookies.get('field_session') or request.headers.get('x-session-id') or request.headers.get('authorization','').removeprefix('Bearer ')
-        core['auth_service'].logout(token)
+        if enabled:
+            core['auth_service'].logout(token)
         response=JSONResponse({'logged_out':True});response.delete_cookie('field_session');return response
+
+    def require_account_admin():
+        if not enabled:
+            raise HTTPException(404,'登录功能已关闭')
+        require_role('admin')
 
     @app.post('/api/admin/users')
     def create_user(body:CreateUser):
-        require_role('admin')
+        require_account_admin()
         return core['auth_service'].create_user(body.username,body.display_name,body.role,body.password,current().user_id).model_dump()
 
     @app.put('/api/admin/users/{user_id}/disabled')
     def disable_user(user_id:str,disabled:bool):
-        require_role('admin')
+        require_account_admin()
         with core['database'].transaction('IMMEDIATE') as conn:
             row=conn.execute('SELECT role FROM users WHERE id=?',(user_id,)).fetchone()
             if not row:raise HTTPException(404,'账号不存在')
@@ -327,7 +337,7 @@ def install(core, enabled):
 
     @app.post('/api/admin/cameras/{camera_id}/credential')
     def credential(camera_id:str):
-        require_role('admin')
+        require_account_admin()
         token=secrets.token_urlsafe(32)
         core['auth_service'].register_device(camera_id,'neck_camera',token,current().user_id)
         return {'camera_id':camera_id,'credential':token,'display_once':True}

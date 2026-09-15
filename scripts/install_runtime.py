@@ -1,4 +1,4 @@
-"""Install local user units after explicit database/account preparation."""
+"""Install local user units after database and camera registration preparation."""
 import os
 from pathlib import Path
 import shutil
@@ -14,8 +14,6 @@ def main():
     data=Path(os.environ.get('FIELD_DEMO_DATA',root/'Data'))
     db=Database(os.environ.get('FIELD_DATABASE_PATH',data/'Demo.sqlite3'))
     if get_migration_status(db)['pending']:raise SystemExit('Run prepare_runtime.py first')
-    with db.connection() as conn:
-        if not conn.execute("SELECT 1 FROM users WHERE role='admin' AND disabled=0").fetchone():raise SystemExit('Prepare an administrator first')
     # Preserve GPU/camera settings from the original unit's drop-ins, without
     # printing credentials or making any environment change in other projects.
     runtime=data/'Runtime';runtime.mkdir(parents=True,exist_ok=True,mode=0o700)

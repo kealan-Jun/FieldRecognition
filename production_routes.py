@@ -68,7 +68,10 @@ def install(core):
     @app.post('/api/admin/jobs/{job_id}/replay')
     def replay(job_id:str,body:dict):
         require_role('admin')
-        return TaskQueue(core['database']).replay(job_id,current().user_id,body.get('reason',''))
+        actor=current().user_id if current() else body.get('actor')
+        if not isinstance(actor,str) or not actor.strip() or len(actor)>200:
+            raise HTTPException(422,'请填写本次重放的操作人')
+        return TaskQueue(core['database']).replay(job_id,actor.strip(),body.get('reason',''))
 
     @app.get('/api/version')
     def version():

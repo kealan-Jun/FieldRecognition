@@ -39,7 +39,7 @@ def main():
                 sys.exit(1)
             time.sleep(.5)
     if UNIT.endswith('.target'):
-        print('本机托管服务已启动，登录页面后查看相机、读数与归档状态。')
+        print('本机托管服务已启动，打开工作台查看相机、读数与归档状态。')
         print('页面：'+URL)
         if action=='open':subprocess.run(['xdg-open',URL],check=True)
         return

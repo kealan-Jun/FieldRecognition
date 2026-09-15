@@ -48,14 +48,13 @@ from database import Database, get_migration_status
 from security import require_camera, require_role, actor_name, current, visible, filter_payload
 
 RUNTIME_ENABLED = os.environ.get('FIELD_PRODUCTION_ENABLED', '0') == '1'
-AUTH_ENABLED = RUNTIME_ENABLED or os.environ.get('FIELD_AUTH_ENABLED', '0') == '1'
+AUTH_ENABLED = os.environ.get('FIELD_AUTH_ENABLED', '0') == '1'
 SERVICE_ROLE = os.environ.get('FIELD_SERVICE_ROLE', 'combined')
 database = Database(os.environ.get('FIELD_DATABASE_PATH') or DATA / 'Demo.sqlite3')
-if RECORD_MODE == 'production' and not AUTH_ENABLED:
-    raise RuntimeError('Production mode requires authentication')
 if RUNTIME_ENABLED or AUTH_ENABLED:
     if get_migration_status(database)['pending']:
         raise RuntimeError('Pending database migrations; run migrate_db.py before starting')
+if AUTH_ENABLED:
     with database.connection() as conn:
         if not conn.execute("SELECT 1 FROM users WHERE role='admin' AND disabled=0").fetchone():
             raise RuntimeError('Create the initial administrator before starting')

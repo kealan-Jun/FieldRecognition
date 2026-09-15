@@ -92,7 +92,7 @@ def test_queue_backpressure_and_camera_fairness(database):
 @pytest.fixture
 def managed(tmp_path,monkeypatch):
     for key,value in {'FIELD_DEMO_DATA':str(tmp_path),'FIELD_DATABASE_PATH':str(tmp_path/'Demo.sqlite3'),
-        'FIELD_PRODUCTION_ENABLED':'1','FIELD_SERVICE_ROLE':'api','FIELD_RECORD_MODE':'test','FIELD_CAMERA_ID':'cam-a',
+        'FIELD_PRODUCTION_ENABLED':'1','FIELD_AUTH_ENABLED':'1','FIELD_SERVICE_ROLE':'api','FIELD_RECORD_MODE':'test','FIELD_CAMERA_ID':'cam-a',
         'FIELD_ALIYUN_FALLBACK_ENABLED':'0','FIELD_ARCHIVE_ENABLED':'0','FIELD_SAVED_PHOTO_WATCH_ENABLED':'0','FIELD_VIDEO_OCR_ENABLED':'0','FIELD_PANEL_DETECTOR_ENABLED':'0'}.items():monkeypatch.setenv(key,value)
     monkeypatch.delenv('FIELD_RECEIVER_URL',raising=False)
     db=Database(tmp_path/'Demo.sqlite3');apply_migrations(db)
@@ -254,12 +254,12 @@ def test_scoped_receiver_channel_uses_composite_camera_identity():
 def test_bootstrap_creates_private_credentials_once(tmp_path):
     from prepare_runtime import prepare
     from pathlib import Path
-    result=prepare(tmp_path,'admin','甲','cam-a')
+    result=prepare(tmp_path,'admin','甲','cam-a',auth_enabled=True)
     path=tmp_path/'Access/InitialAccess.json'
     assert path.stat().st_mode & 0o777 == 0o600
     original=path.read_bytes();details=json.loads(original)
     AuthService(Database(result['database'])).login(details['username'],details['password'])
-    again=prepare(tmp_path,'admin','甲','cam-a')
+    again=prepare(tmp_path,'admin','甲','cam-a',auth_enabled=True)
     assert result['user_id']==again['user_id'] and path.read_bytes()==original
 
 
