@@ -18,7 +18,7 @@ def automatic(live, monkeypatch):
     # Drive supervisor ticks deterministically; QR decoding still uses its real worker.
     runner.close()
     runner.stop.clear()
-    info = {'service_status_available': True, 'service_status': {'online': True, 'media_session_id': 31}}
+    info = {'service_status_available': True, 'service_status': {'online': True, 'media_session_id': 31, 'device_boot_id': 'boot-a'}}
     monkeypatch.setattr(camera, 'snapshot', lambda: info | {'id': camera.target, 'configured': True,
                         'mode': 'gwhp_main', 'status': 'streaming', 'decoded_frames': camera.sequence})
     app.live_scanner.observe_service(info['service_status'])
@@ -101,7 +101,7 @@ def test_device_restart_rearms_and_local_restart_preserves_pause(automatic):
     runner.step()
     assert runner.snapshot()['status'] == 'waiting_camera'
     assert client.get('/api/state').json()['bindings'][0]['ended_at'] is None
-    info['service_status'] = {'online': True, 'media_session_id': 32}
+    info['service_status'] = {'online': True, 'media_session_id': 32, 'device_boot_id': 'boot-b'}
     app.live_scanner.observe_service(info['service_status'])
     runner.step()
     assert runner.snapshot()['session']['session_id'] != sid
@@ -163,7 +163,7 @@ def test_multi_code_binds_independently_and_keeps_scanning(automatic):
     app.live_scanner.observe_service({'online': True, 'media_session_id': 31})
     assert len([b for b in client.get('/api/state').json()['bindings'] if not b['ended_at']])==2
     assert len(client.get('/api/state').json()['scene_visits'])==1
-    app.live_scanner.observe_service({'online': True, 'media_session_id': 32})
+    app.live_scanner.observe_service({'online': True, 'media_session_id': 32, 'device_boot_id': 'boot-b'})
     assert not [b for b in client.get('/api/state').json()['bindings'] if not b['ended_at']]
     assert not client.get('/api/state').json()['scene_visits']
 

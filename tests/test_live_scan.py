@@ -170,7 +170,7 @@ def test_unwatched_session_expires_and_offline_preview_replaces_old_image(live):
 def test_service_session_lifetime_survives_app_recreation_then_invalidates_evidence(live):
     app, client, camera = live
     scanner = app.live_scanner
-    scanner.observe_service({'online': True, 'media_session_id': 13})
+    scanner.observe_service({'online': True, 'media_session_id': 13, 'device_boot_id': 'boot-a'})
     picture = scan(client)
     aid = picture['matches'][0]['id']
     register(client, aid)
@@ -197,7 +197,15 @@ def test_service_session_lifetime_survives_app_recreation_then_invalidates_evide
     recreated=LiveScanner(vars(app))  # Persists across a local service restart.
     recreated.observe_service({'online': True, 'media_session_id': 13})
     assert app.current_readout_binding(preserved)
-    recreated.observe_service({'online': True, 'media_session_id': 14})
+    # Receiver may reset its transport counter, even when the camera stays on.
+    recreated.observe_service({'online': True, 'media_session_id': 1})
+    assert app.current_readout_binding(preserved)
+    assert client.post('/api/bindings', json=args).json()['binding_id'] == bound['binding_id']
+    with app.db() as conn:
+        state = json.loads(conn.execute('SELECT document FROM camera_service_state WHERE camera=?', (camera.target,)).fetchone()[0])
+        assert state['last_transport_change']['binding_action'] == 'preserved'
+        assert not conn.execute('SELECT 1 FROM camera_resets WHERE camera=?', (camera.target,)).fetchone()
+    recreated.observe_service({'online': True, 'media_session_id': 14, 'device_boot_id': 'boot-b'})
     bindings = client.get('/api/state').json()['bindings']
     assert next(b for b in bindings if b['binding_id'] == bound['binding_id'])['ended_at']
     assert not next(b for b in bindings if b['binding_id'] == other_bound['binding_id'])['ended_at']
@@ -207,8 +215,8 @@ def test_service_session_lifetime_survives_app_recreation_then_invalidates_evide
     fresh = scan(client)
     new = client.post('/api/bindings', json=args | {'scan_id': fresh['scan_id']}).json()
     assert new['binding_id'] != bound['binding_id']
-    # A fast service restart between polls is detected from a new ingress session too.
-    recreated.observe_service({'online': True, 'media_session_id': 15})
+    # A confirmed device reboot is detected even when the ingress counter stays the same.
+    recreated.observe_service({'online': True, 'media_session_id': 14, 'device_boot_id': 'boot-c'})
     assert client.post('/api/bindings', json=args | {'scan_id': fresh['scan_id']}).status_code == 409
 
 

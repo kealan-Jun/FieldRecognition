@@ -128,6 +128,16 @@ class ArchivePaths:
         # Value/owner edits never rename a measurement already delivered.
         return self.data['events'].setdefault(key, proposed)
 
+    def result_file(self, event, instrument, directory):
+        """Keep one stable six-field file per instrument, including later burst members."""
+        slots = self.data.setdefault('result_files', {}).setdefault(event, {})
+        if instrument not in slots:
+            number = len(slots) + 1
+            name = 'Result.json' if number == 1 else f'Result{number:02d}.json'
+            slots[instrument] = directory + '/' + name
+        checked(self.root, slots[instrument])
+        return slots[instrument]
+
     def retire_views(self, views):
         """Remove only byte-verified generated views, never handwritten files."""
         from archive_store import replace_view

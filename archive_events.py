@@ -1,5 +1,6 @@
 """Date/camera event bundles. A burst, retries and confirmation share one result."""
 import copy
+import hashlib
 import html
 import json
 import posixpath
@@ -73,7 +74,7 @@ def prepare(rows, paths):
         if kind == 'SourceMaterials':
             proposed = '.System/SourceMaterials/' + proposed
         directory = paths.directory(key, proposed)
-        file = 'Binding.json' if kind == 'Bindings' else 'Result.json' if kind != 'SourceMaterials' else 'Source.json'
+        file = 'Binding.json' if kind == 'Bindings' else 'Evidence.json' if kind != 'SourceMaterials' else 'Source.json'
         keys = {(r['entity'], r['entity_id']) for r in members}
         for sid in source_ids:
             if ('scans', sid) in latest:
@@ -229,8 +230,9 @@ def make_views(bundles, paths, receipts):
                 'local_ocr', 'fallback', 'panel_regions', 'recognition_versions', 'panel_detection', 'timing',
                 'instrument', 'all_binding_snapshots', 'binding_snapshots', 'workbench', 'workbenches', 'ownership_conflicts',
                 'frame_metadata', 'video_observation', 'model', 'device', 'submitted_at', 'finished_at', 'request_trigger',
-                'field_rules','recognition_root_job_id','recognition_revision','supersedes_job_id','reprocessing','display_fields')})
-        content = {'schema': 'field-recognition-event/1', 'derived_view': True, 'event_id': bundle['key'],
+                'field_rules','recognition_root_job_id','recognition_revision','supersedes_job_id','reprocessing','display_fields',
+                'actual_model_invocation','recognition_skipped','skip_reason','outcome')})
+        content = {'schema': 'field-recognition-event/2', 'derived_view': True, 'event_id': bundle['key'],
             'event_at': bundle['event_at'], 'time_basis': bundle['time_basis'], 'folder_time_basis': bundle['folder_time_basis'],
             'camera_id': bundle['camera_id'], 'operator': doc.get('operator') or next((s['operator'] for s in sources if s['operator']), None),
             'category': bundle['kind'], 'record_scope': (group or doc).get('record_scope', 'evidence' if bundle['kind'] == 'Bindings' else 'legacy_test_only'),
@@ -239,8 +241,32 @@ def make_views(bundles, paths, receipts):
         if bundle['kind'] == 'Bindings':
             content['binding'] = doc
         else:
+            measurement_files = []
+            for entry in sorted(records, key=lambda r: r['instrument_id']):
+                result_file = paths.result_file(bundle['key'], entry['instrument_id'], directory)
+                raw = raw_json(entry['record'])
+                views[result_file] = raw
+                assets = [r.get('instrument') or {} for j in bundle['jobs'] for r in j['doc'].get('panel_regions', [])]
+                assets += [f.get('instrument') or {} for f in (group or {}).get('fields', [])]
+                name = next((a.get('name') for a in assets if a.get('id') == entry['instrument_id'] and a.get('name')), None)
+                measurement_files.append({'instrument_id': entry['instrument_id'], 'instrument_name': name, 'result': result_file,
+                    'sha256': hashlib.sha256(raw).hexdigest(), 'evidence': entry['evidence']})
             content.update(measurement_id=group.get('measurement_id') if group else bundle['key'].split(':', 1)[1],
-                instrument_measurements=records, observations=observations)
+                measurement_files=measurement_files, observations=observations)
+            # Completed is a worker lifecycle state, not proof that OCR was invoked.
+            from result_reprocessing import preferred_jobs
+            current_jobs = preferred_jobs([r['doc'] for r in bundle['jobs']])
+            content['processing_status'] = content['status']
+            if content['status'] == 'completed' and not records:
+                skipped = current_jobs and all(j.get('recognition_skipped') or
+                    (j.get('local_ocr') or {}).get('recognition_skipped') for j in current_jobs)
+                content['status'] = 'skipped' if skipped else 'unassigned' if any(j.get('readings') for j in current_jobs) else 'unreadable'
+            content['skip_reasons'] = list(dict.fromkeys(j.get('skip_reason') or
+                (j.get('local_ocr') or {}).get('skip_reason') for j in current_jobs if
+                j.get('skip_reason') or (j.get('local_ocr') or {}).get('skip_reason')))
+            if not measurement_files:
+                # Keep old HTTP links readable without pretending that a measurement exists.
+                paths.alias(directory + '/Result.json', file)
             if group:
                 # Sources/evidence are normalized above; the decision history stays intact.
                 content['decision'] = {k: v for k, v in group.items() if k != 'sources'}
@@ -256,13 +282,15 @@ def make_views(bundles, paths, receipts):
             days.setdefault(bundle['day'], []).append({'event_id': bundle['key'], 'event_at': bundle['event_at'],
                 'category': bundle['kind'], 'target': target or '归属待确认', 'operator': content['operator'],
                 'status': content['status'], 'result': file,
+                'measurement_files': [{k: m[k] for k in ('instrument_id', 'instrument_name', 'result')} for m in content.get('measurement_files', [])],
                 'photo': next((v['path'] for v in photos.values() if 'original' in v['kind']), next((v['path'] for v in photos.values()), None))})
     esc = lambda x: html.escape(str(x if x is not None else '未记录'), quote=True)
     statuses = {'source_retained': '原始材料已留存', 'active': '已绑定', 'ended': '已结束', 'completed': '已识别',
-                'failed': '识别失败', 'queued': '等待识别', 'running': '识别中', 'collecting': '连拍处理中',
+                'failed': '识别失败', 'skipped': '未执行读数识别', 'unassigned': '读数未归属', 'unreadable': '未读出结构化读数',
+                'queued': '等待识别', 'running': '识别中', 'collecting': '连拍处理中',
                 'draft': '待确认', 'confirmed': '已确认', 'rejected': '已驳回', 'cancelled': '已取消', 'interrupted': '已中断'}
     intro = '<p>按日期与相机打开当日报告，再从事件打开结果和照片。一个测量目录对应一次拍照或一次明确的连拍。</p>'
-    intro += '<article><ul><li><b>Bindings</b>：Binding.json 记录二维码、人员、仪器或场景、开始/结束和交接信息。</li><li><b>VideoReadings</b>：Result.json 记录视频面板读数，只留存有效证据帧。</li><li><b>VoicePhotoReadings / PhotoReadings</b>：Result.json 记录语音照片或上传照片的一次测量；连拍、重传和确认不另建测量。</li><li><b>Photos</b>：原始图片及识别使用的标准化图片。相同字节仅保存一份，共用照片通过 JSON 路径引用。</li><li><b>Regions</b>：实际送入识别的面板/数字裁剪，与结果中的区域、字段和图片哈希核对。</li><li><b>DailyReport</b>：当日事件索引，不复制照片或实验记录。UnknownTime 表示没有可靠拍摄时间，目录日期仅为首次接收日期。</li></ul><p>Result.json 的 instrument_measurements 按仪器分别记录温度、转速或质量；原文和处理过程在 observations，草稿校正及确认在 decision。所有图片路径相对于归档根目录。</p></article>'
+    intro += '<article><ul><li><b>Bindings</b>：Binding.json 记录二维码、人员、仪器或场景、开始/结束和交接。</li><li><b>VideoReadings / VoicePhotoReadings / PhotoReadings</b>：一次视频观测、语音照片或明确连拍共用一个事件目录。</li><li><b>Result.json、Result02.json…</b>：每台仪器独立一个文件，直接保存 wearer_id、device_model、device_no、qr_hash、photo_time、values 六字段。搅拌器为温度和转速，天平为质量；未知值为 null。文件与仪器的对应关系在 Evidence.json 中，后续增加仪器不会改变已有对应关系。</li><li><b>Evidence.json</b>：来源照片、拍摄时间依据、绑定快照、原始 OCR、模型与规则版本、处理状态和确认记录。measurement_files 指向各台仪器的结果，不重复保存结果正文。</li><li><b>Photos / Regions</b>：原图、处理图及面板/数字裁剪；按哈希共用，同一字节只保留一份。</li><li><b>DailyReport</b>：当日事件索引，直接打开每台仪器的读数或追溯文件。</li></ul><p>未绑定且跳过识别时只留 Evidence.json 和照片，不生成伪造的 Result.json。未知仪器不能默认当作 A 或 B；已明确仪器但数字看不清时，其固定字段的 value 为 null。所有图片和结果路径相对于归档根目录；正式写入状态以 Evidence.json 的 record_scope 和 decision 为准。</p></article>'
     intro += '<article><h2>日期与相机</h2><ul>'
     for day, entries in sorted(days.items(), reverse=True):
         base = day + '/DailyReport'
@@ -273,7 +301,9 @@ def make_views(bundles, paths, receipts):
         for entry in entries:
             moment = aware(entry['event_at'])
             link = lambda target: esc(posixpath.relpath(target, base))
-            body += '<tr><td>' + esc(moment.strftime('%H:%M:%S.%f')[:-3] if moment else '拍摄时间未知') + '</td><td>' + esc(KINDS[entry['category']]) + '<br>' + esc(entry['target']) + '</td><td>' + esc(entry['operator']) + '<br>' + esc(statuses.get(entry['status'], entry['status'])) + '</td><td><a href="' + link(entry['result']) + '">结果 JSON</a>'
+            body += '<tr><td>' + esc(moment.strftime('%H:%M:%S.%f')[:-3] if moment else '拍摄时间未知') + '</td><td>' + esc(KINDS[entry['category']]) + '<br>' + esc(entry['target']) + '</td><td>' + esc(entry['operator']) + '<br>' + esc(statuses.get(entry['status'], entry['status'])) + '</td><td><a href="' + link(entry['result']) + '">' + ('绑定记录' if entry['category'] == 'Bindings' else '追溯与状态') + '</a>'
+            for measurement in entry.get('measurement_files', []):
+                body += ' · <a href="' + link(measurement['result']) + '">' + esc(measurement['instrument_name'] or measurement['instrument_id']) + ' 读数</a>'
             if entry['photo']:
                 body += ' · <a href="' + link(entry['photo']) + '">原图</a>'
             body += '</td></tr>'

@@ -159,10 +159,10 @@ def test_completed_reprocess_keeps_raw_identity_idempotence_and_one_archive(setu
     versions=client.get('/api/jobs/'+jid+'/versions').json()
     assert versions['current_job_id']==new['job_id'] and len(versions['items'])==2
     app.archive_store.step(100)
-    bundles=list(root.glob('*/VoicePhotoReadings/*/Result.json'));assert len(bundles)==1
+    bundles=list(root.glob('*/VoicePhotoReadings/*/Evidence.json'));assert len(bundles)==1
     result=json.loads(bundles[0].read_text())
     assert len(result['sources'])==1 and len(result['observations'])==2
-    assert result['instrument_measurements'][0]['record']['values'][0]['value']==72
+    assert json.loads((root/result['measurement_files'][0]['result']).read_text())['values'][0]['value']==72
     assert app.archive_store.integrity.run_once()['issue_count']==0
 
 
@@ -186,7 +186,7 @@ def test_confirmed_reprocessing_requires_reconfirmation_retains_old_record(setup
     assert client.post(f'/api/photo-measurements/{mid}/confirm',json=body).json()==second
     assert client.get('/api/experiment-records').json()['items']==[second]
     app.archive_store.step(200)
-    assert len(list(archive[2].glob('*/VoicePhotoReadings/*/Result.json')))==1
+    assert len(list(archive[2].glob('*/VoicePhotoReadings/*/Evidence.json')))==1
 
 
 def test_child_timeout_returns_promptly_and_does_not_block_next_request(tmp_path,monkeypatch):

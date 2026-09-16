@@ -1,5 +1,10 @@
 # 现场识别 Agent 工具 v1
 
+2026-09-16 修正：Receiver 的 `media_session_id` 仅用于视频传输与预览缓存，不再结束仪器/场景绑定。离线暂停识别，恢复后继续当天绑定；只有两个明确的设备 `device_boot_id` 不同才记作 `device_boot_changed`，跨日和主动结束规则保持不变。当前 Receiver 未提供设备启动 ID，因此不能仅凭会话变化或断流证明设备关机。已结束历史绑定不会被静默恢复或用于倒填照片。
+
+NAS 的 `Result.json`（同图多台仪器时另有 `Result02.json` 等）直接采用六字段格式，每台仪器一个文件。原始 OCR、绑定快照、照片/区域哈希、处理状态和草稿决策位于同目录 `Evidence.json`；未绑定且跳过识别的材料只保存证据，不伪造仪器结果。
+
+
 2026-09-15：托管部署默认免登录，业务工具可直接调用；多相机请求用 `X-Camera-Id` 选择已登记相机。仅显式设置 `FIELD_AUTH_ENABLED=1` 时要求 `Authorization: Bearer <session>` 并按账号限制相机。`FieldTools(..., session_token=..., camera_id=...)` 支持这两个参数。增加测量读取、修订、确认、拒绝及交接申请、决策六个工具，共 15 个，精确参数以 `/api/tools` 为准。它们与网页共用证据事务；免登录时使用登记的实验员与请求声明的操作人，不标记为已认证账号。队列支持持久化重试及租约恢复；参阅 [托管运行说明](docs/ProductionRuntime.md)。
 
 2026-09-14 更新：原有九个工具保持兼容，新增多关联、实时视频 OCR 和实验台分类 HTTP 接口，见 [多二维码与实时视频 OCR](docs/多二维码与实时视频OCR.md)。以下单绑定字段是兼容字段；多候选使用 `binding_ids` / `instrument_candidates` / `readings`，不可取第一条作为默认归属。

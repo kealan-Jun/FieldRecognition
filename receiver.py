@@ -109,6 +109,11 @@ class ReceiverCamera:
                     # This is the receiver's RGB ingress session, not its recording session.
                     observation = {'online': bool(camera.get('status_live') or camera.get('media_live')),
                                    'media_session_id': camera.get('rgb_ingress_session_id')}
+                    # Optional explicit device-origin boot identity. Never substitute
+                    # recording/ingress session counters or Receiver process IDs.
+                    boot = camera.get('device_boot_id')
+                    if isinstance(boot, str) and 0 < len(boot.strip()) <= 128:
+                        observation['device_boot_id'] = boot
                     if self.on_service_status:
                         self.on_service_status(observation)
                     with self.lock:

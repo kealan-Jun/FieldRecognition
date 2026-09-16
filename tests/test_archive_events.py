@@ -18,13 +18,13 @@ def test_burst_conflict_correction_confirmation_and_retry_share_one_folder(setup
     mid = response['measurement_id']
     complete(setup, 0, '51')
     app.archive_store.step(100)
-    file = next(root.glob('*/VoicePhotoReadings/*/Result.json'))
+    file = next(root.glob('*/VoicePhotoReadings/*/Evidence.json'))
     complete(setup, 1, '52'); complete(setup, 2, '51')
     app.archive_store.step(100)
     result = json.loads(file.read_text())
-    assert len(list(root.glob('*/VoicePhotoReadings/*/Result.json'))) == 1
+    assert len(list(root.glob('*/VoicePhotoReadings/*/Evidence.json'))) == 1
     assert len(result['sources']) == 3
-    assert result['instrument_measurements'][0]['record']['values'][0]['value'] is None
+    assert json.loads((root/result['measurement_files'][0]['result']).read_text())['values'][0]['value'] is None
     draft = get_draft(client, mid)
     body = {'actor':'Reader', 'revision':draft['revision'], 'reason':'核对三张照片',
         'fields':[{'field_id':draft['fields'][0]['field_id'], 'instrument_id':binding['instrument']['id'],
@@ -35,9 +35,9 @@ def test_burst_conflict_correction_confirmation_and_retry_share_one_folder(setup
     app.archive_store.step(100)
     result = json.loads(file.read_text())
     assert result['record_scope'] == 'production_confirmed'
-    assert result['instrument_measurements'][0]['record']['values'][0]['value'] == 51
+    assert json.loads((root/result['measurement_files'][0]['result']).read_text())['values'][0]['value'] == 51
     assert len(result['decision']['corrections']) == 1
-    assert result['instrument_measurements'][0]['evidence']['human_verified']
+    assert result['measurement_files'][0]['evidence']['human_verified']
     assert result['observations'][1]['readings'][0]['value'] == '52'
     before = {p.relative_to(root).as_posix():p.read_bytes() for p in root.glob('**/*') if p.is_file() and p.suffix in {'.png','.jpg'}}
     count = app.archive_store.snapshot()['archived_receipts']
@@ -47,7 +47,7 @@ def test_burst_conflict_correction_confirmation_and_retry_share_one_folder(setup
     assert app.archive_store.snapshot()['archived_receipts'] == count
     assert all((root/p).read_bytes() == raw for p,raw in before.items())
     assert len({hashlib.sha256(raw).hexdigest() for raw in before.values()}) == len(before)
-    assert len(list(root.glob('*/VoicePhotoReadings/*/Result.json'))) == 1
+    assert len(list(root.glob('*/VoicePhotoReadings/*/Evidence.json'))) == 1
     assert app.archive_store.integrity.run_once()['issue_count'] == 0
 
 
@@ -88,6 +88,81 @@ def test_group_export_never_refills_a_conflicting_unit_from_registration():
     group = {'fields':candidates([doc]), 'status':'draft'}
     entry = standard_records([{'seq':1,'entity_id':'job','doc':doc}], group)[0]
     assert entry['record']['values'][0] == {'name':'温度','value':None,'unit':None,'range':[None,None]}
+
+
+def publish_document(root, document):
+    from archive_events import make_views, prepare
+    paths = ArchivePaths(root)
+    rows = [{'entity': 'jobs', 'entity_id': document['job_id'], 'seq': 1,
+             'document': json.dumps(document), 'recorded_at': '2026-09-14T05:43:10Z',
+             'receipt_path': '.System/Receipts/Original.json'}]
+    bundles, _ = prepare(rows, paths)
+    views = make_views(bundles, paths, {1: {'artifacts': {}}})
+    paths.retire_views(views)
+    return next(root.glob('*/VoicePhotoReadings/*/Evidence.json'))
+
+
+def test_public_results_are_exact_six_fields_one_per_instrument_with_stable_paths(tmp_path):
+    import copy
+    from test_measurement_records import document
+    doc = document() | {'camera_id': 'Cam', 'submitted_at': '2026-09-14T05:43:10Z'}
+    first = copy.deepcopy(doc)
+    first['panel_regions'] = [r for r in first['panel_regions'] if r['instrument_id'] == 'b']
+    file = publish_document(tmp_path, first)
+    before = json.loads(file.read_text())['measurement_files'][0]
+    assert Path(before['result']).name == 'Result.json'
+    # A later burst member reveals A: B keeps its original filename.
+    publish_document(tmp_path, doc)
+    evidence = json.loads(file.read_text())
+    assert 'instrument_measurements' not in evidence
+    assert len(evidence['measurement_files']) == 2
+    for entry in evidence['measurement_files']:
+        raw = (tmp_path/entry['result']).read_bytes()
+        record = json.loads(raw)
+        assert set(record) == {'wearer_id','device_model','device_no','qr_hash','photo_time','values'}
+        assert hashlib.sha256(raw).hexdigest() == entry['sha256']
+        if entry['instrument_id'] == 'b':
+            assert entry['result'] == before['result']
+            assert record['values'][0]['name'] == '质量'
+        else:
+            assert [v['name'] for v in record['values']] == ['温度','转速']
+        assert 'record' not in entry  # A reference, not another copy of the result.
+    assert len(list(file.parent.glob('Result*.json'))) == 2
+    publish_document(tmp_path, doc)
+    assert json.loads(file.read_text()) == evidence
+
+
+def test_skipped_unbound_photo_has_evidence_but_no_fake_measurement(tmp_path):
+    from test_measurement_records import document
+    doc = document() | {'camera_id': 'Cam', 'panel_regions': [], 'readings': [], 'lines': [],
+                        'recognition_skipped': True, 'skip_reason': 'no_active_instrument_binding',
+                        'actual_model_invocation': False}
+    file = publish_document(tmp_path, doc)
+    evidence = json.loads(file.read_text())
+    assert evidence['status'] == 'skipped' and evidence['processing_status'] == 'completed'
+    assert evidence['skip_reasons'] == ['no_active_instrument_binding']
+    assert evidence['measurement_files'] == []
+    assert not list(file.parent.glob('Result*.json'))
+    assert resolve_file(tmp_path, str(file.relative_to(tmp_path).with_name('Result.json'))) == file
+
+
+def test_upgrade_replaces_generated_envelope_without_duplicate_results(tmp_path):
+    from test_measurement_records import document
+    doc = document() | {'camera_id': 'Cam'}
+    file = publish_document(tmp_path, doc)
+    evidence = json.loads(file.read_text())
+    original = file.parent/'Result.json'
+    # Simulate the old generated Result.json envelope tracked by the migration ledger.
+    raw = canonical({'schema':'field-recognition-event/1', 'derived_view':True, 'observations':[doc]})
+    original.write_bytes(raw)
+    paths = ArchivePaths(tmp_path)
+    paths.data['views'][original.relative_to(tmp_path).as_posix()] = hashlib.sha256(raw).hexdigest()
+    paths.save()
+    note = file.parent/'PersonalNote.txt'; note.write_text('keep')
+    publish_document(tmp_path, doc)
+    assert 'observations' not in json.loads(original.read_text())
+    assert json.loads(file.read_text())['observations'] == evidence['observations']
+    assert note.read_text() == 'keep'
 
 
 def test_migration_cli_loads_only_literal_archive_settings(tmp_path, monkeypatch):

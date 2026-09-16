@@ -31,7 +31,7 @@ def test_classified_folders_keep_photos_source_times_and_immutable_versions(arch
     for artifact in doc['photos'].values():
         assert hashlib.sha256((root/artifact['path']).read_bytes()).hexdigest()==artifact['sha256']
     assert not app.archive_store.snapshot()['navigation_pending']
-    assert len(list(root.glob('*/VoicePhotoReadings/*/Result.json'))) == 1
+    assert len(list(root.glob('*/VoicePhotoReadings/*/Evidence.json'))) == 1
     assert doc['record_scope']=='test_only'
     for path in [*root.glob('*/DailyReport/*.html'), root/'Readme.html']:
         for ref in re.findall(r'(?:href|src)="([^"]+)"',path.read_text()):

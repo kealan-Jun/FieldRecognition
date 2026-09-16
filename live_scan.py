@@ -202,7 +202,7 @@ class LiveScanner:
             self.session['message'] += ' · ' + '；'.join(dict.fromkeys(errors))
 
     def observe_service(self, observation):
-        """Persist upstream session changes across page and local app restarts."""
+        """Transport reconnects preserve ownership; only a proven device reboot ends it."""
         camera = self.camera()
         with self.lock:
             timestamp = self.core['now']()
@@ -213,11 +213,15 @@ class LiveScanner:
                 old_id = previous.get('media_session_id') if previous else None
                 new_id = observation.get('media_session_id')
                 changed = old_id not in (None, 0) and new_id not in (None, 0) and old_id != new_id
-                # Liveness is transient: a missed heartbeat is not a device stop.
-                # Suspend inference while offline, retaining the same bindings when
-                # the same acquisition session returns. A new session invalidates.
-                if changed:
-                    reason = 'device_media_session_changed'
+                def boot_id(value):
+                    return value if isinstance(value, str) and 0 < len(value.strip()) <= 128 else None
+                old_boot = boot_id((previous or {}).get('device_boot_id'))
+                new_boot = boot_id(observation.get('device_boot_id'))
+                # Ingress IDs belong to Receiver and may reset on reconnect/restart.
+                # Missing liveness/boot evidence never proves that the device rebooted.
+                rebooted = old_boot is not None and new_boot is not None and old_boot != new_boot
+                if rebooted:
+                    reason = 'device_boot_changed'
                     for table in ('bindings', 'scene_visits'):
                         for record in conn.execute(f'SELECT * FROM {table} WHERE camera=? AND ended IS NULL', (camera.target,)).fetchall():
                             doc = json.loads(record['document']) | {'ended_at': timestamp, 'end_reason': reason,
@@ -226,9 +230,16 @@ class LiveScanner:
                     conn.execute('INSERT OR REPLACE INTO camera_resets VALUES(?,?)', (camera.target, timestamp))
                     if self.session and self.session['status'] in ACTIVE | {'bound'}:
                         self.session.update(status='stopped', binding=None,
-                                            message='设备采集会话已变化，请重新扫码绑定')
+                                            message='已确认设备启动标识变化，请重新扫码绑定')
                 # Preserve a known session marker through an offline status with a zero marker.
                 stored = observation | {'media_session_id': new_id or old_id}
+                if new_boot or old_boot:
+                    stored['device_boot_id'] = new_boot or old_boot
+                if changed:
+                    stored['last_transport_change'] = {'observed_at': timestamp, 'previous_id': old_id,
+                        'current_id': new_id, 'binding_action': 'ended_device_reboot' if rebooted else 'preserved'}
+                elif (previous or {}).get('last_transport_change'):
+                    stored['last_transport_change'] = previous['last_transport_change']
                 if not observation['online']:
                     stored['offline_since'] = (previous or {}).get('offline_since') or timestamp
                 conn.execute('INSERT OR REPLACE INTO camera_service_state VALUES(?,?)', (camera.target, json.dumps(stored)))

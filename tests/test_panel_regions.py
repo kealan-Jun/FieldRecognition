@@ -76,11 +76,12 @@ def test_two_panels_keep_separate_bindings_polygons_and_archived_crops(archive, 
     assert len(crops)==2
     assert all(hashlib.sha256(resolve_file(root,c['path']).read_bytes()).hexdigest()==c['sha256'] for c in crops)
     for iid, text in ((A,'12.3 g'),(B,'200 g')):
-        records=list(root.glob('*/VoicePhotoReadings/*/Result.json'))
+        records=list(root.glob('*/VoicePhotoReadings/*/Evidence.json'))
         assert len(records)==1
         r=json.loads(records[0].read_text())
         assert [v['text'] for v in r['observations'][0]['readings'] if v['instrument']['id']==iid]==[text]
-        standard=next(v['record'] for v in r['instrument_measurements'] if v['instrument_id']==iid)
+        entry=next(v for v in r['measurement_files'] if v['instrument_id']==iid)
+        standard=json.loads((root/entry['result']).read_text())
         assert set(standard)=={'wearer_id','device_model','device_no','qr_hash','photo_time','values'}
         assert standard['qr_hash']==next(b['qr_hash'] for b in bindings if b['instrument']['id']==iid)
     exported=client.get('/api/jobs/'+job['job_id']+'/measurements').json()
