@@ -3,7 +3,8 @@ import json
 from datetime import datetime
 from archive_store import receipt_status
 from aliyun_vision import READOUT
-from history_records import panel_readings, job_rows
+from history_records import panel_readings, job_rows, current_version_sql
+from measurement_records import display_fields
 
 
 def readout_event(conn, row, *, related_only=False):
@@ -32,14 +33,17 @@ def readout_event(conn, row, *, related_only=False):
             notes.append(issue)
     if doc.get('recognition_skipped'):
         notes.append('未检测到已绑定仪器面板，已跳过识别')
+    fields = display_fields(doc)
+    detail = '、'.join((f['instrument_name'] or '')+' '+f['name']+' '+(str(f['value'])+(' '+f['unit'] if f['unit'] else '') if f['value'] is not None else f['display_state'] or '未取得有效数值') for f in fields)
     return {'event_id': 'readout:' + doc['job_id'], 'job_id': doc['job_id'], 'kind': 'readout',
+            'raw_status':status, 'display_fields':fields, 'recognition_revision':doc.get('recognition_revision',1),
             'occurred_at': doc.get('finished_at') or doc['submitted_at'],
             'submitted_at': doc['submitted_at'], 'captured_at': (doc.get('external_photo') or {}).get('captured_at'),
             'camera_id': doc['camera_id'], 'operator': doc.get('operator'),
             'target': (doc.get('instrument') or {}).get('name') or ('、'.join(
                 c['instrument']['name'] for c in doc.get('instrument_candidates', [])) + (' · 面板分别定位' if doc.get('association_status') == 'localized_panels' else ' · 归属待确认')
                 if doc.get('instrument_candidates') else '未绑定仪器 · 照片读数'),
-            'status': label, 'detail': '、'.join(line['text'] for line in lines),
+            'status': label, 'detail': detail if fields else '、'.join(line['text'] for line in lines),
             'quality_notes':notes,
             'measurement_url':'/api/jobs/'+doc['job_id']+'/measurements' if doc.get('measurement_records') else None,
             'image_url': doc.get('image_url') or doc.get('crop_image_url'),
@@ -53,7 +57,7 @@ def readout_event(conn, row, *, related_only=False):
 
 def readout_page(conn, camera_id=None, *, limit=20, before=None, related_only=False):
     """Stable keyset pages in submission order; no photo bytes or raw model output."""
-    conditions, params = [], []
+    conditions, params = [current_version_sql()], []
     if camera_id:
         conditions.append("json_extract(document,'$.camera_id')=?")
         params.append(camera_id)

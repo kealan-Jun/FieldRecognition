@@ -3,6 +3,7 @@ import copy
 import hashlib
 import time
 import uuid
+import re
 
 import cv2
 import aliyun_vision as vision
@@ -52,7 +53,8 @@ def predict(core, image, x=0, y=0, *, video=False, allowed_instrument_ids=()):
             'localization_supporting_views':box.get('supporting_views',[]),
             'bbox':[x+x1,y+y1,x+x2,y+y2], 'crop':[x+cx,y+cy,ex-cx,ey-cy], 'local_ocr':local,
             'digit_region':local.get('digit_region'), 'display_state':local.get('display_state')}
-        local['lines'] = [dict(line, panel_id=region['panel_id']) for line in local.get('lines', [])]
+        local['lines'] = validate_lines([dict(line, panel_id=region['panel_id']) for line in local.get('lines', [])],
+                                       region['measurement_name'], core.get('get_instrument',lambda _:{})(box['instrument_id']) or {})
         regions.append(region); lines.extend(local['lines'])
     result = {'status':'completed', 'lines':lines, 'panel_regions':regions, 'panel_detection':detection,
         'model':core['ocr_state']['engine'], 'device':core['OCR_DEVICE'],
@@ -69,6 +71,8 @@ def predict(core, image, x=0, y=0, *, video=False, allowed_instrument_ids=()):
 
 def needs_fallback(local):
     if local.get('panel_regions'):
+        if any(l.get('quality_issue') for r in local['panel_regions'] for l in r['local_ocr'].get('lines',[])):
+            return 'field_rule_conflict'
         return next((reason for r in local['panel_regions'] if not r.get('display_state')
                      if (reason := vision.fallback_reason(r['local_ocr'].get('lines', []),
                                                          r['local_ocr'].get('error')))), None)
@@ -88,6 +92,8 @@ def finish(core, document, local, image, *, valid, clock=time.monotonic, started
             raise ValueError('panel has no capture-time instrument binding')
         region.update(instrument=binding['instrument'], binding_id=binding['binding_id'],
             association_basis='panel_detector_session_binding')
+        if region['instrument_id'] in document.get('field_rules',{}):
+            region['instrument'] = dict(region['instrument'],measurement_ranges=document['field_rules'][region['instrument_id']])
         instrument = region['instrument']
         if instrument:
             with core['db']() as conn:
@@ -107,7 +113,8 @@ def finish(core, document, local, image, *, valid, clock=time.monotonic, started
         region.update(evidence_id=ident, image_url=f'/api/images/{ident}', image_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
         result = region['local_ocr']
         lines = copy.deepcopy(result.get('lines', []))
-        reason = None if region.get('display_state') else vision.fallback_reason(lines, result.get('error'))
+        lines = validate_lines(lines, region.get('measurement_name'), region['instrument'])
+        reason = None if region.get('display_state') else 'field_rule_conflict' if any(l.get('quality_issue') for l in lines) else vision.fallback_reason(lines, result.get('error'))
         if reason and vision.public_config()['available'] and valid():
             attempt = {'panel_id':region['panel_id'], 'trigger':reason}
             if not core['vision_call_lock'].acquire(blocking=False):
@@ -150,3 +157,21 @@ def finish(core, document, local, image, *, valid, clock=time.monotonic, started
         document['fallback'] = dict(attempts[-1], regions=attempts,
             attempted_at=next((a['attempted_at'] for a in attempts if a.get('attempted_at')), None),
             finished_at=next((a['finished_at'] for a in reversed(attempts) if a.get('finished_at')), None))
+
+
+def validate_lines(lines, name, instrument):
+    from measurement_records import field_issues, measurement_value
+    if not name:
+        return lines
+    result = []
+    for line in lines:
+        match = re.match(r'\s*('+vision.NUMBER+')',line.get('text',''))
+        if not match and line.get('value') is None:
+            result.append(line)
+            continue
+        raw = dict(line,value=str(line['value']) if line.get('value') is not None else match[1],
+                   unit=line.get('unit') or (line['text'][match.end():].strip() if match else None) or None)
+        issues = field_issues(name,raw,instrument)
+        result.append(dict(line,quality_issue=next(iter(issues),None),measurement_name=name,
+                           normalized_value=measurement_value(name,raw,instrument)[0]))
+    return result

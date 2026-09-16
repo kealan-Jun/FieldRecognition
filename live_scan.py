@@ -43,6 +43,8 @@ class LiveScanner:
         return camera
 
     def active_bindings(self):
+        from binding_policy import sweep
+        sweep(self.core)
         with self.core['db']() as conn:
             rows = conn.execute('SELECT document FROM bindings WHERE camera=? AND ended IS NULL ORDER BY rowid',
                                 (self.camera().target,)).fetchall()
@@ -118,6 +120,8 @@ class LiveScanner:
                 continue
             previous = token
             acquired = time.monotonic()
+            from binding_policy import moment, ZONE
+            observed_day = moment(self.core['now']()).astimezone(ZONE).date()
             try:
                 # Fast native decoding on fresh frames; periodically retry difficult labels.
                 full = acquired - last_full >= 1
@@ -139,6 +143,8 @@ class LiveScanner:
                     if self.session['message'] == '等待相机新画面，恢复连接后继续扫码':
                         self.session['message'] = '连续扫码中：对准仪器码即可绑定；场景码可单独识别'
                     # Slow decoding must not commit an old frame as a new observation.
+                    if observed_day != moment(self.core['now']()).astimezone(ZONE).date():
+                        continue
                     if time.monotonic() - acquired + metadata.get('frame_age_ms', 0) / 1000 > 1:
                         continue
                     if not (matches['matches'] or matches['scene_matches']):
@@ -151,9 +157,10 @@ class LiveScanner:
                     new_instruments = [m for m in matches['matches'] if m['id'] not in existing_ids]
                     new_scenes = [m for m in matches['scene_matches'] if m['id'] not in scene_ids]
                     if not new_instruments and not new_scenes:
+                        last_match = None
                         self.refresh_bindings()
                         continue
-                    key = (tuple(m['id'] for m in new_instruments), tuple(m['id'] for m in new_scenes))
+                    key = (observed_day, tuple(m['id'] for m in new_instruments), tuple(m['id'] for m in new_scenes))
                     if key == last_match:
                         continue
                     last_match = key

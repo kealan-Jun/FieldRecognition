@@ -28,7 +28,7 @@
 
 1. get_field_state 查看仪器登记和相机状态。仪器所属场景先在网页登记，Agent 不猜测场景或操作人。
 2. capture_and_scan：对准仪器码取图，即可继续绑定。场景码是可选的独立证据；实际扫到时从 scene_matches 调用 enter_scene。matches 为空时不能建立新绑定；多个码逐项关联，各仪器使用自己的解码 ID。
-3. bind_instrument：使用实际扫描所得 instrument_id、scan_id 和用户提供的 operator。同相机、仪器和实验员的重复请求返回原 binding_id；同一实验员可新增其他仪器关联，已有关系保留。设备采集服务当前会话内沿用原绑定，无需每次重复扫码。成功绑定后异步预加载 PaddleOCR，绑定接口不等待模型加载完成。
+3. bind_instrument：使用实际扫描所得 instrument_id、scan_id 和用户提供的 operator。同相机、仪器和实验员的重复请求返回原 binding_id；同一实验员可新增其他仪器关联，已有关系保留。绑定限北京时间当天且同一采集会话有效；当天不重复扫码，跨日必须重新识别仪器码／场景码。成功绑定后异步预加载 PaddleOCR，绑定接口不等待模型加载完成。
 4. 用户对现有 Agent 说“拍照”，沿用该 Agent 的拍照与 NAS 保存流程。本服务监控配置相机的新语音照片，未绑定也执行 OCR 和留存，稳定后自动识别；不用再调用 capture_and_scan。
 5. get_field_state 查看该相机的 jobs；需要直接传递现有拍照回执时，调用 read_saved_panel，传 binding_id、确切 image_path 和可选 crop。已导入的本地 capture_id 继续用 read_panel。重复提交同一源照片与选框沿用原任务。
 6. 每隔约 1 秒 get_panel_result；只有 completed 才展示 lines。调用方设置自己的总等待期限，超时保留 job_id 稍后查询，不重新提交 OCR。
@@ -150,3 +150,37 @@ NAS 全量索引：`GET /api/archive/files/Index.json` 返回全部已归档版�
 耗时保留完整写入至结果时间，`timing.durations_ms.ingest_wait_ms` 为稳定后至读取前的等待，`processing_ms` 为任务运行至完成；新任务另存 `ingest_retry_count`、最后读取错误和首次／末次读取失败时间。无法从历史数据证明的等待原因不补造。
 
 NAS 以日期与相机分目录，同一明确连拍、重试和确认合并为一个 `Result.json`；逐张照片、逐台仪器和逐字段的原始证据仍完整关联。根导航为 `/api/archive/files/Readme.html`，旧 Records/Objects/Receipts 地址通过持久化映射继续可读。详细位置见 [NAS 文件夹与留存指南](docs/NAS文件夹与留存指南.md)。
+
+## 2026-09-16：照片调度、连拍回执与识别版本
+
+照片发现、历史补录、导入分别运行。最近目录每 0.5 秒发现一次；历史目录每 30 秒补查，导入每处理三张新照片给历史/重试文件一个机会。读取失败按文件独立指数退避（3 秒起、最多 300 秒），读取在独立进程中默认最多等待 4 秒。队列存在本机数据库，NAS 断开不会清空；`photo_watch.retrying_files`、`oldest_pending_at`、`oldest_pending_seconds`、`last_import_error` 用于定位积压。该调度参数不等于已实测端到端时延。
+
+自动监控支持照片同目录的 `PhotoReceipt.json`。上游应在照片可见前以临时文件原子更名发布完整回执，或显式设置 `FIELD_PHOTO_RECEIPT_REQUIRED=1` 等待回执。照片依然需要稳定 0.5 秒、相机匹配和逐张 SHA-256 一致。没有回执时按单张处理；**不会根据 `_001`/`_002` 或同一秒的文件名推断连拍**。当前 NAS 已有 JPG 没有这种回执，历史归组不会补造。回执示例：
+
+```json
+{
+  "schema_version": "field-photo-receipt/1",
+  "camera_id": "Camera01",
+  "measurement": {
+    "burst_id": "capture-tool-measurement-001",
+    "expected_photos": 2,
+    "experiment_context_ref": "experiment://001/step-2",
+    "instrument_ids": []
+  },
+  "photos": [
+    {"filename": "20260916_100000.jpg", "capture_id": "photo-001", "captured_at": "2026-09-16T10:00:00.100+08:00", "sha256": "<该照片原始字节的64位小写SHA-256>"},
+    {"filename": "20260916_100000_001.jpg", "capture_id": "photo-002", "captured_at": "2026-09-16T10:00:00.200+08:00", "sha256": "<该照片原始字节的64位小写SHA-256>"}
+  ]
+}
+```
+
+`POST /api/jobs/{job_id}/reprocess` 接受 `request_id`（UUID）、`actor`、`reason`。只对已完成的原任务创建新识别版本；同一请求重传返回同一任务，理由或目标改变返回 409。新版本沿用原图、采集时间和拍摄时的绑定快照，使用当前识别代码及当前登记的字段规则快照。返回新 `job_id`、原 `capture_id`、原 `measurement_id`（若有）、`recognition_root_job_id`、`recognition_revision`、`supersedes_job_id`。`GET /api/jobs/{job_id}/versions` 查看所有版本和当前完成版本。旧任务 URL 仍返回旧结果。
+
+已确认测量重识别后进入同一测量的修订草稿。原正式记录不可改写；再次确认生成新的 `record_id` 并关联 `supersedes_record_id`，旧记录 URL 继续读回原值。正式记录列表每个测量显示当前版本，NAS 同一测量目录汇总全部版本。工作台及操作记录提供“重新识别”入口，需填写操作人和原因。
+
+仪器登记的 `measurement_ranges` 支持可选 `decimal_places`（0–8），表示屏幕显示小数位数；未知留空。超过已确认量程、单位冲突或显示精度不符时，规范数值为 null 并进入校正，保留原文；不补小数点、不把 OFF 转成 0。`display_fields` 为网页的规范显示来源，六字段 `record` 契约不变。字段规则在新任务的 `field_rules` 留存，历史绑定身份不随登记修改。
+
+
+2026-09-16：仪器绑定和场景关联增加 `binding_date`、`binding_timezone=Asia/Shanghai`、`valid_until`。每到北京时间零点旧关联以 `end_reason=daily_qr_expired` 结束，设备持续开机也需当天新扫码；过期扫码回执返回 409。后台按秒检查，不依赖网页；服务停机跨日时启动后补记零点结束时间。晚到照片按拍摄时间关联历史关系，不使用当前新绑定覆盖原归属；未完成的跨日交接同样失效。
+
+OCR 启动优先直接加载本机完整 PP-OCRv5 缓存，也可用 `FIELD_OCR_DET_MODEL_DIR` / `FIELD_OCR_REC_MODEL_DIR` 指定本地模型。显式目录不完整会报错，不暗中下载或改用 CPU。加载失败按 5 秒起、最多 300 秒间隔自动重试；状态保留失败原因与重试间隔。

@@ -49,6 +49,7 @@ class OCRWorker:
             try:
                 pending=set()
                 while not self.stop.is_set():
+                    self.core['queue_ocr_warmup']()
                     heartbeat(self.db,'ocr',{'status':'running','ocr':self.core['ocr_state'],'active_tasks':len(pending)})
                     finished={f for f in pending if f.done()}
                     for future in finished:future.result()

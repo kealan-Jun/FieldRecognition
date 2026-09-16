@@ -18,8 +18,8 @@
     const video=job.request_trigger==='video_stream'||job.input_mode==='video';
     const processing=d.processing_ms??(t.run_started_at&&t.result_finished_at?
       Math.max(0,instant(t.result_finished_at)-instant(t.run_started_at)):null);
-    return {label:video?'视频帧至结果':t.is_backfill?'补处理 · 发现至结果':'写入至结果',
-      total:video?d.frame_to_result_ms:t.is_backfill?d.detect_to_result_ms:d.write_to_result_ms,
+    return {label:t.is_reprocessing?'重识别任务处理':video?'视频帧至结果':t.is_backfill?'补处理 · 发现至结果':'写入至结果',
+      total:t.is_reprocessing?processing:video?d.frame_to_result_ms:t.is_backfill?d.detect_to_result_ms:d.write_to_result_ms,
       processing,ingestWait:d.ingest_wait_ms,
       delayedIngest:!video&&d.ingest_wait_ms>=30000,
       retries:t.ingest_retry_count||0};
@@ -30,7 +30,12 @@
     return (ids.length>0&&!ids.some(id=>current.has(id)))||
       (instant(capturedAt(job))>0&&now-instant(capturedAt(job))>120000);
   }
-  const api={capturedAt,selectLatest,duration,timing,historical};
+  function lineText(line){
+    if(line.quality_issue)return '字段冲突，需校正';
+    const v=line.normalized_value;
+    return v?(v.value===null?'未取得有效数值':String(v.value)+(v.unit?' '+v.unit:'')):line.text||'';
+  }
+  const api={lineText,capturedAt,selectLatest,duration,timing,historical};
   root.ReadoutView=api;
   if(typeof module!=='undefined')module.exports=api;
 })(globalThis);

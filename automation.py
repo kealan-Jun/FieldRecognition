@@ -107,6 +107,10 @@ class AutomaticRunner:
         with self.lock:
             if self.stop.is_set():
                 return
+            from binding_policy import sweep
+            if sweep(self.core):
+                self._stop_scan('已跨日，请重新扫码建立今天的绑定')
+                self.failed_session, self.retry_at = None, 0
             settings = self.settings()
             if not settings['enabled']:
                 self._stop_scan('自动扫码未开启')

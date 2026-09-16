@@ -24,7 +24,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field, FiniteFloat, model_validator
-from ocr_runtime import configured_device, create_model, OcrDeviceUnavailable
+from ocr_runtime import configured_device, create_model, OcrDeviceUnavailable, OcrModelUnavailable
 from activity import recent_activity, readout_page
 from readout_timing import update_timing
 from panel_detector import PanelDetector
@@ -140,6 +140,8 @@ stopping = threading.Event()
 ocr_lock = threading.RLock()
 ocr_warmup_lock = threading.Lock()
 ocr_warmup_future = None
+ocr_retry_at = 0.0
+ocr_load_failures = 0
 ocr_state = {'status': 'not_loaded', 'device': OCR_DEVICE, 'engine': 'PaddleOCR / PP-OCRv5 mobile',
              'resident': False, 'load_count': 0, 'loaded_at': None}
 ocr_model = None
@@ -161,6 +163,12 @@ def get_instrument(instrument_id):
 
 def validate_capture_epoch(conn, scan):
     require_camera(scan['camera_id'])
+    from binding_policy import moment, ZONE, expire
+    timestamp = now()
+    expire(conn, timestamp)
+    observed = scan.get('qr_observed_at') or scan['received_at']
+    if moment(observed).astimezone(ZONE).date() != moment(timestamp).astimezone(ZONE).date():
+        raise HTTPException(409, '二维码凭证已跨日，请重新扫描当天的仪器码或场景码')
     service = conn.execute('SELECT document FROM camera_service_state WHERE camera=?', (scan['camera_id'],)).fetchone()
     if service and not json.loads(service['document'])['online']:
         raise HTTPException(409, '设备采集服务已离线，重新启动后再扫码绑定')
@@ -263,6 +271,7 @@ def save_camera_scan(frame, metadata, *, decoded=None, operator=None, scan_sessi
 class MeasurementRange(BaseModel):
     unit: str | None = Field(default=None, max_length=20)
     range: tuple[FiniteFloat | None, FiniteFloat | None] = (None,None)
+    decimal_places: int | None = Field(default=None, ge=0, le=8, strict=True)
 
     @model_validator(mode='after')
     def ordered(self):
@@ -303,6 +312,8 @@ def index():
 @app.get('/api/state')
 def state():
     from history_records import job_rows, panel_readings, latest_photo_job
+    from binding_policy import sweep
+    sweep(globals())
     if RUNTIME_ENABLED and SERVICE_ROLE=='api':
         from runtime_rpc import call
         try:ocr_state.update(call('ocr','status'))
@@ -323,6 +334,10 @@ def state():
             related = panel_readings(latest_panel_job)
             latest_panel_job = latest_panel_job | {'readings': related, 'lines': related}
         photo_job = latest_photo_job(conn, receiver_camera.target if receiver_camera else os.environ.get('FIELD_CAMERA_ID'))
+    from measurement_records import display_fields
+    for job in [*jobs, latest_panel_job, photo_job]:
+        if job:
+            job['display_fields'] = display_fields(job)
     return filter_payload({'scenes': scene_records(), 'scene_visits': scene_visits(), 'instruments': instruments, 'bindings': bindings, 'jobs': jobs, 'ocr': dict(ocr_state),
             'last_camera_scan': json.loads(last_hit['document']) if last_hit else None,
             'activity': activity, 'latest_panel_job': latest_panel_job, 'latest_photo_job': photo_job,
@@ -354,7 +369,7 @@ def edit_instrument(instrument_id: uuid.UUID, body: InstrumentEdit):
                          ((body.device_no or '').strip() or None,str(instrument_id)))
         if 'measurement_ranges' in body.model_fields_set:
             conn.execute('UPDATE instruments SET measurement_ranges=? WHERE id=?',
-                         (json.dumps({k:v.model_dump() for k,v in (body.measurement_ranges or {}).items()}),str(instrument_id)))
+                         (json.dumps({k:v.model_dump(exclude_none=True) for k,v in (body.measurement_ranges or {}).items()}),str(instrument_id)))
     return get_instrument(str(instrument_id))
 
 
@@ -457,6 +472,8 @@ def persist_binding(conn, body, *, automatic=False, handoff_id=None):
               'scene': visit['scene'] if visit else {'id': None, 'name': asset['scene']},
               'scene_qr_verified': visit is not None,
               'scene_basis': 'decoded_scene_qr' if visit else 'instrument_registration'}
+    from binding_policy import fields
+    result.update(fields(timestamp))
     service = conn.execute('SELECT document FROM camera_service_state WHERE camera=?', (scan['camera_id'],)).fetchone()
     result['device_service'] = json.loads(service['document']) if service else None
     if not result['operator']:
@@ -513,19 +530,27 @@ def create_ocr_model():
 
 
 def load_ocr():
-    global ocr_model
+    global ocr_model, ocr_retry_at, ocr_load_failures
     with ocr_lock:
         if ocr_model is None:
+            if time.monotonic() < ocr_retry_at:
+                raise OcrModelUnavailable('模型加载失败，等待自动重试')
             started = time.monotonic()
             ocr_state.update(status='loading', error=None, error_detail=None, resident=False)
             try:
                 ocr_model = create_ocr_model()
             except Exception as exc:
+                ocr_load_failures += 1
+                delay = min(300, 5 * 2 ** min(ocr_load_failures - 1, 6))
+                ocr_retry_at = time.monotonic() + delay
                 ocr_state.update(status='error', error=type(exc).__name__, resident=False,
-                                 error_detail=str(exc) if isinstance(exc, OcrDeviceUnavailable) else None)
+                                 error_detail=str(exc) if isinstance(exc, (OcrDeviceUnavailable, OcrModelUnavailable)) else '模型加载失败，请检查本机模型与服务日志',
+                                 retry_after_seconds=delay, load_failures=ocr_load_failures)
                 raise
+            ocr_retry_at, ocr_load_failures = 0.0, 0
             ocr_state.update(loaded_at=now(), load_count=ocr_state['load_count'] + 1,
-                             load_seconds=round(time.monotonic() - started, 3))
+                             load_seconds=round(time.monotonic() - started, 3),
+                             retry_after_seconds=0, load_failures=0)
         ocr_state.update(status='ready', resident=True, error=None, error_detail=None)
         return ocr_model
 
@@ -543,6 +568,8 @@ def warm_ocr():
 def queue_ocr_warmup():
     global ocr_warmup_future
     with ocr_warmup_lock:
+        if ocr_model is None and time.monotonic() < ocr_retry_at:
+            return ocr_warmup_future
         if ocr_model is not None or (ocr_warmup_future is not None and not ocr_warmup_future.done()):
             return ocr_warmup_future
         ocr_state.update(status='queued', error=None)
@@ -590,16 +617,21 @@ def run_ocr(document):
 
 
 def current_panel_bindings(camera_id):
+    from binding_policy import sweep
+    sweep(globals())
     with db() as conn:
         rows = conn.execute('SELECT document FROM bindings WHERE camera=? AND ended IS NULL', (camera_id,)).fetchall()
     return [b for row in rows if current_readout_binding(b := json.loads(row['document']))]
 
 
-def predict_readout(panel, x=0, y=0, *, video=False, binding_snapshots=None):
+def predict_readout(panel, x=0, y=0, *, video=False, binding_snapshots=None, field_rules=None):
     from panel_regions import predict
     if binding_snapshots is None:
         binding_snapshots = current_panel_bindings(receiver_camera.target) if video and receiver_camera else []
-    return predict(globals(), panel, x, y, video=video,
+    local_core = globals()
+    if field_rules is not None:
+        local_core = dict(globals(), get_instrument=lambda iid: (get_instrument(iid) or {}) | {'measurement_ranges':field_rules.get(iid,{})})
+    return predict(local_core, panel, x, y, video=video,
                    allowed_instrument_ids={b['instrument']['id'] for b in binding_snapshots})
 
 
@@ -620,6 +652,9 @@ def current_readout_binding(document):
         if not row or row['ended']:
             return False
         binding = json.loads(row['document'])
+        from binding_policy import contains
+        if not contains(binding, now()):
+            return False
         asset = get_instrument(binding['instrument']['id'])
         if not asset or asset['scene'] != binding['instrument']['scene']:
             return False
@@ -649,6 +684,8 @@ def submit_ocr(body: OcrRequest):
 
 def enqueue_ocr(body, *, trigger='explicit_request', precomputed_local=None):
     with db() as conn:
+        from binding_policy import expire
+        expire(conn, now())
         binding = conn.execute('SELECT * FROM bindings WHERE id=?', (str(body.binding_id),)).fetchone()
         capture = conn.execute('SELECT document FROM scans WHERE id=?', (str(body.capture_id),)).fetchone()
         if not capture:
@@ -684,8 +721,8 @@ def enqueue_ocr(body, *, trigger='explicit_request', precomputed_local=None):
         if len(crop) != 4 or min(crop[:2]) < 0 or min(crop[2:]) < 16 or crop[0]+crop[2] > capture['width'] or crop[1]+crop[3] > capture['height']:
             raise HTTPException(422, '面板选框超出图片，或区域太小')
         repeatable = RECORD_MODE == 'production' or body.measurement is not None
-        lookup = 'SELECT status,document FROM jobs' + ('' if repeatable else " WHERE status IN ('queued','running')")
-        for pending in conn.execute(lookup):
+        lookup = "SELECT status,document FROM jobs WHERE json_extract(document,'$.capture_id')=?" + ('' if repeatable else " AND status IN ('queued','running')") + ' ORDER BY rowid DESC'
+        for pending in conn.execute(lookup, (str(body.capture_id),)):
             existing = json.loads(pending['document'])
             if (existing['binding_id'] == binding_id and existing['capture_id'] == str(body.capture_id)
                     and existing['crop'] == crop):
@@ -710,6 +747,8 @@ def enqueue_ocr(body, *, trigger='explicit_request', precomputed_local=None):
         document['resume_pending'] = trigger != 'video_stream'
         document['video_observation'] = capture.get('video_observation')
         document.update(context)
+        document['field_rules'] = {b['instrument']['id']:(get_instrument(b['instrument']['id']) or {}).get('measurement_ranges',{})
+                                   for b in document.get('all_binding_snapshots',document.get('binding_snapshots',[]))}
         if not linked and context['instrument_candidates']:
             document['instrument_association'] = 'multiple_candidates' if len(context['instrument_candidates']) > 1 else 'same_image_qr_unbound'
             if len(context['instrument_candidates']) == 1:
@@ -744,7 +783,8 @@ def get_job(job_id: uuid.UUID):
     if not row:
         raise HTTPException(404, '任务不存在')
     document = json.loads(row['document']) | {'status': row['status']}
-    return document | {'archive': archive_store.job_receipt(document)}
+    from measurement_records import display_fields
+    return document | {'archive': archive_store.job_receipt(document), 'display_fields': display_fields(document)}
 
 
 @app.get('/api/export')
@@ -839,6 +879,8 @@ install_ownership(globals())
 from archive_store import ArchiveStore
 from photo_measurements import install as install_measurements
 install_measurements(globals())
+from result_reprocessing import install as install_reprocessing
+install_reprocessing(globals())
 archive_store = ArchiveStore(globals())
 
 from agent_tools import install_tools

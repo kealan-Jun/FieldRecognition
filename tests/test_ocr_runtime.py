@@ -81,3 +81,46 @@ def test_gpu_result_and_failure_keep_device_and_resident_contract(app_client, mo
     state = client.get('/api/state').json()['ocr']
     assert not state['resident'] and state['error'] == 'OcrDeviceUnavailable'
     assert 'not visible' in state['error_detail']
+
+
+def test_offline_cached_models_are_passed_as_explicit_directories(tmp_path, monkeypatch):
+    monkeypatch.setenv('PADDLE_PDX_CACHE_HOME', str(tmp_path))
+    for suffix in ('det', 'rec'):
+        path = tmp_path / 'official_models' / f'PP-OCRv5_mobile_{suffix}'
+        path.mkdir(parents=True)
+        for name in ('inference.json', 'inference.pdiparams', 'inference.yml'):
+            (path / name).write_bytes(b'local-weight-fixture')
+    _, options = runtime_double(monkeypatch)
+    create_model('gpu:0')
+    assert options[0]['text_detection_model_dir'] == str(tmp_path / 'official_models/PP-OCRv5_mobile_det')
+    assert options[0]['text_recognition_model_dir'] == str(tmp_path / 'official_models/PP-OCRv5_mobile_rec')
+
+
+def test_explicit_incomplete_model_never_downloads_silently(tmp_path, monkeypatch):
+    from ocr_runtime import OcrModelUnavailable
+    monkeypatch.setenv('FIELD_OCR_DET_MODEL_DIR', str(tmp_path))
+    _, options = runtime_double(monkeypatch)
+    with pytest.raises(OcrModelUnavailable):
+        create_model('gpu:0')
+    assert not options
+
+
+def test_load_failure_backs_off_then_recovers(app_client, monkeypatch):
+    app, _ = app_client
+    clock = [1000.0]
+    monkeypatch.setattr(app.time, 'monotonic', lambda: clock[0])
+    calls = []
+    def fail():
+        calls.append(1)
+        raise OcrDeviceUnavailable('offline')
+    monkeypatch.setattr(app, 'create_ocr_model', fail)
+    assert not app.warm_ocr()
+    assert not app.warm_ocr()
+    assert len(calls) == 1 and app.ocr_state['retry_after_seconds'] == 5
+    clock[0] += 5
+    assert not app.warm_ocr()
+    assert len(calls) == 2 and app.ocr_state['retry_after_seconds'] == 10
+    clock[0] += 10
+    monkeypatch.setattr(app, 'create_ocr_model', object)
+    assert app.warm_ocr()
+    assert app.ocr_state['resident'] and app.ocr_state['load_failures'] == 0

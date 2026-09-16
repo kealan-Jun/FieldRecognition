@@ -100,7 +100,7 @@ def test_three_photos_one_confirmed_record_retry_and_raw_evidence(setup):
     for source in draft['sources']:
         raw = client.get(source['original_url'])
         assert raw.status_code == 200 and hashlib.sha256(raw.content).hexdigest() == source['source_sha256']
-        assert source['versions']['rules'] == 'photo-measurement/2'
+        assert source['versions']['rules'] == 'photo-measurement/3'
         assert source['panel_detection']['weights_sha256'] == 'a' * 64
     decision = {'actor': 'Reader', 'revision': draft['revision']}
     first = client.post(f'/api/photo-measurements/{mid}/confirm', json=decision)

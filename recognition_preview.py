@@ -23,7 +23,17 @@ def render(frame, panels):
     labels = []
     for panel in panels:
         x1, y1, x2, y2 = [round(v * scale) for v in panel['bbox']]
-        texts = [line['text'] for line in panel['local_ocr'].get('lines', []) if line.get('text')]
+        texts = []
+        for line in panel['local_ocr'].get('lines', []):
+            if line.get('quality_issue'):
+                texts.append('字段冲突，需校正')
+            elif line.get('normalized_value'):
+                value=line['normalized_value']
+                texts.append(str(value['value'])+(' '+value['unit'] if value['unit'] else '') if value['value'] is not None else '无有效读数')
+            elif line.get('text'):
+                texts.append(line['text'])
+        if panel.get('display_state'):
+            texts=[panel['display_state']['text']]
         color = '#2fd5a5' if texts else '#ffce66'
         name = panel.get('instrument_name') or ('设备 A' if panel['class_id'] == 0 else '设备 B')
         label = f"{name} · {panel.get('measurement_name') or '面板'} · {' / '.join(texts) or '无数字读数'}"

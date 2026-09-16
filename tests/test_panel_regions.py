@@ -49,7 +49,7 @@ def configure(app, monkeypatch, boxes=BOXES):
     monkeypatch.setattr(app.panel_detector, 'predict', lambda image: {'status':'completed', 'boxes':copy.deepcopy(boxes), 'weights_sha256':'a'*64})
     monkeypatch.setattr(app, 'predict_panel', lambda image, x=0, y=0: {
         'status':'completed', 'device':'cpu', 'model':'test', 'actual_model_invocation':True,
-        'lines':[{'text':'12.3 g' if x<100 else '200 rpm', 'polygon':[[x,y],[x+10,y],[x+10,y+8],[x,y+8]]}]})
+        'lines':[{'text':'12.3 g' if x<100 else '200 g', 'polygon':[[x,y],[x+10,y],[x+10,y+8],[x,y+8]]}]})
 
 
 def test_two_panels_keep_separate_bindings_polygons_and_archived_crops(archive, monkeypatch):
@@ -75,7 +75,7 @@ def test_two_panels_keep_separate_bindings_polygons_and_archived_crops(archive, 
     crops=[a for k,a in receipt['artifacts'].items() if k.startswith('panel_')]
     assert len(crops)==2
     assert all(hashlib.sha256(resolve_file(root,c['path']).read_bytes()).hexdigest()==c['sha256'] for c in crops)
-    for iid, text in ((A,'12.3 g'),(B,'200 rpm')):
+    for iid, text in ((A,'12.3 g'),(B,'200 g')):
         records=list(root.glob('*/VoicePhotoReadings/*/Result.json'))
         assert len(records)==1
         r=json.loads(records[0].read_text())

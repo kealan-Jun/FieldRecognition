@@ -1,13 +1,14 @@
 """One instrument per photograph, with nulls for facts the evidence cannot supply."""
 import math
 import re
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
 
 UNITS = {'温度': {'°C'}, '转速': {'rpm'}, '质量': {'g', 'mg', 'kg'}}
 SCHEMA_VERSION = 'instrument-measurement/1'
-RULE_VERSION = 'instrument-measurement/2'
+RULE_VERSION = 'instrument-measurement/3'
 
 
 def capture_clock(document):
@@ -87,8 +88,62 @@ def measurement_value(name, reading, instrument):
             or any(v is not None and (type(v) not in (float, int) or not math.isfinite(v)) for v in limits)
             or all(v is not None for v in limits) and limits[0] > limits[1]):
         limits = [None, None]
-    return {'name': name, 'value': None if basis == 'unit_conflict' else number(reading),
+    return {'name': name, 'value': None if field_issues(name, reading, instrument) else number(reading),
             'unit': unit, 'range': limits}, basis
+
+
+def field_issues(name, reading, instrument):
+    """Only enforce registered facts; never repair decimals or invent limits."""
+    issues = [reading['quality_issue']] if reading.get('quality_issue') else []
+    unit, basis = unit_evidence(name, reading, instrument)
+    if name in UNITS and basis == 'unit_conflict':
+        issues.append(basis)
+    value = number(reading)
+    if value is None:
+        if reading.get('value') is not None:
+            issues.append('invalid_number')
+        return list(dict.fromkeys(issues))
+    spec = ((instrument.get('measurement_ranges') or {}).get(name) or {})
+    bounds = spec.get('range')
+    if unit and unit == spec.get('unit') and isinstance(bounds, (list, tuple)) and len(bounds) == 2:
+        low, high = bounds
+        valid = all(v is None or type(v) in (int, float) and math.isfinite(v) for v in bounds)
+        if valid and not (low is not None and high is not None and low > high):
+            if (low is not None and value < low) or (high is not None and value > high):
+                issues.append('outside_registered_range')
+    places = spec.get('decimal_places')
+    if type(places) is int and 0 <= places <= 8:
+        try:
+            # Display precision concerns observed text; user corrections are numeric.
+            actual = max(0, -Decimal(str(reading['value'])).as_tuple().exponent)
+            if actual != places and not reading.get('corrected'):
+                issues.append('display_precision_mismatch')
+            elif reading.get('corrected') and Decimal(str(value)).quantize(Decimal(1).scaleb(-places)) != Decimal(str(value)):
+                issues.append('display_precision_mismatch')
+        except InvalidOperation:
+            issues.append('invalid_number')
+    return list(dict.fromkeys(issues))
+
+
+def display_fields(document):
+    """Common derived field view for API, browser and archived results."""
+    result = []
+    for entry in build_records(document):
+        iid = entry['instrument_id']
+        for value in entry['record']['values']:
+            matches = [r for r in document.get('readings', []) if
+                       (r.get('instrument') or {}).get('id') == iid and r.get('measurement_name') == value['name']]
+            regions = [r for r in document.get('panel_regions', []) if
+                       (r.get('instrument') or {}).get('id') == iid and r.get('measurement_name') == value['name']]
+            region = regions[0] if len(regions) == 1 else {}
+            reading = matches[0] if len(matches) == 1 else {}
+            state = (region.get('display_state') or {}).get('text')
+            issues = field_issues(value['name'], reading, region.get('instrument') or {})
+            result.append(value | {'instrument_id': iid, 'instrument_name': (region.get('instrument') or {}).get('name'),
+                'panel_id': region.get('panel_id'), 'panel_image_url': region.get('image_url'),
+                'raw_text': reading.get('text'), 'display_state': state, 'issues': issues,
+                'status': 'display_state' if state else 'needs_correction' if issues else 'recognized' if value['value'] is not None else 'unreadable'})
+    return result
 
 
 def build_records(document):

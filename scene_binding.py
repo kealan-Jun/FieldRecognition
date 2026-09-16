@@ -56,11 +56,13 @@ def install(core):
                     raise HTTPException(409, '请先结束已有场景关联，再更换实验员')
                 if prior['scene']['id'] == str(body.scene_id):
                     return prior
-            timestamp = now()
+            timestamp = core['now']()
             result = {'visit_id': str(uuid.uuid4()), 'camera_id': scan['camera_id'], 'scene': dict(scene),
                       'scan_id': scan['scan_id'], 'image_url': scan['image_url'], 'started_at': timestamp,
                       'operator': body.operator.strip() if body.operator else None,
                       'ended_at': None, 'identity_basis': 'unsigned_scene_qr_and_continuous_scan_opt_in' if automatic else 'unsigned_scene_qr_and_user_confirmation'}
+            from binding_policy import fields
+            result.update(fields(timestamp))
             conn.execute('INSERT INTO scene_visits VALUES(?,?,NULL,?)', (result['visit_id'], result['camera_id'], json.dumps(result)))
             return result
 

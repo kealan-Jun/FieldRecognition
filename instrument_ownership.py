@@ -91,6 +91,8 @@ def install(core):
     @core['app'].post('/api/handoffs')
     def request(body: HandoffRequest):
         require_role('admin','operator')
+        from binding_policy import sweep
+        sweep(core)
         if current():
             body=body.model_copy(update={'recipient_operator':actor_name(),'recipient_wearer_id':current().user_id})
         with core['live_scanner'].lock, core['db']() as conn:
@@ -134,6 +136,8 @@ def install(core):
         # Expiration persists even if the following stale decision is rejected.
         with core['db']() as conn:
             conn.execute('BEGIN IMMEDIATE')
+            from binding_policy import expire
+            expire(conn, core['now']())
             expire_requests(conn)
         with core['live_scanner'].lock, core['db']() as conn:
             conn.execute('BEGIN IMMEDIATE')

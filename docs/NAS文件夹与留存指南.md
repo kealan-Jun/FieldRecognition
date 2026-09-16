@@ -114,3 +114,7 @@ systemctl --user start field-recognition-archive.service
 ```
 
 脚本使用项目的 `.env`，取得归档进程独占锁，先校验、备份本机数据库和旧文件哈希清单，再迁移并逐一读回校验。备份位于本机 `Verification/ArchiveMigration<时间>/`。不删除源 NAS 采集材料；失败后修复存储问题，重复执行会沿映射继续，不应手工重建空队列。
+
+识别新版本仍放在原测量的 `Result.json`：`observations` 保留各次识别、规则快照与重识别原因，`instrument_measurements` 给出当前规范结果，`receipt_versions` 可回溯旧回执。已确认的测量重新识别后，`decision` 表示修订草稿；再次确认前旧正式记录仍有效。照片沿用原来的单份哈希文件，重识别不会再创建测量文件夹。
+
+源语音照片目录可由采集方提供 `PhotoReceipt.json` 明确连拍关系。这个回执属于输入协议，不能从相邻照片文件名推导。格式见项目 `AgentTools.md`；识别服务只读源照片及回执。

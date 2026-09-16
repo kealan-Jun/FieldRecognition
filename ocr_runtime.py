@@ -1,10 +1,31 @@
 """Explicit, single-device PaddleOCR configuration; GPU errors never select CPU."""
 import os
 import re
+from pathlib import Path
 
 
 class OcrDeviceUnavailable(RuntimeError):
     pass
+
+
+class OcrModelUnavailable(RuntimeError):
+    pass
+
+
+def local_model_options():
+    """Use complete local weights directly, bypassing PaddleX host discovery."""
+    cache = Path(os.environ.get('PADDLE_PDX_CACHE_HOME', str(Path.home() / '.paddlex')))
+    options = {}
+    for kind, suffix in [('detection', 'det'), ('recognition', 'rec')]:
+        configured = os.environ.get(f'FIELD_OCR_{suffix.upper()}_MODEL_DIR')
+        path = Path(configured).expanduser() if configured else cache / 'official_models' / f'PP-OCRv5_mobile_{suffix}'
+        complete = all((path / name).is_file() and (path / name).stat().st_size > 0
+                       for name in ('inference.json', 'inference.pdiparams', 'inference.yml'))
+        if complete:
+            options[f'text_{kind}_model_dir'] = str(path.resolve())
+        elif configured:
+            raise OcrModelUnavailable(f'FIELD_OCR_{suffix.upper()}_MODEL_DIR 缺少完整模型文件')
+    return options
 
 
 def configured_device():
@@ -15,6 +36,7 @@ def configured_device():
 
 
 def create_model(device):
+    options = local_model_options()
     if device.startswith('gpu:'):
         # Set before Paddle is imported. Allocate as needed alongside other GPU services.
         os.environ.setdefault('FLAGS_allocator_strategy', 'auto_growth')
@@ -30,4 +52,4 @@ def create_model(device):
                      text_detection_model_name='PP-OCRv5_mobile_det',
                      text_recognition_model_name='PP-OCRv5_mobile_rec',
                      use_doc_orientation_classify=False, use_doc_unwarping=False,
-                     use_textline_orientation=False)
+                     use_textline_orientation=False, **options)

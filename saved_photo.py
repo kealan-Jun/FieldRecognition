@@ -56,55 +56,85 @@ class BurstRequest(BaseModel):
         return self
 
 
-def load_saved_photo(image_path, *, expected_camera, max_bytes):
+class ReceiptPhoto(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    filename: str = Field(pattern=r'^\d{8}_\d{6}(?:_\d+)?\.(?:jpg|jpeg|png)$')
+    capture_id: str = Field(min_length=1, max_length=200)
+    captured_at: AwareDatetime
+    sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
+
+
+class PhotoReceipt(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    schema_version: str = 'field-photo-receipt/1'
+    camera_id: str = Field(min_length=1, max_length=100)
+    measurement: MeasurementContext
+    photos: list[ReceiptPhoto] = Field(min_length=1, max_length=16)
+
+    @model_validator(mode='after')
+    def members(self):
+        if self.schema_version != 'field-photo-receipt/1' or not self.measurement.burst_id:
+            raise ValueError('回执必须提供版本和连拍编号')
+        if self.measurement.expected_photos != len(self.photos):
+            raise ValueError('连拍预期数量与回执列表不一致')
+        for attr in ('filename', 'capture_id'):
+            if len({getattr(p, attr) for p in self.photos}) != len(self.photos):
+                raise ValueError('照片文件名或编号重复')
+        return self
+
+
+def load_saved_bundle(image_path, *, expected_camera, max_bytes):
+    from source_io import call, SourceError
     configured = os.environ.get('FIELD_SAVED_PHOTO_ROOT')
     if not configured:
         raise HTTPException(409, '尚未配置已有照片目录；可由 Agent 传入 photo 原图与回执')
-    root = Path(configured).resolve()
-    supplied = Path(image_path)
-    candidate = supplied if supplied.is_absolute() else root / supplied
     try:
-        path = candidate.resolve(strict=True)
-        relative = path.relative_to(root)
-        # Actual voice_photos layout, not a recursive or latest-file search.
-        camera, day, moment, filename = relative.parts
-    except OSError:
-        raise HTTPException(503, '照片存储暂不可读，保留队列等待恢复') from None
-    except ValueError:
-        raise HTTPException(422, '照片路径不存在或不在已配置的语音拍照目录内') from None
-    if camera != expected_camera:
-        raise HTTPException(409, '拍照文件所属相机与当前绑定不一致')
+        loaded = call({'action': 'read', 'root': configured, 'path': image_path, 'camera': expected_camera,
+            'max_bytes': max_bytes, 'require_receipt': os.environ.get('FIELD_PHOTO_RECEIPT_REQUIRED', '0') == '1'})
+    except SourceError as exc:
+        raise HTTPException(exc.status, str(exc)) from None
+    camera, day, moment, filename = Path(loaded['relative']).parts
     match = re.fullmatch(r'(\d{8})_(\d{6})(?:_\d+)?\.(?:jpg|jpeg|png)', filename, re.I)
-    if not match or not path.is_file():
-        raise HTTPException(422, '请提供拍照结果中的具体照片文件，不支持目录或视频')
     try:
+        if not match:
+            raise ValueError('Invalid filename')
         captured = datetime.strptime(match[1] + match[2], '%Y%m%d%H%M%S').replace(
             tzinfo=ZoneInfo(os.environ.get('FIELD_SAVED_PHOTO_TIMEZONE', 'Asia/Shanghai')))
         if day != captured.strftime('%Y-%m-%d') or moment != captured.strftime('%H-%M-%S'):
             raise ValueError('Photo date mismatch')
-        before = path.stat()
-        if not 0 < before.st_size <= max_bytes:
-            raise HTTPException(413, '照片为空或超过 12 MB')
-        with path.open('rb') as source:
-            raw = source.read(max_bytes + 1)
-        after = path.stat()
-        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns) or len(raw) != after.st_size:
-            raise HTTPException(409, '照片仍在写入，请等待拍照保存完成')
-    except OSError:
-        raise HTTPException(503, '照片读取失败，保留队列等待存储恢复') from None
     except (ValueError, KeyError):
-        raise HTTPException(422, '无法读取完整照片或解析其拍摄时间') from None
-    return PhotoResult(capture_id=relative.as_posix(), camera_id=camera, captured_at=captured,
-                       source_ref=str(path), image_base64=base64.b64encode(raw).decode(),
-                       sha256=hashlib.sha256(raw).hexdigest(),
-                       source_written_at=datetime.fromtimestamp(after.st_mtime, timezone.utc),
-                       timestamp_basis='nas_filename_local_time_not_hardware_verified')
+        raise HTTPException(422, '无法解析照片拍摄时间') from None
+    digest = hashlib.sha256(base64.b64decode(loaded['image_base64'])).hexdigest()
+    capture_id, context, evidence = loaded['relative'], None, None
+    basis = 'nas_filename_local_time_not_hardware_verified'
+    if loaded['receipt'] is not None:
+        try:
+            receipt = PhotoReceipt.model_validate(loaded['receipt'])
+        except ValueError:
+            raise HTTPException(422, '连拍回执字段、数量或编号无效') from None
+        entry = next((p for p in receipt.photos if p.filename == filename), None)
+        if receipt.camera_id != expected_camera or not entry:
+            raise HTTPException(409, '连拍回执相机或照片列表不匹配')
+        if entry.sha256 != digest or not 0 <= (entry.captured_at-captured).total_seconds() < 1:
+            raise HTTPException(409, '连拍照片哈希或拍摄时间与回执不符')
+        capture_id, captured, context = entry.capture_id, entry.captured_at, receipt.measurement
+        evidence = receipt.model_dump(mode='json')
+        basis = 'nas_photo_receipt'
+    photo = PhotoResult(capture_id=capture_id, camera_id=camera, captured_at=captured,
+        source_ref=loaded['path'], image_base64=loaded['image_base64'], sha256=digest,
+        source_written_at=datetime.fromtimestamp(loaded['mtime'], timezone.utc), timestamp_basis=basis)
+    return photo, context, evidence
+
+
+def load_saved_photo(image_path, *, expected_camera, max_bytes):
+    return load_saved_bundle(image_path, expected_camera=expected_camera, max_bytes=max_bytes)[0]
 
 
 def install(core):
     with core['db']() as conn:
         conn.execute('CREATE TABLE IF NOT EXISTS imported_photos(camera_id TEXT, source_capture_id TEXT, '
                      'sha256 TEXT NOT NULL, capture_id TEXT NOT NULL, PRIMARY KEY(camera_id,source_capture_id))')
+        conn.execute("CREATE INDEX IF NOT EXISTS scans_source_ref ON scans(json_extract(document,'$.external_photo.source_ref'))")
 
     def _read_saved_panel(body, *, trigger='explicit_request', observation=None):
         with core['ocr_submit_lock']:
@@ -143,22 +173,26 @@ def install(core):
                     if existing['sha256'] != digest:
                         raise HTTPException(409, '同一个拍照结果编号对应的照片内容发生变化')
                     capture = json.loads(conn.execute('SELECT document FROM scans WHERE id=?', (existing['capture_id'],)).fetchone()['document'])
-                    comparison = dict(external)
-                    if 'source_written_at' not in capture['external_photo']:
-                        comparison.pop('source_written_at', None)
-                    if capture['external_photo'] != comparison:
+                    # Transport path/mtime may change on retransmission. Content, camera,
+                    # source ID and capture time remain strict; retain the FIRST receipt.
+                    comparison = {k:v for k,v in external.items() if k not in {'source_written_at','source_ref'}}
+                    stored_receipt = {k:v for k,v in capture['external_photo'].items() if k not in {'source_written_at','source_ref'}}
+                    if stored_receipt != comparison:
                         raise HTTPException(409, '同一个拍照结果编号的原始回执发生变化')
                 else:
                     capture = None
+                    prior_path = conn.execute("SELECT 1 FROM scans WHERE json_extract(document,'$.external_photo.source_ref')=?", (photo.source_ref,)).fetchone() if (observation or {}).get('source_written_basis')=='nas_file_mtime' else None
+                    if prior_path:
+                        raise HTTPException(409, '已导入的原照片不能通过新编号或迟到回执重复创建测量')
             if capture is None:
                 # The caller resolves NAS access. source_ref is opaque provenance, never
                 # interpreted as a filesystem path or a URL to fetch by this service.
                 capture = core['scan_image'](raw, 'agent_saved_photo', photo.camera_id, persist=False)
                 capture['external_photo'] = external
                 capture['photo_observation'] = dict(observation or {}) | {'imported_at': core['now'](),
-                    'read_started_at': read_started, 'photo_read_at': photo_read_at,
+                    'read_started_at': (observation or {}).get('read_started_at', read_started), 'photo_read_at': (observation or {}).get('photo_read_at', photo_read_at),
                     'source_written_at': external.get('source_written_at'),
-                    'source_written_basis': ('nas_file_mtime' if body.image_path else
+                    'source_written_basis': ('nas_file_mtime' if body.image_path or (observation or {}).get('source_written_basis') == 'nas_file_mtime' else
                                              'agent_receipt' if photo.source_written_at else 'not_recorded')}
                 # Attribute only a registration that already existed when this photo
                 # was taken. A later registrant must not be assigned to older photos.
@@ -182,7 +216,7 @@ def install(core):
             # Retransmission of the same saved photograph reuses even a finished job.
             # A genuinely new photograph or a different crop is a new request.
             with core['db']() as conn:
-                for row in conn.execute('SELECT status,document FROM jobs ORDER BY rowid DESC'):
+                for row in conn.execute("SELECT status,document FROM jobs WHERE json_extract(document,'$.capture_id')=? ORDER BY rowid DESC", (capture['capture_id'],)):
                     job = json.loads(row['document'])
                     if (job['capture_id'] == capture['capture_id']
                             and job['crop'] == requested_crop):
@@ -208,6 +242,15 @@ def install(core):
                 row=conn.execute('SELECT camera FROM bindings WHERE id=?',(str(body.binding_id),)).fetchone()
             if row:target=row[0]
         require_camera(target)
+        # NAS I/O finishes before acquiring the import/submission locks.
+        if body.image_path:
+            began = core['now']()
+            photo, context, receipt = load_saved_bundle(body.image_path, expected_camera=target, max_bytes=core['MAX_BYTES'])
+            if context and body.measurement and context != body.measurement:
+                raise HTTPException(409, '请求测量上下文与 NAS 连拍回执不一致')
+            body = body.model_copy(update={'photo': photo, 'image_path': None, 'measurement': context or body.measurement})
+            observation = dict(observation or {}) | {'read_started_at': began, 'photo_read_at': core['now'](),
+                'source_written_basis': 'nas_file_mtime', 'source_receipt': receipt}
         with process_mutex(core['DATA'],'photo-import:'+str(target)):
             return _read_saved_panel(body,trigger=trigger,observation=observation)
 

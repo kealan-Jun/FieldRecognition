@@ -98,6 +98,8 @@ def test_preload_failure_keeps_binding_and_can_retry_without_duplicate(app_clien
     state = client.get('/api/state').json()
     assert state['ocr']['status'] == 'error' and not state['ocr']['resident']
     assert state['bindings'][0]['ended_at'] is None
+    assert state['ocr']['retry_after_seconds'] == 5
+    monkeypatch.setattr(app, 'ocr_retry_at', 0)  # retry after the bounded backoff
     assert client.post('/api/bindings', json=args).json()['binding_id'] == binding['binding_id']
     assert app.ocr_warmup_future.result(timeout=2)
     assert app.ocr_model is model and len(attempts) == 2

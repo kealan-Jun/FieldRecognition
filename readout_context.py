@@ -1,13 +1,13 @@
 """Freeze photo-time relationships without choosing the first of several instruments."""
 import json
 from datetime import datetime
+from binding_policy import contains
 
 
 def binding_contains_photo(binding, capture):
     try:
         moment = datetime.fromisoformat(capture['external_photo']['captured_at'])
-        return moment.tzinfo is not None and datetime.fromisoformat(binding['started_at']) <= moment and (
-            not binding.get('ended_at') or moment < datetime.fromisoformat(binding['ended_at']))
+        return moment.tzinfo is not None and contains(binding, moment)
     except (TypeError, KeyError, ValueError):
         return False
 
@@ -16,8 +16,7 @@ def at_capture(core, conn, capture, *, linked=None, automatic=False):
     captured_at = (capture.get('external_photo') or {}).get('captured_at')
     moment = datetime.fromisoformat(captured_at or capture['received_at'])
     def contained(document):
-        return (datetime.fromisoformat(document['started_at']) <= moment and
-                (not document.get('ended_at') or moment < datetime.fromisoformat(document['ended_at'])))
+        return contains(document, moment)
     snapshots = [linked] if linked else []
     if automatic and not linked:
         snapshots = [json.loads(row['document']) for row in conn.execute(

@@ -44,7 +44,7 @@
         <div id="sceneInfo" class="caption"></div><button id="enterScene" class="secondary" hidden disabled>确认进入场景</button><div id="sceneResults"></div><div id="scanResults" class="empty-text">仪器码入镜后自动识别。</div>
         <button id="bind" class="primary full" hidden disabled>绑定所选仪器</button><button class="quiet" id="endBinding" hidden>结束本轮全部关联</button>
         <details class="binding-evidence"><summary>最近二维码命中帧</summary><figure id="qrEvidence" class="qr-evidence" hidden><a id="qrEvidenceLink" class="qr-evidence-media" target="_blank" rel="noopener"><img id="qrEvidenceImage" alt="二维码成功解码时保存的原始画面"><svg id="qrEvidenceOverlay" aria-hidden="true"></svg></a><figcaption><strong id="qrEvidenceTitle">二维码命中帧</strong><span id="qrEvidenceTime"></span><span>点击图片查看原始画面与解码位置</span></figcaption></figure></details>
-        <p class="caption binding-note">短暂断流保留绑定；设备采集会话变化后重新扫码。</p>
+        <p class="caption binding-note">绑定当天有效（北京时间）；跨日或采集会话变化后重新扫码，短暂断流保留当天绑定。</p>
       </section>
       <section class="card ocr-card">
         <div class="card-title"><h2>实时读数与留存</h2><button id="videoOcrToggle" class="quiet">开启视频识别</button></div><p class="small" id="ocrState">PaddleOCR</p>
@@ -63,5 +63,5 @@
 <p id="archiveStatus" class="caption" role="status">正在检查 NAS 留存</p><p class="caption"><a href="/api/archive/files/00_归档导航.html" target="_blank" rel="noopener">打开 NAS 中文归档 ↗</a> · <a href="/api/archive/files/Readme.html" target="_blank" rel="noopener">完整历史版本 ↗</a> · <span id="integrityStatus">正在读取巡检状态</span></p><div id="historyRows" class="empty-text">正在读取记录</div></section>
 <footer>FieldRecognition <span>现场设备识别与面板读数</span></footer>
 </main>
-<script src="/static/auth-session.js?v=direct-access-1"></script><script src="/static/readout-view.js?v=20260915-1"></script><script src="/static/app.js?v=readout-freshness-20260915"></script>
+<script src="/static/auth-session.js?v=direct-access-1"></script><script src="/static/readout-view.js?v=20260916-1"></script><script src="/static/app.js?v=readout-revisions-20260916"></script>
 </body></html>

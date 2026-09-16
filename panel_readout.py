@@ -72,7 +72,8 @@ def run(core, document, *, clock=time.monotonic, pause=time.sleep):
             future = Future()
             future.set_result(precomputed)
         else:
-            predictor = partial(core['predict_readout'], binding_snapshots=document.get('all_binding_snapshots', document.get('binding_snapshots', []))) if 'predict_readout' in core else core['predict_panel']
+            predictor = partial(core['predict_readout'], binding_snapshots=document.get('all_binding_snapshots', document.get('binding_snapshots', [])),
+                                field_rules=document.get('field_rules')) if 'predict_readout' in core else core['predict_panel']
             future = core['ocr_pool'].submit(predictor, panel, x, y)
         configured = vision.public_config()['available']
         video_elapsed = (document.get('video_observation') or {}).get('no_digits_elapsed_seconds', 0)
@@ -163,8 +164,9 @@ def run(core, document, *, clock=time.monotonic, pause=time.sleep):
                 instrument_association='unbound_photo', instrument_identity_basis='not_localized', association_status='unlocalized')
         from reading_results import build_readings
         document['readings'] = build_readings(document)
-        from measurement_records import build_records
+        from measurement_records import build_records, display_fields
         document['measurement_records'] = build_records(document)
+        document['display_fields'] = display_fields(document)
         document.update(finished_at=core['now'](), wall_seconds=round(clock() - started, 3))
         if future and not document.get('local_ocr'):
             document['local_ocr'] = result_if_ready() or {'status': 'running', 'lines': []}

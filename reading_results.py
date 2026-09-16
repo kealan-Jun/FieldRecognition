@@ -14,14 +14,14 @@ def build_readings(document):
         if document.get('device') != 'cloud' and line.get('reading_source') != 'vision' and not READOUT.fullmatch(text):
             continue
         match = re.match(r'\s*(' + NUMBER + ')', text)
-        if not match and not line.get('value'):
+        if not match and line.get('value') is None:
             continue
         region = regions.get(line.get('panel_id'))
         local_candidates = ([{'instrument':region['instrument'], 'binding_id':region.get('binding_id'),
                               'basis':region['association_basis']}] if region and region.get('instrument') else
                             [] if document.get('panel_detection') else candidates)
         unique = local_candidates[0] if len(local_candidates) == 1 else None
-        value = line.get('value') or match[1]
+        value = str(line['value']) if line.get('value') is not None else match[1]
         issue = 'decimal_uncertain' if re.fullmatch(r'[+-]?0\d+', value) else None
         if re.fullmatch(r'[+-]?8{5,}(?:\.8+)?', value):
             issue = 'possible_display_self_test'
@@ -31,7 +31,7 @@ def build_readings(document):
             'instrument': unique['instrument'] if unique else None,
             'binding_id': unique.get('binding_id') if unique else None,
             'association_basis': unique.get('basis') if unique else 'ambiguous' if local_candidates else 'unlocalized' if document.get('panel_detection') else 'unbound',
-            'instrument_candidates': local_candidates, 'quality_issue': issue,
+            'instrument_candidates': local_candidates, 'quality_issue': line.get('quality_issue') or issue,
             'human_verified': False, 'status': 'needs_review',
             'workbench': region.get('workbench') if region else document.get('workbench'), 'workbenches': document.get('workbenches', []),
             'activity_confirmed': False,
@@ -44,4 +44,11 @@ def build_readings(document):
             'panel_image_sha256':region.get('image_sha256') if region else None,
             'detector_confidence':region.get('detector_confidence') if region else None,
             'detector_weights_sha256':(document.get('panel_detection') or {}).get('weights_sha256')})
+    from measurement_records import field_issues, measurement_value
+    for reading in result:
+        if reading.get('measurement_name') and reading.get('instrument'):
+            issues = field_issues(reading['measurement_name'], reading, reading['instrument'])
+            reading['quality_issues'] = issues
+            reading['quality_issue'] = issues[0] if issues else None
+            reading['normalized_value'] = measurement_value(reading['measurement_name'], reading, reading['instrument'])[0]
     return result

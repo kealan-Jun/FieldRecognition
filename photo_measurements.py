@@ -13,9 +13,9 @@ from fastapi import HTTPException
 from fastapi.responses import FileResponse
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, FiniteFloat
 
-from measurement_records import number, unit_evidence
+from measurement_records import number, unit_evidence, field_issues, measurement_value
 
-RULE_VERSION = 'photo-measurement/2'
+RULE_VERSION = 'photo-measurement/3'
 TERMINAL = {'completed', 'failed', 'cancelled', 'interrupted'}
 UNITS = {'温度': {'°C'}, '转速': {'rpm'}, '质量': {'g', 'mg', 'kg'}}
 
@@ -74,7 +74,7 @@ def versions():
         'code_sha256': {name: hashlib.sha256((base / name).read_bytes()).hexdigest()
             for name in ('photo_measurements.py', 'panel_regions.py', 'digit_regions.py', 'led_digits.py', 'panel_layout.py',
                          'reading_results.py', 'measurement_records.py', 'ocr_runtime.py',
-                         'readout_context.py', 'instrument_ownership.py')}}
+                         'readout_context.py', 'instrument_ownership.py', 'binding_policy.py', 'result_reprocessing.py')}}
 
 
 def attach(core, conn, job, context):
@@ -148,9 +148,9 @@ def candidates(jobs):
             digest = qr.get('qr_hash') or binding.get('qr_hash')
             field['original_candidates'].append({'job_id': job['job_id'], 'capture_id': job['capture_id'],
                 'image_sha256': job.get('image_sha256'),
-                'raw_text': reading.get('text'), 'raw_value': reading.get('value'), 'value': number(reading),
+                'raw_text': reading.get('text'), 'raw_value': reading.get('value'), 'value': measurement_value(name, reading, asset)[0]['value'],
                 'unit': unit, 'unit_basis': unit_basis,
-                'quality_issue': 'unit_conflict' if unit_basis == 'unit_conflict' else reading.get('quality_issue'), 'panel_id': reading.get('panel_id'),
+                'quality_issue': next(iter(field_issues(name, reading, asset)), None), 'panel_id': reading.get('panel_id'),
                 'bbox': region.get('bbox'), 'polygon': reading.get('polygon'), 'digit_region': region.get('digit_region'),
                 'panel_image_url': region.get('image_url'), 'panel_image_sha256': region.get('image_sha256'),
                 'confidence': reading.get('confidence'), 'confidence_basis': 'model_score_not_measured_accuracy',
@@ -206,6 +206,8 @@ def blockers(group):
             issues.append(prefix + '需要校正数值')
         if field.get('unit') not in UNITS.get(field.get('name'), set()):
             issues.append(prefix + '单位不符或未知')
+        if field_issues(field.get('name'), field | {'corrected':True}, field.get('instrument') or {}):
+            issues.append(prefix + '数值不符合仪器登记的单位、量程或显示精度')
         declared = group['context']['instrument_ids']
         if declared and iid not in declared:
             issues.append(prefix + '仪器与输入标识不符')
@@ -247,7 +249,8 @@ def verify_ownership(conn, group):
                 continue
             moment = datetime.fromisoformat(group.get('capture_time_corrections', {}).get(source['capture_id']) or source['captured_at'])
             for other in others:
-                if datetime.fromisoformat(other['started_at']) <= moment and (not other.get('ended_at') or moment < datetime.fromisoformat(other['ended_at'])):
+                from binding_policy import contains
+                if contains(other, moment):
                     raise HTTPException(409, '采集时该仪器由 ' + other['operator'] + '（' + other['camera_id'] + '）使用；材料保留，归属须另行处理')
 
 
@@ -383,6 +386,8 @@ def install(core):
                 asset = core['get_instrument'](str(change.instrument_id))
                 if not field or not asset or change.unit not in UNITS.get(change.name, set()):
                     raise HTTPException(422, '字段、仪器或指标单位无效')
+                if field_issues(change.name, {'value': change.value, 'unit': change.unit, 'corrected': True}, asset):
+                    raise HTTPException(422, '校正值不符合仪器登记的单位、量程或显示精度')
                 field.update(instrument=asset, name=change.name, value=change.value, unit=change.unit,
                     corrected=True, identity_basis='user_correction')
             if not set(body.capture_times) <= {s['capture_id'] for s in group['sources']}:
@@ -408,7 +413,7 @@ def install(core):
             if group['status'] == 'confirmed':
                 if group['confirmation'] != {'actor': body.actor, 'based_on_revision': body.revision}:
                     raise HTTPException(409, '本次测量已经确认')
-                return json.loads(conn.execute('SELECT document FROM experiment_records WHERE id=?', (str(mid),)).fetchone()[0])
+                return json.loads(conn.execute('SELECT document FROM experiment_records WHERE id=?', (group.get('record_id',str(mid)),)).fetchone()[0])
             editable(group, body)
             if group['record_mode'] != 'production':
                 raise HTTPException(409, '测试结果不能提交为生产实验记录')
@@ -420,15 +425,17 @@ def install(core):
             group['status'] = 'confirmed'
             group['confirmation'] = {'actor': body.actor, 'based_on_revision': body.revision}
             group['confirmed_at'] = core['now']()
-            record = copy.deepcopy(group) | {'record_id': str(mid), 'record_scope': 'production_confirmed',
+            record_id = str(mid) if group.get('record_revision',1)==1 else str(uuid.uuid5(mid,'record-version:'+str(group['record_revision'])))
+            group['record_id'] = record_id
+            record = copy.deepcopy(group) | {'record_id': record_id, 'record_scope': 'production_confirmed',
                 'confirmed_fields': [{k: f[k] for k in ('field_id', 'instrument', 'name', 'value', 'unit')}
                                      for f in group['fields']]}
-            conn.execute('INSERT INTO experiment_records(id,document) VALUES(?,?)', (str(mid), json.dumps(record)))
+            conn.execute('INSERT INTO experiment_records(id,document) VALUES(?,?)', (record_id, json.dumps(record)))
             store(conn, group)
         # Read through a fresh connection after COMMIT. A lost response can retry
         # the same decision and receive the same immutable record.
         with core['db']() as conn:
-            return json.loads(conn.execute('SELECT document FROM experiment_records WHERE id=?', (str(mid),)).fetchone()[0])
+            return json.loads(conn.execute('SELECT document FROM experiment_records WHERE id=?', (record_id,)).fetchone()[0])
 
     @core['app'].post('/api/photo-measurements/{mid}/reject')
     def reject(mid: uuid.UUID, body: Rejection):
@@ -451,7 +458,7 @@ def install(core):
             raise HTTPException(422, '数量需为 1–100')
         with core['db']() as conn:
             return {'items': [json.loads(row[0]) for row in conn.execute(
-                'SELECT document FROM experiment_records ORDER BY rowid DESC LIMIT ?', (limit,))]}
+                "SELECT document FROM experiment_records AS r WHERE NOT EXISTS (SELECT 1 FROM experiment_records AS n WHERE json_extract(n.document,'$.measurement_id')=json_extract(r.document,'$.measurement_id') AND n.rowid>r.rowid) ORDER BY rowid DESC LIMIT ?", (limit,))]}
 
     @core['app'].get('/api/experiment-records/{record_id}')
     def read_record(record_id: uuid.UUID):

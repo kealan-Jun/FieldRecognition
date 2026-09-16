@@ -47,7 +47,10 @@ def prepare(rows, paths):
     # A confirmed record supersedes its draft view; both immutable histories remain linked.
     for (entity, _), row in latest.items():
         if entity == 'experiment_records':
-            groups[row['doc']['measurement_id']] = row
+            mid = row['doc']['measurement_id']
+            current = groups.get(mid)
+            if not current or current['doc'].get('status') == 'confirmed' and row['doc'].get('record_revision',1) >= current['doc'].get('record_revision',1):
+                groups[mid] = row
     bundles, used = [], set()
 
     def add(key, kind, members, source_ids, job_rows=(), group=None):
@@ -92,8 +95,9 @@ def prepare(rows, paths):
     grouped_jobs = set()
     for mid, row in groups.items():
         group = row['doc']
-        linked = [jobs[jid] for jid in group['job_ids'] if jid in jobs]
-        grouped_jobs.update(group['job_ids'])
+        member_ids = list(dict.fromkeys(group['job_ids'] + group.get('superseded_job_ids',[])))
+        linked = [jobs[jid] for jid in member_ids if jid in jobs]
+        grouped_jobs.update(member_ids)
         ids = [j['doc']['capture_id'] for j in linked] + [s['capture_id'] for s in group.get('sources', [])]
         kind = 'VoicePhotoReadings' if any((captures.get(i) or {}).get('external_photo') for i in ids) else 'PhotoReadings'
         add('measurement:' + mid, kind, [row] + linked, ids, linked, group)
@@ -118,7 +122,11 @@ def prepare(rows, paths):
 def standard_records(job_rows, group):
     """Aggregate only an explicit burst; conflicting values remain null for correction."""
     by_capture = {}
+    from result_reprocessing import preferred_jobs
+    preferred = {d['job_id'] for d in preferred_jobs([r['doc'] for r in job_rows])}
     for row in sorted(job_rows, key=lambda r: r['seq']):
+        if row['doc']['job_id'] not in preferred:
+            continue
         by_capture[row['doc'].get('capture_id') or row['entity_id']] = row['doc']
     entries = {}
     for original in by_capture.values():
@@ -220,7 +228,8 @@ def make_views(bundles, paths, receipts):
             observations.append({k: job.get(k) for k in ('job_id', 'capture_id', 'status', 'lines', 'readings',
                 'local_ocr', 'fallback', 'panel_regions', 'recognition_versions', 'panel_detection', 'timing',
                 'instrument', 'all_binding_snapshots', 'binding_snapshots', 'workbench', 'workbenches', 'ownership_conflicts',
-                'frame_metadata', 'video_observation', 'model', 'device', 'submitted_at', 'finished_at', 'request_trigger')})
+                'frame_metadata', 'video_observation', 'model', 'device', 'submitted_at', 'finished_at', 'request_trigger',
+                'field_rules','recognition_root_job_id','recognition_revision','supersedes_job_id','reprocessing','display_fields')})
         content = {'schema': 'field-recognition-event/1', 'derived_view': True, 'event_id': bundle['key'],
             'event_at': bundle['event_at'], 'time_basis': bundle['time_basis'], 'folder_time_basis': bundle['folder_time_basis'],
             'camera_id': bundle['camera_id'], 'operator': doc.get('operator') or next((s['operator'] for s in sources if s['operator']), None),

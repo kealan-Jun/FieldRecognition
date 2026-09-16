@@ -45,7 +45,7 @@ class PanelConfirmation:
             history=previous['history'] if previous else deque(maxlen=3)
             while history and now-history[0]['time']>self.window_seconds:
                 history.popleft()
-            lines=[l for l in region['local_ocr'].get('lines',[]) if READOUT.fullmatch(l.get('text',''))]
+            lines=[l for l in region['local_ocr'].get('lines',[]) if not l.get('quality_issue') and READOUT.fullmatch(l.get('text',''))]
             value=value_key(lines)
             if not any(h['token']==token for h in history):
                 history.append({'token':token,'time':now,'observed_at':observed_at,'value':value})

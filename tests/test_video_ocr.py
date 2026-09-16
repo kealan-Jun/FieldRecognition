@@ -216,3 +216,13 @@ def test_preview_is_memory_only_and_expires_on_pause_or_session_change(video):
     tick[0] = 0.5
     client.put('/api/video-ocr', json={'enabled': False})
     assert reader.preview(epoch=5) is None
+
+
+def test_backing_off_nas_file_does_not_stop_live_ocr(video,monkeypatch):
+    app,_,camera,reader,frame,tick=video
+    calls=[]
+    monkeypatch.setattr(app.saved_photo_watcher,'snapshot',lambda:{'pending_files':1,'ready_files':0,'retrying_files':1})
+    monkeypatch.setattr(app.ocr_pool,'submit',lambda *a,**kw:calls.append(a) or Future())
+    camera.publish(frame)
+    reader.step()
+    assert calls and reader.state['status']=='inferring'

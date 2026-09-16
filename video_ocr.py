@@ -142,11 +142,12 @@ class VideoOcr:
         with self.core['db']() as conn:
             priority = conn.execute("SELECT 1 FROM jobs WHERE status='queued' OR (status='running' "
                 "AND json_extract(document,'$.phase')='local_ocr') LIMIT 1").fetchone()
-        if priority or self.core['saved_photo_watcher'].snapshot().get('pending_files', 0):
+        photos = self.core['saved_photo_watcher'].snapshot()
+        if priority or photos.get('ready_files', photos.get('pending_files', 0)) or photos.get('importing_file'):
             self.state['status'] = 'yielding_to_photo'
             return
         if self.core['ocr_state']['status'] != 'ready':
-            self.state['status'] = 'loading_model'
+            self.state['status'] = 'model_error' if self.core['ocr_state']['status']=='error' else 'loading_model'
             self.core['queue_ocr_warmup']()
             return
         try:
