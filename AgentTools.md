@@ -33,7 +33,7 @@ NAS 的 `Result.json`（同图多台仪器时另有 `Result02.json` 等）直接
 
 1. get_field_state 查看仪器登记和相机状态。仪器所属场景先在网页登记，Agent 不猜测场景或操作人。
 2. capture_and_scan：对准仪器码取图，即可继续绑定。场景码是可选的独立证据；实际扫到时从 scene_matches 调用 enter_scene。matches 为空时不能建立新绑定；多个码逐项关联，各仪器使用自己的解码 ID。
-3. bind_instrument：使用实际扫描所得 instrument_id、scan_id 和用户提供的 operator。同相机、仪器和实验员的重复请求返回原 binding_id；同一实验员可新增其他仪器关联，已有关系保留。绑定限北京时间当天且同一采集会话有效；当天不重复扫码，跨日必须重新识别仪器码／场景码。成功绑定后异步预加载 PaddleOCR，绑定接口不等待模型加载完成。
+3. bind_instrument：使用实际扫描所得 instrument_id、scan_id 和用户提供的 operator。同相机、仪器、实际人员及绑定内容的重复请求返回原 binding_id；当天直接提交新操作人会在一个事务内结束该相机的旧人员使用时段、为全部有效仪器关系建立后继时段并追加审计。旧 binding_id 和历史读数人员不改写，新时段的 binding_id 不同，二维码证据和当天有效期保留。其他仪器仍可独立追加关联。传 request_id（UUID）重试可返回原回执；expected_binding_id 或 expected_revision 可检测并发冲突。action=refresh 显式创建新时段，必须带 request_id；不延长当天有效期。跨日必须重新识别仪器码／场景码。成功绑定后异步预加载 PaddleOCR，绑定接口不等待模型加载完成。多人共用相机和当前使用人设置见 [托管运行说明](docs/ProductionRuntime.md)。
 4. 用户对现有 Agent 说“拍照”，沿用该 Agent 的拍照与 NAS 保存流程。本服务监控配置相机的新语音照片，未绑定也执行 OCR 和留存，稳定后自动识别；不用再调用 capture_and_scan。
 5. get_field_state 查看该相机的 jobs；需要直接传递现有拍照回执时，调用 read_saved_panel，传 binding_id、确切 image_path 和可选 crop。已导入的本地 capture_id 继续用 read_panel。重复提交同一源照片与选框沿用原任务。
 6. 每隔约 1 秒 get_panel_result；只有 completed 才展示 lines。调用方设置自己的总等待期限，超时保留 job_id 稍后查询，不重新提交 OCR。
@@ -150,6 +150,8 @@ NAS 全量索引：`GET /api/archive/files/Index.json` 返回全部已归档版�
 
 `GET /api/jobs/{job_id}/measurements` 按当前规则输出单台仪器的六字段记录，并返回 `rule_version`；完整原始任务仍由 `GET /api/jobs/{job_id}` 查询。搅拌器固定“温度、转速”，天平固定“质量”；单位依据为识别文字或该仪器登记，冲突不写成有效数值；语音采集时间与同步视频帧时间分别注明来源。JSON 契约见 [InstrumentMeasurement.schema.json](schemas/InstrumentMeasurement.schema.json)。
 
+2026-09-18：规范输出的 `values[]` 对明确识别的 OFF 状态增加可选字段 `display_state: "OFF"`，同时 `value=null`，不将 OFF 写成数值零。NAS Result.json 保留该状态；连拍中状态与数字或不可读候选冲突时不强行选取，Evidence 保留各张候选。使用旧版严格 JSON Schema 的客户端需同步更新上述 schema，顶层六个字段保持不变。
+
 `get_field_state.latest_photo_job` 单独返回该相机按拍摄时间排序的最新照片任务，包括未读出数字、跳过及失败状态；不能用 `latest_panel_job`（最近有归属读数）判断新照片是否处理。迟到旧照片按原拍摄时间排序，归属仍使用拍摄时的绑定。`panel_regions[].display_state` 保留明确识别的 `OFF`，不写成数值零；原 OCR 与红色数码屏笔画校验依据分别保留在 `local_ocr.panel_ocr` 和 `local_ocr.digit_segment_check`。后者只在清晰的分段笔画支持时解决整数的 1/7 混淆，其他冲突沿用兜底／草稿校正规则，不代表实测准确率。
 
 耗时保留完整写入至结果时间，`timing.durations_ms.ingest_wait_ms` 为稳定后至读取前的等待，`processing_ms` 为任务运行至完成；新任务另存 `ingest_retry_count`、最后读取错误和首次／末次读取失败时间。无法从历史数据证明的等待原因不补造。
@@ -189,3 +191,32 @@ NAS 以日期与相机分目录，同一明确连拍、重试和确认合并为�
 2026-09-16：仪器绑定和场景关联增加 `binding_date`、`binding_timezone=Asia/Shanghai`、`valid_until`。每到北京时间零点旧关联以 `end_reason=daily_qr_expired` 结束，设备持续开机也需当天新扫码；过期扫码回执返回 409。后台按秒检查，不依赖网页；服务停机跨日时启动后补记零点结束时间。晚到照片按拍摄时间关联历史关系，不使用当前新绑定覆盖原归属；未完成的跨日交接同样失效。
 
 OCR 启动优先直接加载本机完整 PP-OCRv5 缓存，也可用 `FIELD_OCR_DET_MODEL_DIR` / `FIELD_OCR_REC_MODEL_DIR` 指定本地模型。显式目录不完整会报错，不暗中下载或改用 CPU。加载失败按 5 秒起、最多 300 秒间隔自动重试；状态保留失败原因与重试间隔。
+
+
+## 2026-09-20：多人登记、使用时段与共享场景
+
+相机人员名单 `camera_users` 与实际使用人 `camera_active_users` 分离，名单不自动选择第一人。
+`operator` 是实际人员显示名，`wearer_id` 是其稳定人员 ID；托管模式下姓名重复必须提供 ID，未登记人员返回 422。
+登录开启时，操作人员只能使用自己的身份和获授权相机；人员名单由管理员管理。免登录工作台沿用原本的本地访问边界，不将登记姓名声称为认证身份。
+
+- `POST /api/admin/cameras/{camera_id}/members`，`{"user_id":"已存在人员ID"}`：幂等登记资格，不切换当前使用人。
+- `GET /api/cameras/{camera_id}/members`：返回名单、`active_user_id` 和 `revision`。原 admin 查询保持兼容。
+- `PUT /api/cameras/{camera_id}/active-user`：明确选择本次人员；可带 `request_id`、`expected_revision`。登录人员仅能选自己，管理员可选已登记成员。
+- `DELETE /api/admin/cameras/{camera_id}/members/{user_id}`：取消资格，保留用户、绑定、读数与历史；当前人员须先交接。
+- 旧 `PUT .../owner` 仍是明确的登记并切换接口，不等同于只添加名单。
+- `PUT /api/automation` 增加 `wearer_id`、UUID `request_id`、`expected_revision`；工作台使用明确人员选择和请求重试。
+
+新绑定 `binding_action` 为创建、交接、内容更新或刷新事件（`created/handover/updated/refresh`），
+`session_revision` 与后继引用用于追溯。每日授权仍为 `daily-qr-binding/1`，人员时段另标 `binding-session/2`，两者作用不同。
+没有 request_id 的旧绑定请求，同一解码 scan 和相同登记配置/人员的交接重试沿用已保存回执；有意再次切回旧人员请使用新的 request_id 或新扫码。
+请求回执是原操作结果，查看当前有效状态应读取 `/api/state` 或 members，不能把旧请求回执当成仍有效的授权。
+
+任务保存 `binding-snapshot/2`、适用采集时间和 `allowed_instrument_ids`，交接后不重新取当前使用者。
+只有带时区的来源采集回执或明确已同步的视频帧时间可用于确认归属；普通上传只有接收时间时，
+`attribution_status=needs_review`，正式字段不借当前绑定归属。历史相机人员登记可在其有效时间内单独作为人员来源，仍不制造缺失的仪器绑定。
+
+场景码是共享场景身份，多台相机可同时进入同一场景；每台相机各自扫码、留证、结束。
+同画面若还有另一相机正在使用的仪器码，场景关联与仪器占用拒绝独立处理。
+
+部署前需执行 v14 迁移；备份恢复见 [BindingMigration.md](docs/BindingMigration.md)，
+完整变更和现场待验证项见 [FieldRepair20260920.md](docs/FieldRepair20260920.md)。

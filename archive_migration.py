@@ -5,6 +5,7 @@ from pathlib import Path
 
 from archive_events import make_views, prepare
 from archive_paths import ArchivePaths, checked, empty_directories
+from archive_progress import advance
 
 
 def retire_legacy(root, paths):
@@ -64,7 +65,7 @@ def rebuild(archive, rows):
             paths.move(relative, '.System/' + relative)
     receipts = {}
     cache = getattr(archive, 'receipt_cache', {})
-    for row in rows:
+    for number, row in enumerate(rows, 1):
         path = checked(root, paths.name(row['receipt_path']))
         receipt = cache.get(path.name)
         if receipt is None:
@@ -77,10 +78,12 @@ def rebuild(archive, rows):
                 row['seq'], row['entity'], row['entity_id'], json.loads(row['document'])):
             raise ValueError('Cannot migrate mismatched receipt')
         receipts[row['seq']] = receipt
+        advance('checking_receipts', number, len(rows))
     archive.receipt_cache = dict(list(cache.items())[-4096:])
     bundles, _ = prepare(rows, paths)
     paths.save()  # Persist stable event directories before moving their photos.
     views = make_views(bundles, paths, receipts)
+    advance('building_navigation')
     # Retain orphaned historical evidence without placing it among valid measurements.
     for source in (root / 'Objects').glob('*/*'):
         if not source.is_file() or len(source.stem) != 64:

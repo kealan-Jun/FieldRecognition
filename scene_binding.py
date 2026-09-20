@@ -9,6 +9,7 @@ class SceneEntry(BaseModel):
     scan_id: uuid.UUID
     scene_id: uuid.UUID
     operator: str | None = Field(default=None, min_length=1, max_length=80)
+    wearer_id: str | None = Field(default=None, max_length=100)
 
 
 def install(core):
@@ -32,7 +33,7 @@ def install(core):
             return [json.loads(r['document']) for r in conn.execute('SELECT document FROM scene_visits WHERE ended IS NULL')]
 
     def enter(body: SceneEntry, *, automatic: bool = False):
-        from security import require_camera,actor_name
+        from security import require_camera,actor_name,current
         body=body.model_copy(update={'operator':actor_name(body.operator)})
         with db() as conn:
             conn.execute('BEGIN IMMEDIATE')
@@ -45,21 +46,32 @@ def install(core):
             scene = conn.execute('SELECT * FROM scenes WHERE id=?', (str(body.scene_id),)).fetchone()
             if not scene or not any(s['id'] == str(body.scene_id) for s in scan.get('scene_matches', [])):
                 raise HTTPException(409, '此照片未识别到已登记的场景码')
+            wearer_id = current().user_id if current() else body.wearer_id
+            if core.get('RUNTIME_ENABLED') and body.operator:
+                from binding_operator import resolve_wearer
+                wearer_id = resolve_wearer(conn, scan['camera_id'], body.operator.strip(), wearer_id)
+                if not wearer_id:
+                    raise HTTPException(422,'请选择相机已登记的实际人员；同名人员需提供 wearer_id')
+            if automatic and core.get('RUNTIME_ENABLED'):
+                chosen = conn.execute('SELECT user_id FROM camera_active_users WHERE camera_id=?',(scan['camera_id'],)).fetchone()
+                if chosen and chosen[0] != wearer_id:
+                    raise HTTPException(409, {'code':'stale_operator_session','message':'实际使用人已交接，请刷新'})
             if body.operator:
-                for binding in conn.execute('SELECT document FROM bindings WHERE camera=? AND ended IS NULL', (scan['camera_id'],)):
-                    if json.loads(binding['document'])['operator'] != body.operator.strip():
-                        raise HTTPException(409, '请先结束该相机的已有绑定，再更换实验员')
+                from binding_operator import activate_member, update_camera_relations
+                if core.get('RUNTIME_ENABLED') and wearer_id:
+                    activate_member(conn,scan['camera_id'],wearer_id,core['now']())
+                else:
+                    update_camera_relations(conn,scan['camera_id'],body.operator.strip(),wearer_id,core['now']())
             active = conn.execute('SELECT * FROM scene_visits WHERE camera=? AND ended IS NULL', (scan['camera_id'],)).fetchall()
             for row in active:
                 prior = json.loads(row['document'])
-                if body.operator and prior.get('operator') and prior['operator'] != body.operator.strip():
-                    raise HTTPException(409, '请先结束已有场景关联，再更换实验员')
                 if prior['scene']['id'] == str(body.scene_id):
                     return prior
             timestamp = core['now']()
             result = {'visit_id': str(uuid.uuid4()), 'camera_id': scan['camera_id'], 'scene': dict(scene),
                       'scan_id': scan['scan_id'], 'image_url': scan['image_url'], 'started_at': timestamp,
                       'operator': body.operator.strip() if body.operator else None,
+                      'wearer_id': wearer_id,
                       'ended_at': None, 'identity_basis': 'unsigned_scene_qr_and_continuous_scan_opt_in' if automatic else 'unsigned_scene_qr_and_user_confirmation'}
             from binding_policy import fields
             result.update(fields(timestamp))

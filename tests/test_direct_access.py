@@ -57,6 +57,23 @@ def test_default_direct_access_without_admin_or_cookie(direct):
     assert app.ocr_model is None  # The API still does not own the GPU model.
 
 
+def test_camera_header_routes_state_to_the_requested_camera(direct):
+    app, client = direct
+    with app.db() as conn:
+        for camera_id in ('cam-a', 'cam-b'):
+            conn.execute('''INSERT INTO camera_registry
+                            (camera_id,display_name,enabled,registered_at)
+                            VALUES(?,?,1,?)''', (camera_id, camera_id, app.now()))
+    cameras = client.get('/api/cameras').json()['items']
+    assert {item['camera_id'] for item in cameras} == {'cam-a', 'cam-b'}
+    first = client.get('/api/state', headers={'X-Camera-Id': 'cam-a'}).json()
+    second = client.get('/api/state', headers={'X-Camera-Id': 'cam-b'}).json()
+    assert first['camera']['id'] == 'cam-a'
+    assert second['camera']['id'] == 'cam-b'
+    assert first['automation']['camera_id'] == 'cam-a'
+    assert second['automation']['camera_id'] == 'cam-b'
+
+
 def test_disabled_login_and_account_endpoints_do_not_create_accounts(direct):
     app, client = direct
     assert client.post('/api/auth/login', json={'username': 'a', 'password': 'unused'}).status_code == 404
@@ -82,14 +99,15 @@ def test_direct_queue_replay_records_declared_actor(direct):
     assert response.json()['replays'][-1]['actor'] == '登记操作人'
 
 
-def test_prepare_registers_personnel_without_password_and_preserves_ownership(tmp_path):
+def test_prepare_registers_multiple_personnel_and_switches_active_user(tmp_path):
     first = prepare(tmp_path, 'wearer-one', '甲', 'cam-a')
     assert prepare(tmp_path, 'wearer-one', '甲', 'cam-a')['user_id'] == first['user_id']
     assert not (tmp_path/'Access').exists()
     with Database(first['database']).connection() as conn:
         user = conn.execute('SELECT * FROM users').fetchone()
         assert user['password_hash'] is None and user['role'] == 'operator'
-    with pytest.raises(ValueError, match='explicit reassignment'):
-        prepare(tmp_path, 'wearer-two', '乙', 'cam-a')
+    second = prepare(tmp_path, 'wearer-two', '乙', 'cam-a')
     with Database(first['database']).connection() as conn:
-        assert conn.execute('SELECT user_id FROM camera_users WHERE camera_id=?', ('cam-a',)).fetchone()[0] == first['user_id']
+        members = {row['user_id'] for row in conn.execute('SELECT user_id FROM camera_users WHERE camera_id=?', ('cam-a',))}
+        assert members == {first['user_id'], second['user_id']}
+        assert conn.execute('SELECT user_id FROM camera_active_users WHERE camera_id=?', ('cam-a',)).fetchone()[0] == second['user_id']

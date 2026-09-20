@@ -4,7 +4,7 @@
   "signature_status": "unsigned",
   "instruments": [
     {
-      "label": "仪器 A",
+      "label": "搅拌器 A",
       "instrument_id": "e9434a0a-3319-414a-b988-4cc6884edce4",
       "qr_payload": {
         "v": 1,
@@ -12,7 +12,19 @@
         "id": "e9434a0a-3319-414a-b988-4cc6884edce4"
       },
       "encoded_text": "{\"v\":1,\"type\":\"instrument\",\"id\":\"e9434a0a-3319-414a-b988-4cc6884edce4\"}",
-      "instrument_name": "称量仪器 A",
+      "instrument_name": "搅拌器 A",
+      "device_category": "instrument",
+      "type_id": "builtin-stirrer-v1",
+      "measurement_ranges": {
+        "温度": {
+          "unit": "°C",
+          "range": [null, null]
+        },
+        "转速": {
+          "unit": "rpm",
+          "range": [null, null]
+        }
+      },
       "model": null,
       "serial_number": null,
       "scene_id": "18a0cff5-eda6-4363-abe5-f7147e4ab2c1",
@@ -34,6 +46,14 @@
       },
       "encoded_text": "{\"v\":1,\"type\":\"instrument\",\"id\":\"eae17924-9fa7-4445-ac45-3987f5687be9\"}",
       "instrument_name": "称量仪器 B",
+      "device_category": "instrument",
+      "type_id": "builtin-balance-v1",
+      "measurement_ranges": {
+        "质量": {
+          "unit": "g",
+          "range": [null, null]
+        }
+      },
       "model": null,
       "serial_number": null,
       "scene_id": "18a0cff5-eda6-4363-abe5-f7147e4ab2c1",

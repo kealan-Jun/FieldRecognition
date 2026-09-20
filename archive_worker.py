@@ -5,6 +5,7 @@ import signal
 import threading
 
 from worker_support import process_lock, heartbeat
+from archive_progress import observe
 
 
 class ArchiveWorker:
@@ -23,11 +24,13 @@ class ArchiveWorker:
 
     def run(self,persistent=True):
         with process_lock(self.core['DATA'],'archive'):
+            heartbeat(self.db,'archive',self.archive_store.snapshot() | {'status':'starting'})
             self.archive_store.integrity.start()
             try:
                 while not self.stop.is_set():
                     try:
-                        self._process_batch()
+                        with observe(lambda progress: heartbeat(self.db,'archive',self.archive_store.snapshot() | progress)):
+                            self._process_batch()
                         status=self.archive_store.snapshot()
                     except Exception as exc:
                         status={'status':'retrying','last_error':type(exc).__name__}

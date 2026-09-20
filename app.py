@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 import cv2
 import httpx
@@ -38,6 +39,10 @@ DATA.mkdir(parents=True, exist_ok=True)
 (DATA / 'Images').mkdir(exist_ok=True)
 MAX_BYTES = 12 * 1024 * 1024
 Image.MAX_IMAGE_PIXELS = 16_000_000
+DEVICE_TYPE_NAMES = {
+    'builtin-stirrer-v1': '搅拌器',
+    'builtin-balance-v1': '质量测量仪',
+}
 
 
 def now():
@@ -74,14 +79,32 @@ with db() as conn:
     CREATE TABLE IF NOT EXISTS camera_resets(camera TEXT PRIMARY KEY, confirmed_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS camera_service_state(camera TEXT PRIMARY KEY, document TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS fallback_attempts(binding_id TEXT PRIMARY KEY, attempted_at REAL NOT NULL);
+    CREATE TABLE IF NOT EXISTS qr_device_registry(
+        qr_hash TEXT PRIMARY KEY,
+        device_id TEXT NOT NULL,
+        first_seen_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL);
     ''')
+    if not RUNTIME_ENABLED and not AUTH_ENABLED:
+        from database import SESSION_SCHEMA, execute_script
+        execute_script(conn, SESSION_SCHEMA)
+    conn.execute('''INSERT OR IGNORE INTO qr_device_registry(qr_hash,device_id,first_seen_at,last_seen_at)
+        SELECT json_extract(document,'$.qr_hash'), json_extract(document,'$.instrument.id'),
+               json_extract(document,'$.started_at'), json_extract(document,'$.started_at')
+          FROM bindings
+         WHERE json_extract(document,'$.qr_hash') IS NOT NULL
+           AND json_extract(document,'$.instrument.id') IS NOT NULL''')
     columns = {row['name'] for row in conn.execute('PRAGMA table_info(instruments)')}
-    for column, declaration in [('device_no','TEXT'),('measurement_ranges',"TEXT NOT NULL DEFAULT '{}'")]:
+    for column, declaration in [('device_no','TEXT'),('measurement_ranges',"TEXT NOT NULL DEFAULT '{}'"),
+                                 ('type_id','TEXT'),('device_category',"TEXT NOT NULL DEFAULT 'instrument'")]:
         if column not in columns:
             conn.execute(f'ALTER TABLE instruments ADD COLUMN {column} {declaration}')
     for item in json.loads((BASE / 'InstrumentRegistry.json').read_text())['instruments']:
-        conn.execute('INSERT OR IGNORE INTO instruments(id,name,scene,model) VALUES(?,?,?,?)',
-                     (item['instrument_id'], item['label'], '', ''))
+        conn.execute('''INSERT OR IGNORE INTO instruments
+            (id,name,scene,model,measurement_ranges,type_id,device_category) VALUES(?,?,?,?,?,?,?)''',
+                     (item['instrument_id'], item['label'], '', '',
+                      json.dumps(item.get('measurement_ranges') or {}, ensure_ascii=False),
+                      item.get('type_id'), item.get('device_category') or 'instrument'))
 
 receiver_camera = None
 if SERVICE_ROLE == 'api':
@@ -152,6 +175,11 @@ panel_detector = DetectorProxy() if SERVICE_ROLE in {'api','capture'} else Panel
 def instrument_record(row):
     record = dict(row)
     record['measurement_ranges'] = json.loads(record.get('measurement_ranges') or '{}')
+    # `device_category` is deliberately independent from the measurement type:
+    # a category describes the asset family while type_id describes its panel.
+    record['device_category'] = (record.get('device_category') or 'instrument').strip() or 'instrument'
+    type_id = record.get('type_id')
+    record['device_type'] = record.get('device_type') or DEVICE_TYPE_NAMES.get(type_id) or type_id or None
     return record
 
 
@@ -159,6 +187,50 @@ def get_instrument(instrument_id):
     with db() as conn:
         row = conn.execute('SELECT * FROM instruments WHERE id=?', (instrument_id,)).fetchone()
     return instrument_record(row) if row else None
+
+
+def register_qr_identity(conn, qr_hash, device_id, timestamp):
+    """Reserve the decoded QR identity for one *active* registered device.
+
+    The decoded instrument UUID remains the canonical identity, while the hash
+    keeps the exact label evidence. A conflicting active binding means that a
+    physically different device was assigned the same QR label. Once the old
+    binding is explicitly ended (including a confirmed device reboot), the
+    registry row may be reassigned while the old binding evidence remains
+    immutable in ``bindings``.
+    """
+    if not qr_hash:
+        raise HTTPException(409, '扫码记录缺少二维码身份凭证')
+
+    # The registry is durable history, not a permanent lock. The active
+    # binding check is authoritative for exclusivity and runs in the same
+    # IMMEDIATE transaction as the eventual binding insert.
+    active_rows = conn.execute(
+        "SELECT document FROM bindings WHERE ended IS NULL "
+        "AND json_extract(document,'$.qr_hash')=?", (qr_hash,)).fetchall()
+    for active_row in active_rows:
+        active = json.loads(active_row['document'])
+        active_device = (active.get('instrument') or {}).get('id')
+        if active_device == device_id:
+            continue
+        raise HTTPException(409, {
+            'code': 'qr_assigned_to_other_device',
+            'message': '该二维码已经绑定到另一台设备，不能重复绑定；请先解绑或确认原设备已解除',
+            'qr_hash': qr_hash,
+            'device_id': active_device,
+            'binding_id': active.get('binding_id'),
+            'camera_id': active.get('camera_id'),
+        })
+
+    row = conn.execute('SELECT device_id FROM qr_device_registry WHERE qr_hash=?', (qr_hash,)).fetchone()
+    if row:
+        # A prior ended binding (operator release, daily expiry, or confirmed
+        # physical reboot) permits reassignment to a replacement device.
+        conn.execute('UPDATE qr_device_registry SET device_id=?,last_seen_at=? WHERE qr_hash=?',
+                     (device_id, timestamp, qr_hash))
+    else:
+        conn.execute('INSERT INTO qr_device_registry(qr_hash,device_id,first_seen_at,last_seen_at) VALUES(?,?,?,?)',
+                     (qr_hash, device_id, timestamp, timestamp))
 
 
 def validate_capture_epoch(conn, scan):
@@ -272,12 +344,15 @@ class MeasurementRange(BaseModel):
     unit: str | None = Field(default=None, max_length=20)
     range: tuple[FiniteFloat | None, FiniteFloat | None] = (None,None)
     decimal_places: int | None = Field(default=None, ge=0, le=8, strict=True)
+    fixed_decimal_display: bool | None = None
 
     @model_validator(mode='after')
     def ordered(self):
         low, high = self.range
         if low is not None and high is not None and low>high:
             raise ValueError('范围最小值不能大于最大值')
+        if self.fixed_decimal_display and (self.decimal_places is None or self.decimal_places == 0):
+            raise ValueError('固定小数显示需要确认 1 至 8 位小数')
         return self
 
 
@@ -286,6 +361,7 @@ class InstrumentEdit(BaseModel):
     scene: str = Field(min_length=1, max_length=100)
     model: str = Field(default='', max_length=100)
     device_no: str | None = Field(default=None,max_length=100)
+    device_category: str | None = Field(default=None, max_length=50)
     measurement_ranges: dict[str,MeasurementRange] | None = None
 
 
@@ -294,6 +370,10 @@ class BindingRequest(BaseModel):
     instrument_id: uuid.UUID
     operator: str = Field(min_length=1, max_length=80)
     wearer_id: str | None = Field(default=None,max_length=100)
+    request_id: uuid.UUID | None = None
+    expected_binding_id: uuid.UUID | None = None
+    expected_revision: int | None = Field(default=None, ge=0)
+    action: Literal['reuse', 'refresh'] = 'reuse'
 
 
 class OcrRequest(BaseModel):
@@ -319,7 +399,7 @@ def state():
         try:ocr_state.update(call('ocr','status'))
         except (OSError,HTTPException):ocr_state.update(status='worker_unavailable',resident=False)
     with db() as conn:
-        instruments = [instrument_record(row) for row in conn.execute('SELECT * FROM instruments ORDER BY name')]
+        instruments = [instrument_record(row) for row in conn.execute('SELECT * FROM instruments ORDER BY device_category,name')]
         bindings = [json.loads(row['document']) for row in conn.execute('SELECT document FROM bindings WHERE ended IS NULL OR rowid IN (SELECT rowid FROM bindings ORDER BY rowid DESC LIMIT 30) ORDER BY rowid DESC')]
         jobs = [json.loads(row['document']) | {'status': row['status']} for row in conn.execute('SELECT status,document FROM jobs ORDER BY rowid DESC LIMIT 20')]
         last_hit = conn.execute("SELECT document FROM scans WHERE json_extract(document,'$.camera_id')=? "
@@ -338,7 +418,12 @@ def state():
     for job in [*jobs, latest_panel_job, photo_job]:
         if job:
             job['display_fields'] = display_fields(job)
-    return filter_payload({'scenes': scene_records(), 'scene_visits': scene_visits(), 'instruments': instruments, 'bindings': bindings, 'jobs': jobs, 'ocr': dict(ocr_state),
+    categories = {}
+    for instrument in instruments:
+        categories.setdefault(instrument['device_category'], []).append(instrument['id'])
+    return filter_payload({'scenes': scene_records(), 'scene_visits': scene_visits(), 'instruments': instruments,
+            'personnel_membership_enabled':RUNTIME_ENABLED,
+            'device_categories': categories, 'bindings': bindings, 'jobs': jobs, 'ocr': dict(ocr_state),
             'last_camera_scan': json.loads(last_hit['document']) if last_hit else None,
             'activity': activity, 'latest_panel_job': latest_panel_job, 'latest_photo_job': photo_job,
             'record_policy': {'mode': RECORD_MODE, 'automatic_write_scope': 'test_only',
@@ -354,6 +439,37 @@ def state():
                        'mode': 'http_snapshot'}, 'product': 'FieldRecognition'})
 
 
+@app.get('/api/devices')
+def devices(category: str | None = None):
+    """List QR-addressable devices without mixing them with capture cameras."""
+    with db() as conn:
+        rows = conn.execute('SELECT * FROM instruments ORDER BY device_category,name').fetchall()
+        active = {}
+        for row in conn.execute('SELECT document FROM bindings WHERE ended IS NULL'):
+            document = json.loads(row['document'])
+            # The directory itself is global, but an operator must not learn
+            # which camera currently holds a device outside their assignment.
+            if visible(document):
+                active[document['instrument']['id']] = document
+        qr_rows = {row['device_id']: row['qr_hash'] for row in conn.execute(
+            'SELECT device_id,qr_hash FROM qr_device_registry')}
+    items = []
+    for row in rows:
+        device = instrument_record(row)
+        if category and device['device_category'] != category:
+            continue
+        binding = active.get(device['id'])
+        items.append(device | {
+            'device_id': device['id'],
+            'qr_registered': device['id'] in qr_rows,
+            'qr_hash': qr_rows.get(device['id']),
+            'active_binding_id': binding.get('binding_id') if binding else None,
+            'active_camera_id': binding.get('camera_id') if binding else None,
+        })
+    categories = sorted({item['device_category'] for item in items})
+    return {'items': items, 'categories': categories}
+
+
 @app.put('/api/instruments/{instrument_id}')
 def edit_instrument(instrument_id: uuid.UUID, body: InstrumentEdit):
     require_role('admin')
@@ -362,8 +478,15 @@ def edit_instrument(instrument_id: uuid.UUID, body: InstrumentEdit):
     if not body.name.strip() or not body.scene.strip():
         raise HTTPException(422, '请填写仪器名称和场景')
     with db() as conn:
-        conn.execute('UPDATE instruments SET name=?,scene=?,model=? WHERE id=?',
-                     (body.name.strip(), body.scene.strip(), body.model.strip(), str(instrument_id)))
+        category = body.device_category.strip() if body.device_category is not None else None
+        if body.device_category is not None and not category:
+            raise HTTPException(422, '设备分类不能为空')
+        if category is None:
+            conn.execute('UPDATE instruments SET name=?,scene=?,model=? WHERE id=?',
+                         (body.name.strip(), body.scene.strip(), body.model.strip(), str(instrument_id)))
+        else:
+            conn.execute('UPDATE instruments SET name=?,scene=?,model=?,device_category=? WHERE id=?',
+                         (body.name.strip(), body.scene.strip(), body.model.strip(), category, str(instrument_id)))
         if 'device_no' in body.model_fields_set:
             conn.execute('UPDATE instruments SET device_no=? WHERE id=?',
                          ((body.device_no or '').strip() or None,str(instrument_id)))
@@ -436,35 +559,100 @@ def persist_binding(conn, body, *, automatic=False, handoff_id=None):
     if not row:
         raise HTTPException(404, '扫码记录不存在')
     scan = json.loads(row['document'])
+    from binding_operator import (request_fingerprint, replay_request, remember_request,
+        check_revision, camera_revision, update_camera_relations, update_relation, activate_member)
+    require_camera(scan['camera_id'])
+    fingerprint = request_fingerprint({'operation':'bind','body':body.model_dump(mode='json'),
+        'principal':current().user_id if current() else None})
+    replay = replay_request(conn, body.request_id, fingerprint)
+    if replay is not None:
+        return replay
+    if body.action == 'refresh' and body.request_id is None:
+        raise HTTPException(422, '显式刷新需要 request_id 以保证重试幂等')
     validate_capture_epoch(conn, scan)
+    check_revision(conn, scan['camera_id'], body.expected_revision)
     if not any(item['id'] == str(body.instrument_id) for item in scan['matches']):
         raise HTTPException(409, '该图片没有识别到此仪器码')
+    qr_hash = next((item.get('qr_hash') for item in scan['matches'] if item['id'] == str(body.instrument_id)), None)
+    register_qr_identity(conn, qr_hash, str(body.instrument_id), now())
     asset = get_instrument(str(body.instrument_id))
     if not asset['scene']:
         raise HTTPException(409, '先在仪器登记中填写所属场景')
-    visit = optional_scene(conn, scan['camera_id'], asset['scene'])
-    for row in conn.execute('SELECT document FROM scene_visits WHERE camera=? AND ended IS NULL', (scan['camera_id'],)):
-        operator = json.loads(row['document']).get('operator')
-        if operator and operator != body.operator.strip():
-            raise HTTPException(409, '请先结束该相机的已有场景关联，再更换实验员')
-    previous = conn.execute('SELECT document FROM bindings WHERE camera=? AND ended IS NULL', (scan['camera_id'],)).fetchall()
-    for row in previous:
-        existing = json.loads(row['document'])
-        if existing['operator'] != body.operator.strip():
-            raise HTTPException(409, '请先结束该相机的已有绑定，再更换实验员')
-        if existing['instrument']['id'] == str(body.instrument_id):
-            return existing
-    from instrument_ownership import check_available
-    check_available(conn, str(body.instrument_id), scan['camera_id'], handoff_id=handoff_id)
-    timestamp = now()
+    operator = actor_name(body.operator).strip()
+    if not operator:
+        raise HTTPException(422, '实验员不能为空')
     owner_id = current().user_id if current() else body.wearer_id
-    if RUNTIME_ENABLED and not owner_id:
-        owner=conn.execute('SELECT user_id FROM camera_users WHERE camera_id=?',(scan['camera_id'],)).fetchone()
-        owner_id=owner[0] if owner else None
-    body = body.model_copy(update={'operator': actor_name(body.operator), 'wearer_id': owner_id})
+    if RUNTIME_ENABLED:
+        from binding_operator import resolve_wearer
+        resolved = resolve_wearer(conn, scan['camera_id'], operator, owner_id)
+        if not resolved:
+            raise HTTPException(422, '佩戴人编号与相机登记人员不一致')
+        owner_id = resolved
+    wearer_id = (owner_id or '').strip() or None
+    receipt_id = body.request_id
+    if receipt_id is None:
+        # Legacy clients have no request UUID. Within the same decoded scan and
+        # asset configuration, a handover to this person is one retryable intent.
+        fingerprint = request_fingerprint({'operation':'legacy_bind','body':body.model_dump(mode='json'),
+            'operator':operator,'wearer_id':wearer_id,'instrument':asset})
+        receipt_id = 'legacy-bind:' + fingerprint
+        replay = replay_request(conn,receipt_id,fingerprint)
+        if replay is not None:
+            return replay
+    visit = optional_scene(conn, scan['camera_id'], asset['scene'])
+
+    timestamp = now()
+    existing_row = conn.execute(
+        "SELECT id,document FROM bindings WHERE camera=? AND ended IS NULL "
+        "AND json_extract(document,'$.instrument.id')=? LIMIT 1",
+        (scan['camera_id'], str(body.instrument_id))).fetchone()
+    if body.expected_binding_id and (not existing_row or existing_row['id'] != str(body.expected_binding_id)):
+        raise HTTPException(409, {'code':'binding_session_conflict','message':'绑定时段已变化，请刷新'})
+    if automatic:
+        # A scanner carrying the former operator must not undo a committed handover.
+        if RUNTIME_ENABLED:
+            chosen = conn.execute('SELECT user_id FROM camera_active_users WHERE camera_id=?',
+                                  (scan['camera_id'],)).fetchone()
+            if chosen and chosen[0] != wearer_id:
+                raise HTTPException(409, {'code':'stale_operator_session','message':'实际使用人已交接，请刷新'})
+        occupants = [json.loads(r[0]) for r in conn.execute(
+            'SELECT document FROM bindings WHERE camera=? AND ended IS NULL',(scan['camera_id'],))]
+        if any((b.get('operator'), b.get('wearer_id')) != (operator, wearer_id) for b in occupants):
+            raise HTTPException(409, {'code':'stale_operator_session','message':'扫码人员会话已变化，请刷新'})
+    if RUNTIME_ENABLED and wearer_id:
+        activate_member(conn, scan['camera_id'], wearer_id, timestamp)
+    else:
+        update_camera_relations(conn, scan['camera_id'], operator, wearer_id, timestamp)
+    # All of the camera's instrument sessions move together during personnel
+    # handover. Instrument addition/refresh remains scoped to the decoded asset.
+    visit = optional_scene(conn, scan['camera_id'], asset['scene'])
+    current_row = conn.execute(
+        "SELECT id,document FROM bindings WHERE camera=? AND ended IS NULL "
+        "AND json_extract(document,'$.instrument.id')=? LIMIT 1",
+        (scan['camera_id'], str(body.instrument_id))).fetchone()
+    if current_row:
+        prior = json.loads(current_row['document'])
+        changes = {'instrument':asset, 'qr_hash':qr_hash,
+                   'scene_visit_id':visit['visit_id'] if visit else None,
+                   'scene':visit['scene'] if visit else {'id':None,'name':asset['scene']},
+                   'scene_qr_verified':visit is not None,
+                   'scene_basis':'decoded_scene_qr' if visit else 'instrument_registration'}
+        changed_content = any(prior.get(k) != v for k,v in changes.items())
+        if changed_content or body.action == 'refresh':
+            changes.update(scan_id=scan['scan_id'], image_url=scan['image_url'])
+            prior = update_relation(conn, 'bindings', prior['binding_id'], operator, wearer_id, timestamp,
+                                    reason='explicit_refresh' if body.action == 'refresh' else 'binding_content_updated',
+                                    changes=changes, force=body.action == 'refresh')
+        return remember_request(conn, receipt_id if body.request_id or prior.get('binding_action') == 'handover' else None,
+                                scan['camera_id'], fingerprint, prior)
+
+    body = body.model_copy(update={'operator': operator, 'wearer_id': wearer_id})
+    from instrument_ownership import check_available
+    timestamp = now()
+    check_available(conn, str(body.instrument_id), scan['camera_id'], qr_hash=qr_hash, handoff_id=handoff_id)
     result = {'binding_id': str(uuid.uuid4()), 'operator': body.operator.strip(),
               'wearer_id':(body.wearer_id or '').strip() or None,
-              'qr_hash':next(item.get('qr_hash') for item in scan['matches'] if item['id']==str(body.instrument_id)),
+              'qr_hash':qr_hash, 'binding_action':'created', 'session_revision':1, 'session_policy_version':'binding-session/2',
               'camera_id': scan['camera_id'], 'instrument': asset, 'started_at': timestamp,
               'ended_at': None, 'scan_id': scan['scan_id'], 'image_url': scan['image_url'], 'handoff_id': handoff_id,
               'identity_basis': 'unsigned_qr_and_continuous_scan_opt_in' if automatic else 'unsigned_qr_and_operator_confirmation',
@@ -476,10 +664,8 @@ def persist_binding(conn, body, *, automatic=False, handoff_id=None):
     result.update(fields(timestamp))
     service = conn.execute('SELECT document FROM camera_service_state WHERE camera=?', (scan['camera_id'],)).fetchone()
     result['device_service'] = json.loads(service['document']) if service else None
-    if not result['operator']:
-        raise HTTPException(422, '实验员不能为空')
     conn.execute('INSERT INTO bindings VALUES(?,?,NULL,?)', (result['binding_id'], result['camera_id'], json.dumps(result)))
-    return result
+    return remember_request(conn, body.request_id, scan['camera_id'], fingerprint, result)
 
 
 @app.post('/api/bindings/{binding_id}/end')
@@ -551,7 +737,10 @@ def load_ocr():
             ocr_state.update(loaded_at=now(), load_count=ocr_state['load_count'] + 1,
                              load_seconds=round(time.monotonic() - started, 3),
                              retry_after_seconds=0, load_failures=0)
-        ocr_state.update(status='ready', resident=True, error=None, error_detail=None)
+        if hasattr(ocr_model, 'health'):
+            ocr_state.update(ocr_model.health())
+        else:
+            ocr_state.update(status='ready', resident=True, error=None, error_detail=None)
         return ocr_model
 
 
@@ -589,8 +778,10 @@ def predict_panel(panel, x=0, y=0):
     try:
         with ocr_lock:
             model = load_ocr()
-            invoked = True
+            invoked = not hasattr(model, 'last_receipt')
             output = list(model.predict(panel))
+            receipt = getattr(model, 'last_receipt', None)
+            invoked = bool(receipt['execution']['actual_model_invocation']) if receipt else invoked
             lines = []
             for result in output:
                 for text, score, polygon in zip(result['rec_texts'], result['rec_scores'], result['rec_polys']):
@@ -602,8 +793,13 @@ def predict_panel(panel, x=0, y=0):
         return {'status': 'completed', 'lines': lines, 'model': ocr_state['engine'],
                 'ocr_started_at': ocr_started_at, 'ocr_finished_at': now(),
                 'actual_model_invocation': True, 'device': OCR_DEVICE,
+                **({'remote_inference': receipt} if receipt else {}),
                 'wall_seconds': round(time.monotonic() - started, 3)}
     except Exception as exc:
+        from remote_ocr import InferenceUnavailable
+        if isinstance(exc, InferenceUnavailable):
+            ocr_state.update(status='waiting_service', resident=False, error='InferenceUnavailable')
+            raise
         ocr_state.update(status='error', error=type(exc).__name__)
         return {'status': 'failed', 'lines': [], 'error': type(exc).__name__,
                 'ocr_started_at': ocr_started_at, 'ocr_finished_at': now(),
@@ -631,8 +827,11 @@ def predict_readout(panel, x=0, y=0, *, video=False, binding_snapshots=None, fie
     local_core = globals()
     if field_rules is not None:
         local_core = dict(globals(), get_instrument=lambda iid: (get_instrument(iid) or {}) | {'measurement_ranges':field_rules.get(iid,{})})
-    return predict(local_core, panel, x, y, video=video,
-                   allowed_instrument_ids={b['instrument']['id'] for b in binding_snapshots})
+    from remote_ocr import inference_request
+    with inference_request():
+        return predict(local_core, panel, x, y, video=video,
+                       allowed_instrument_ids={b['instrument']['id'] for b in binding_snapshots
+                                               if b.get('attribution_status') != 'needs_review'})
 
 
 def current_readout_binding(document):
@@ -747,6 +946,16 @@ def enqueue_ocr(body, *, trigger='explicit_request', precomputed_local=None):
         document['resume_pending'] = trigger != 'video_stream'
         document['video_observation'] = capture.get('video_observation')
         document.update(context)
+        if context['attribution_status'] == 'needs_review':
+            document.update(operator=None, wearer_id=None, operator_basis='pending_attribution')
+            if (context['attribution_reason'] == 'historical_binding_missing' and
+                    capture.get('operator_basis') == 'camera_registration'):
+                document.update(operator=capture.get('operator'),wearer_id=capture.get('wearer_id'),
+                                operator_basis='camera_registration')
+        else:
+            people = {(b.get('operator'),b.get('wearer_id')) for b in context['all_binding_snapshots']}
+            if len(people) == 1:
+                document['operator'], document['wearer_id'] = next(iter(people))
         document['field_rules'] = {b['instrument']['id']:(get_instrument(b['instrument']['id']) or {}).get('measurement_ranges',{})
                                    for b in document.get('all_binding_snapshots',document.get('binding_snapshots',[]))}
         if not linked and context['instrument_candidates']:
@@ -784,7 +993,9 @@ def get_job(job_id: uuid.UUID):
         raise HTTPException(404, '任务不存在')
     document = json.loads(row['document']) | {'status': row['status']}
     from measurement_records import display_fields
-    return document | {'archive': archive_store.job_receipt(document), 'display_fields': display_fields(document)}
+    document['archive'] = archive_store.job_receipt(document)
+    update_timing(document, preserve_recorded_durations=True)
+    return document | {'display_fields': display_fields(document)}
 
 
 @app.get('/api/export')

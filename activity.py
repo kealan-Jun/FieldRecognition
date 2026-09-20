@@ -5,10 +5,13 @@ from archive_store import receipt_status
 from aliyun_vision import READOUT
 from history_records import panel_readings, job_rows, current_version_sql
 from measurement_records import display_fields
+from readout_timing import update_timing
 
 
 def readout_event(conn, row, *, related_only=False):
     doc = json.loads(row['document'])
+    doc['archive'] = receipt_status(conn, 'jobs', doc['job_id'], (doc.get('timing') or {}).get('source_written_at'))
+    update_timing(doc, preserve_recorded_durations=True)
     status = row['status']
     if related_only:
         relevant = panel_readings(doc,status)
@@ -52,7 +55,7 @@ def readout_event(conn, row, *, related_only=False):
             'workbench': doc.get('workbench'), 'workbenches': doc.get('workbenches', []),
             'input_mode': 'video' if doc.get('request_trigger') == 'video_stream' else 'photo',
             'fallback': doc.get('fallback') and {key: doc['fallback'].get(key) for key in ('status', 'reason', 'error', 'http_status')},
-            'archive': receipt_status(conn, 'jobs', doc['job_id'], (doc.get('timing') or {}).get('source_written_at'))}
+            'archive': doc['archive']}
 
 
 def readout_page(conn, camera_id=None, *, limit=20, before=None, related_only=False):

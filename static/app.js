@@ -4,7 +4,17 @@ let state, scan, activeBinding, picture, stream, crop = null, drag = null, jobTi
 let previewLive = false, scanSession = null, scanTimer, cameraTimer, scanStarting = false, displayedJobKey = null;
 let operatorDirty = false, automationScanId = null, previewInitialized = false, previewRetry;
 let historicalScan = false, recognitionPreview = false;
-function previewUrl(){return "/api/camera/preview.mjpg"+(recognitionPreview?"?recognition=true":"");}
+let cameraList = [], selectedCameraId = localStorage.getItem('fieldCameraId') || '', cameraSwitching = false;
+let cameraEpoch = 0, camerasLoaded = false;
+let cameraMembers = null, personnelRequest = null;
+function checkCamera(epoch){if(epoch!==cameraEpoch)throw new DOMException('当前相机已切换','AbortError');}
+function previewUrl(){
+  const query = new URLSearchParams();
+  if(selectedCameraId)query.set('camera_id',selectedCameraId);
+  if(recognitionPreview)query.set('recognition','true');
+  const suffix=query.toString();
+  return '/api/camera/preview.mjpg'+(suffix?'?'+suffix:'');
+}
 let historyMode='all', historyStack=[null], historyNext=null, historyData=[], historyLoading=false, historyRequest=0;
 let historyRenderedKey=null, workbenchData=null, workbenchLoading=false;
 const pendingButtons = new Set();
@@ -14,9 +24,85 @@ const displayCamera = s => s==='DemoSampleCamera'||s==='SampleCamera'?'样张相
 const displayOperator = s => s==='Demo验证'?'样张验证':s;
 const stamp = s => s ? new Date(s).toLocaleString('zh-CN',{hour12:false}) : '—';
 function message(text,error=false){$('#message').hidden=false;$('#message').className=error?'error':'';$('#message').textContent=text;}
-async function api(path,options={}) {const r=await fetch(path,options);const data=await r.json();if(!r.ok){const error=Error(typeof data.detail==='string'?data.detail:JSON.stringify(data.detail));error.status=r.status;throw error;}return data;}
+async function api(path,options={}) {
+  const epoch=cameraEpoch;
+  const request={...options,headers:new Headers(options.headers||{})};
+  if(selectedCameraId && path.startsWith('/api/') && path!=='/api/cameras' && !request.headers.has('X-Camera-Id'))request.headers.set('X-Camera-Id',selectedCameraId);
+  const r=await fetch(path,request);
+  checkCamera(epoch);
+  let data;
+  try {data=await r.json();} catch {
+    const error=Error(r.ok?'服务返回的数据格式异常，请稍后重试':'后台服务暂不可用，正在等待恢复；已保存的数据和任务保留');
+    error.status=r.status;throw error;
+  }
+  checkCamera(epoch);
+  if(!r.ok){const error=Error(typeof data.detail==='string'?data.detail:JSON.stringify(data.detail||data.error?.message||data.code||'请求失败'));error.status=r.status;throw error;}
+  return data;
+}
 const json = data=>({method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
-function busy(button,work){return async()=>{pendingButtons.add(button);button.disabled=true;try{await work();}catch(e){message(e.message,true);}finally{pendingButtons.delete(button);button.disabled=false;updateButtons();}};}
+function cameraLabel(camera){
+  const name=String(camera.display_name||camera.camera_id||'未命名相机');
+  return name===camera.camera_id?name:`${name} · ${camera.camera_id}`;
+}
+function renderCameraSelect(){
+  const select=$('#cameraSelect');if(!select)return;
+  const options=cameraList.length?cameraList.map(camera=>`<option value="${esc(camera.camera_id)}">${esc(cameraLabel(camera))}</option>`):selectedCameraId?[`<option value="${esc(selectedCameraId)}">${esc(selectedCameraId)}</option>`]:[];
+  select.innerHTML=options.length?options.join(''):'<option value="">未发现可切换相机</option>';
+  select.value=selectedCameraId;
+  select.disabled=cameraSwitching||pendingButtons.size>0||!options.length;
+}
+async function loadCameras(){
+  const result=await api('/api/cameras');
+  cameraList=(result.items||[]).filter(camera=>camera.camera_id&&Boolean(camera.enabled));
+  if(!camerasLoaded){
+    if(!cameraList.some(camera=>camera.camera_id===selectedCameraId))selectedCameraId=cameraList[0]?.camera_id||'';
+    camerasLoaded=true;
+    if(selectedCameraId)localStorage.setItem('fieldCameraId',selectedCameraId);else localStorage.removeItem('fieldCameraId');
+  }
+  if(selectedCameraId&&!cameraList.some(camera=>camera.camera_id===selectedCameraId))cameraList.push({camera_id:selectedCameraId});
+  renderCameraSelect();
+}
+function resetCameraView(){
+  cameraMembers=null;personnelRequest=null;$('#cameraMember').innerHTML='<option value="">请选择本次使用人员</option>';
+  state=null;scan=null;activeBinding=null;activeBindings=[];picture=null;crop=null;drag=null;historicalScan=false;
+  automationScanId=null;displayedJobKey=null;previewInitialized=false;videoState=null;operatorDirty=false;
+  clearInterval(jobTimer);jobTimer=null;
+  stopWebcam();closePreview();ctx.clearRect(0,0,canvas.width,canvas.height);
+  historyRequest++;historyStack=[null];historyNext=null;historyData=[];historyLoading=false;
+  historyRenderedKey=null;workbenchData=null;workbenchLoading=false;
+  $('#operator').value='';$('#operatorSettings').open=false;$('#operatorRegistration').textContent='';
+  $('#qrEvidence').hidden=true;$('#qrEvidenceImage').removeAttribute('src');$('#qrEvidenceLink').removeAttribute('href');$('#qrEvidenceOverlay').replaceChildren();
+  $('#sceneInfo').replaceChildren();$('#sceneResults').replaceChildren();$('#videoReadings').replaceChildren();
+  $('#resetCrop').hidden=true;$('#message').hidden=true;$('#upload').value='';
+  for(const selector of ['#bindingInfo','#scanResults','#ocrResults','#historyRows','#operatorSummary','#automationState','#automationDetail','#photoWatchState','#videoOcrStatus','#ocrState','#cameraState'])$(selector).textContent='正在读取所选相机…';
+  $('#scanBadge').textContent='等待扫码';$('#historyScope').textContent='';$('#historyPager').hidden=true;
+  $('#liveStatus').textContent='正在切换相机，后台自动运行继续。';
+  $('#sourceLabel').textContent=selectedCameraId;
+}
+async function switchCamera(nextCameraId){
+  if(!nextCameraId||nextCameraId===selectedCameraId||cameraSwitching||pendingButtons.size)return;
+  cameraSwitching=true;cameraEpoch++;
+  clearTimeout(cameraTimer);clearTimeout(videoTimer);clearTimeout(scanTimer);
+  renderCameraSelect();updateButtons();
+  try{
+    if(scanSession){
+      const id=scanSession;
+      try{await api(`/api/camera/scan-sessions/${id}`,{method:'DELETE',signal:AbortSignal.timeout(8000)});}
+      catch(error){if(error.status!==404)throw error;}
+      scanSession=null;
+    }
+    selectedCameraId=nextCameraId;localStorage.setItem('fieldCameraId',selectedCameraId);
+    resetCameraView();
+    renderCameraSelect();
+    await refresh(false);
+    message(`已切换到 ${selectedCameraId}；其他相机继续后台运行。`);
+  }finally{
+    cameraSwitching=false;renderCameraSelect();updateButtons();
+    cameraTimer=setTimeout(pollCamera,2000);pollVideo();if(scanSession)pollScan();
+  }
+}
+$('#cameraSelect').onchange=()=>switchCamera($('#cameraSelect').value).catch(error=>message(error.message,true));
+function busy(button,work){return async()=>{if(cameraSwitching)return;pendingButtons.add(button);button.disabled=true;updateButtons();try{await work();}catch(e){if(e.name!=='AbortError')message(e.message,true);}finally{pendingButtons.delete(button);button.disabled=false;updateButtons();}};}
 function updateButtons(){
   const manualScanning = Boolean(scanSession) || scanStarting;
   const autoScanning = state?.automation?.enabled && ['scanning','waiting_camera'].includes(state.automation.session?.status);
@@ -28,13 +114,18 @@ function updateButtons(){
   $('#bind').disabled=manualScanning||!scan?.matches?.length;
   $('#ocr').disabled=historicalScan||previewLive||!scan||Boolean(jobTimer);
   $('#endBinding').hidden=!activeBindings.length&&!state?.scene_visits?.some(v=>v.camera_id===currentCamera()); $('#endBinding').disabled=false;
-  $('#continuousScan').disabled=scanning||state?.automation?.enabled||state?.camera.mode!=='gwhp_main';
+  $('#continuousScan').disabled=scanning||state?.automation?.enabled||state?.camera?.mode!=='gwhp_main';
   $('#stopScan').hidden=!scanSession; $('#operator').disabled=scanning||Boolean(activeBindings.length);
   $('#autoEnable').disabled=scanning;
   $('#autoPause').disabled=!state?.automation?.enabled;
   for(const s of ['#neckCapture','#upload','#webcamOpen','#shutter', '[data-sample="A"]','[data-sample="B"]','[data-sample="Scene01"]']) $(s).disabled=manualScanning;
-  $('#neckLive').disabled=manualScanning||state?.camera.mode!=='gwhp_main';
-  $('#recognitionPreview').disabled=state?.camera.mode!=='gwhp_main';
+  $('#neckLive').disabled=manualScanning||state?.camera?.mode!=='gwhp_main';
+  $('#recognitionPreview').disabled=state?.camera?.mode!=='gwhp_main';
+  $('#videoOcrToggle').disabled=!state||cameraSwitching;
+  $('#cameraSelect').disabled=cameraSwitching||pendingButtons.size>0||!cameraList.length;
+  $('#workspace').inert=cameraSwitching||!state;
+  $('#registry').inert=cameraSwitching||!state;
+  $('#history').inert=cameraSwitching||!state;
   for(const button of pendingButtons)button.disabled=true;
 }
 
@@ -57,45 +148,51 @@ function openPreview(){
   updateButtons();
 }
 async function pollCamera(){
+  const epoch=cameraEpoch;
   try{
     const previousBinding=activeBinding?.binding_id;
+    if(!camerasLoaded)await loadCameras();
     await refresh(false);
+    checkCamera(epoch);
     if(previousBinding&&!activeBinding){
       const text=state.automation?.enabled?'原绑定已结束，相机恢复后将自动重新扫码。':'原绑定已结束，可在登记区重新开启自动运行。';
       $('#liveStatus').textContent=text;message(text);
     }
     const fresh=state.camera.status==='streaming'&&state.camera.frame_age_ms<=1000&&state.camera.service_status?.online!==false;
     $('#liveBadge').textContent=fresh?(recognitionPreview?'识别叠加 · 抽样画面':'实时视频'):'等待相机新画面';
-  }catch(e){$('#liveBadge').textContent='连接中断，等待恢复';}
-  cameraTimer=setTimeout(pollCamera,2000);
+  }catch(e){if(epoch===cameraEpoch){$('#liveBadge').textContent='连接中断，等待恢复';$('#cameraState').textContent='连接中断，等待恢复';}}
+  if(epoch===cameraEpoch&&!cameraSwitching)cameraTimer=setTimeout(pollCamera,2000);
 }
 $('#recognitionPreview').onclick=()=>{recognitionPreview=!recognitionPreview;$('#recognitionPreview').setAttribute('aria-pressed',String(recognitionPreview));$('#recognitionPreview').textContent=recognitionPreview?'返回流畅视频':'查看识别叠加';if(previewLive)$('#neckPreview').src=previewUrl();else openPreview();$('#liveBadge').textContent=recognitionPreview?'识别叠加 · 抽样画面':'实时视频';};
 $('#neckLive').onclick=()=>{if(previewLive){closePreview();draw();}else openPreview();};
-$('#neckPreview').onerror=()=>{if(!previewLive)return;$('#liveBadge').textContent='视频连接中断，正在重连';clearTimeout(previewRetry);previewRetry=setTimeout(()=>{if(previewLive)$('#neckPreview').src=previewUrl()+(recognitionPreview?'&':'?')+'retry='+Date.now();},2000);};
+$('#neckPreview').onerror=()=>{if(!previewLive)return;$('#liveBadge').textContent='视频连接中断，正在重连';clearTimeout(previewRetry);previewRetry=setTimeout(()=>{if(previewLive){const url=new URL(previewUrl(),location.href);url.searchParams.set('retry',Date.now());$('#neckPreview').src=url.href;}},2000);};
 
 async function handleSession(result){
+  const epoch=cameraEpoch;
   $('#liveStatus').textContent=`${result.message}${result.frames_scanned ? ` · 已扫描 ${result.frames_scanned} 帧` : ''}`;
   if(['scanning','waiting_camera'].includes(result.status))return false;
   scanSession=null; clearTimeout(scanTimer); scanTimer=null;
   await refresh(false);
+  checkCamera(epoch);
   if(result.scan)await showScan(result.scan,{keepLive:result.status==='bound'});
+  checkCamera(epoch);
   selectBindings(result.camera_id);
   renderBinding(); updateButtons();
   message(result.message,['failed','needs_selection'].includes(result.status));
   return true;
 }
 async function pollScan(){
-  const id=scanSession;if(!id)return;
+  const epoch=cameraEpoch,id=scanSession;if(!id)return;
   try{
     const result=await api(`/api/camera/scan-sessions/${id}`);
-    if(scanSession!==id)return;
+    if(epoch!==cameraEpoch||scanSession!==id)return;
     if(await handleSession(result))return;
   }catch(e){
-    if(scanSession!==id)return;
+    if(epoch!==cameraEpoch||scanSession!==id)return;
     if(e.status===404){scanSession=null;updateButtons();message('扫码会话已结束，请重新开始；已有绑定会从服务端恢复。',true);return;}
     $('#liveStatus').textContent='扫码状态暂不可用，正在重连；页面断开超过 20 秒后服务端停止扫码。';
   }
-  if(scanSession===id)scanTimer=setTimeout(pollScan,500);
+  if(epoch===cameraEpoch&&scanSession===id&&!cameraSwitching)scanTimer=setTimeout(pollScan,500);
 }
 $('#continuousScan').onclick=busy($('#continuousScan'),async()=>{
   const operator=$('#operator').value.trim();if(!operator)throw Error('请先填写右侧实验员姓名或编号');
@@ -136,9 +233,17 @@ function renderQrEvidence(){
   }
 }
 function renderScan(){renderQrEvidence(); $('#sceneResults').innerHTML=(scan.scene_matches||[]).map(s=>`<label class="match"><input type="radio" name="scene" value="${esc(s.id)}" ${(scan.scene_matches.length===1)?'checked':''}><strong>${esc(s.name)}</strong></label>`).join(''); $('#scanBadge').textContent=historicalScan?'历史识别':(scan.matches.length||scan.scene_matches?.length)?'已读出二维码':scan.status==='no_qr'?'二维码未能解码':'未登记';$('#scanResults').innerHTML=scan.matches.length?scan.matches.map((a,i)=>`<label class="match">${!historicalScan&&scan.matches.length>1?`<input type="radio" name="instrument" value="${esc(a.id)}">`:''}<div><strong>${esc(a.name)}</strong><small>${esc(a.scene||'尚未登记场景，请在下方填写')}</small><small>${esc(a.id)}</small></div></label>`).join(''):`<p>${esc(scan.unknown.join('；')||(scan.scene_matches?.length?'场景码已识别，请先确认进入场景。':'二维码未能解码。请让标签平整、正对镜头并避开反光；调整距离直到黑白格边缘清晰，再拍照。仅靠放大无法恢复失焦细节。若拍的是面板，可沿用已确认的仪器绑定进行 OCR。'))}</p>`; }
-async function showScan(result,{keepLive=false,historical=false}={}){if(!keepLive)closePreview();historicalScan=historical;scan=result;crop=null;picture=new Image();await new Promise((resolve,reject)=>{picture.onload=resolve;picture.onerror=()=>reject(Error('图片预览失败'));picture.src=result.image_url;});canvas.width=picture.width;canvas.height=picture.height;canvas.hidden=previewLive;$('#empty').hidden=true;stopWebcam();$('#sourceLabel').textContent=previewLive?`${state.camera.id} · 实时视频`:`${result.camera_id} · ${result.width}×${result.height}`;renderScan();draw();selectBindings(scan.camera_id);renderBinding();updateButtons();}
-async function upload(blob,source=activeBinding?.camera_id||'UploadedPhoto'){const form=new FormData();form.append('file',blob,'Capture.png');form.append('camera_id',source);await showScan(await api('/api/scans',{method:'POST',body:form}));}
-$('#upload').onchange=async e=>{const file=e.target.files[0];if(!file)return;try{message('正在解码图片与二维码…');await upload(file);message('图片已留存，可读取面板。');}catch(err){message(err.message,true);}e.target.value='';};
+async function showScan(result,{keepLive=false,historical=false}={}){
+  const epoch=cameraEpoch, image=new Image();
+  await new Promise((resolve,reject)=>{image.onload=resolve;image.onerror=()=>reject(Error('图片预览失败'));image.src=result.image_url;});
+  checkCamera(epoch);
+  if(!keepLive)closePreview();historicalScan=historical;scan=result;crop=null;picture=image;
+  canvas.width=picture.width;canvas.height=picture.height;canvas.hidden=previewLive;$('#empty').hidden=true;stopWebcam();
+  $('#sourceLabel').textContent=previewLive?`${state.camera.id} · 实时视频`:`${result.camera_id} · ${result.width}×${result.height}`;
+  renderScan();draw();selectBindings(scan.camera_id);renderBinding();updateButtons();
+}
+async function upload(blob,source=activeBinding?.camera_id||currentCamera()||'UploadedPhoto'){const form=new FormData();form.append('file',blob,'Capture.png');form.append('camera_id',source);await showScan(await api('/api/scans',{method:'POST',body:form}));}
+$('#upload').onchange=()=>busy($('#upload'),async()=>{const file=$('#upload').files[0];if(!file)return;try{message('正在解码图片与二维码…');await upload(file);message('图片已留存，可读取面板。');}finally{$('#upload').value='';}})();
 document.querySelectorAll('[data-sample]').forEach(b=>b.onclick=busy(b,async()=>{const r=await fetch(`/static/labels/${b.dataset.sample==='Scene01'?'Scene01':'Instrument'+b.dataset.sample}.png`);await upload(await r.blob(),'SampleCamera');message('这是二维码样张解码结果，可用于验证扫码与绑定流程。');}));
 $('#neckCapture').onclick=busy($('#neckCapture'),async()=>{await showScan(await api('/api/camera/capture',{method:'POST'}));message('已取得挂脖设备照片。');});
 function stopWebcam(){if(stream)stream.getTracks().forEach(t=>t.stop());stream=null;$('#webcam').hidden=true;$('#shutter').hidden=true;}
@@ -160,7 +265,7 @@ function renderBinding(){
   const visits=(state?.scene_visits||[]).filter(v=>v.camera_id===currentCamera());
   $('#sceneInfo').innerHTML=visits.map(v=>`<div>场景 · ${esc(v.scene.name)} <a href="${esc(v.image_url)}" target="_blank" rel="noopener">扫码凭证 ↗</a></div>`).join('');
   $('#sceneInfo').hidden=!visits.length;
-  $('#bindingInfo').innerHTML=activeBindings.length?activeBindings.map(b=>`<div class="bound-item"><b>${esc(b.instrument.name)}</b><small>${esc(b.operator)} · ${esc(stamp(b.started_at))}${b.valid_until?' · 当天有效':''}</small><a href="${esc(b.image_url)}" target="_blank" rel="noopener">绑定命中帧 ↗</a></div>`).join(''):visits.length?'场景已关联，继续扫描仪器码。':waitingBindingText();
+  $('#bindingInfo').innerHTML=activeBindings.length?activeBindings.map(b=>`<div class="bound-item"><b>${esc(b.instrument.name)}</b><small>${esc(b.instrument.device_category||'instrument')}${b.instrument.device_type?` · ${esc(b.instrument.device_type)}`:''} · ${esc(b.operator)} · ${esc(stamp(b.started_at))}${b.valid_until?' · 当天有效':''}</small><a href="${esc(b.image_url)}" target="_blank" rel="noopener">绑定命中帧 ↗</a></div>`).join(''):visits.length?'场景已关联，继续扫描仪器码。':waitingBindingText();
   $('#scanResults').hidden=historicalScan||Boolean(state?.automation?.enabled);
   $('#scanBadge').textContent=`${activeBindings.length} 台仪器 · ${visits.length} 个场景`;
   if(scan)renderQrEvidence();updateButtons();
@@ -174,9 +279,13 @@ function renderVideoOcr(v){
   $('#videoOcrToggle').textContent=v.enabled?'暂停视频识别':'开启视频识别';
   $('#videoReadings').innerHTML=(['waiting_camera','waiting_binding','paused','error'].includes(v.status)?[]:v.latest_lines||[]).map(line=>`<div class="live-reading"><strong>${esc(ReadoutView.lineText(line))}</strong><small>${esc(line.instrument?.name||'设备未定位')} · 自动读数</small></div>`).join('')||'<span class="caption">等待画面中出现清晰读数</span>';
 }
-async function pollVideo(){try{renderVideoOcr(await api('/api/video-ocr'));}catch(e){$('#videoOcrStatus').textContent='视频识别状态连接中，正在重试';}videoTimer=setTimeout(pollVideo,500);}
+async function pollVideo(){
+  const epoch=cameraEpoch;
+  try{if(camerasLoaded)renderVideoOcr(await api('/api/video-ocr'));}
+  catch(e){if(epoch===cameraEpoch)$('#videoOcrStatus').textContent='视频识别状态连接中，正在重试';}
+  if(epoch===cameraEpoch&&!cameraSwitching)videoTimer=setTimeout(pollVideo,500);
+}
 $('#videoOcrToggle').onclick=busy($('#videoOcrToggle'),async()=>{renderVideoOcr(await api('/api/video-ocr',{...json({enabled:!videoState?.enabled}),method:'PUT'}));});
-pollVideo();
 function readoutPhoto(job){
   const url=job.image_url||job.crop_image_url;
   return url?`<a class="readout-photo" href="${esc(url)}" target="_blank" rel="noopener"><img src="${esc(url)}" alt="这条结果对应的原图"><span>对应原图 ↗</span></a>`:'';
@@ -204,7 +313,7 @@ function reprocessControl(job){
 }
 document.addEventListener('submit',async event=>{
   const form=event.target.closest('form[data-reprocess-job]');if(!form)return;event.preventDefault();
-  const button=form.querySelector('button');if(button.disabled)return;button.disabled=true;
+  const button=form.querySelector('button');if(button.disabled||cameraSwitching)return;button.disabled=true;pendingButtons.add(button);updateButtons();
   const data=new FormData(form),payload={actor:data.get('actor'),reason:data.get('reason')};
   const signature=JSON.stringify(payload);
   if(form.dataset.requestSignature!==signature){form.dataset.requestId=crypto.randomUUID();form.dataset.requestSignature=signature;}
@@ -213,6 +322,7 @@ document.addEventListener('submit',async event=>{
     form.innerHTML=`<p>识别新版本已入队。<a href="/api/jobs/${esc(job.job_id)}" target="_blank" rel="noopener">查看任务 ↗</a></p>`;
     message('重识别已入队，原结果和照片已保留。');watchJob(job);await refresh(false);
   }catch(e){message(e.message,true);button.disabled=false;}
+  finally{pendingButtons.delete(button);updateButtons();}
 });
 function renderOcr(job){
   const target=$('#ocrResults');
@@ -226,19 +336,20 @@ function renderOcr(job){
   if(job.status!=='completed'){target.innerHTML=readoutPhoto(job)+readoutCaption(job)+`<p>${job.status==='cancelled'?'这次识别已取消，原因已保存在回执中。':'识别未完成，请稍后重新拍摄。'}</p>${readoutLatency(job)}${readoutIssue(job)}<a href="/api/jobs/${job.job_id}" target="_blank" rel="noopener">结果 JSON ↗</a>`;return;}
   if(job.recognition_skipped){target.innerHTML=readoutPhoto(job)+readoutCaption(job)+`<p>${job.skip_reason==='no_active_instrument_binding'?'拍照时没有有效仪器绑定，已跳过读数识别。':'未检测到已绑定设备的面板，已跳过读数识别。'}</p>`;return;}
   const fields=job.display_fields||[];
-  const fieldText=f=>f.display_state|| (f.value===null?'未取得有效数值':String(f.value)+(f.unit?' '+f.unit:''));
+  const fieldText=f=>f.display_state|| (f.value===null?'未取得有效数值':String(f.display_value??f.value)+(f.unit?' '+f.unit:''));
   target.innerHTML=readoutPhoto(job)+readoutCaption(job)+readoutLatency(job)+
     fields.map(f=>`<div class="ocr-line"><small>${esc(f.instrument_name||'')} ${esc(f.name)}</small><strong>${esc(fieldText(f))}</strong>${f.panel_image_url?`<a href="${esc(f.panel_image_url)}" target="_blank" rel="noopener">本面板照片 ↗</a>`:''}${f.issues?.length?'<small>数值与登记规则冲突，需校正。</small>':''}${f.raw_text?`<small>识别原文：${esc(f.raw_text)}</small>`:''}</div>`).join('')+
     (!fields.length?'<p>这张照片未取得可归属的规范读数。原图与识别原文已留在任务回执。</p>':'')+
     readoutIssue(job)+`<p><a href="${esc(job.crop_image_url||job.image_url)}" target="_blank" rel="noopener">查看面板照片 ↗</a> · <a href="/api/jobs/${esc(job.job_id)}" target="_blank" rel="noopener">结果 JSON ↗</a></p>`+reprocessControl(job);
 }
 function watchJob(job){
+  const epoch=cameraEpoch;
   renderOcr(job);clearInterval(jobTimer);
   jobTimer=setInterval(async()=>{try{
     const result=await api(`/api/jobs/${job.job_id}`);
     renderOcr(result);
     if(!['queued','running'].includes(result.status)){clearInterval(jobTimer);jobTimer=null;updateButtons();await refresh(false);}
-  }catch(e){clearInterval(jobTimer);jobTimer=null;message(e.message,true);updateButtons();}},1000);
+  }catch(e){if(epoch===cameraEpoch){clearInterval(jobTimer);jobTimer=null;message(e.message,true);updateButtons();}}},1000);
   updateButtons();
 }
 $('#ocr').onclick=busy($('#ocr'),async()=>{watchJob(await api('/api/ocr',json({binding_id:crop?activeBinding?.binding_id||null:null,auto_associate:true,capture_id:scan.capture_id,crop})));});
@@ -265,7 +376,7 @@ function renderAutomation(){
   const labels={starting:'正在启动',paused:'自动扫码已暂停',waiting_operator:'等待实验员登记',waiting_config:'等待相机配置',waiting_camera:'等待相机上线',scanning:'后台自动扫码中',bound:'已绑定 · 等待语音照片',manual_scan:'正在手动扫码',retrying:'正在恢复连接'};
   $('#automationState').textContent=labels[automatic.status]||automatic.status;
   $('#automationDetail').textContent=automatic.message;
-  $('#operatorSummary').textContent=automatic.operator?`实验员 · ${automatic.operator}`:'请先登记实验员';if(!automatic.registered_at)$('#operatorSettings').open=true;$('#operatorRegistration').textContent=automatic.registered_at?`已登记：${automatic.operator} · ${stamp(automatic.registered_at)}。更换实验员前请先结束当前绑定。`:'首次使用请登记姓名或编号，保存后本机持续运行，关闭网页也有效。';
+  $('#operatorSummary').textContent=automatic.operator?`实验员 · ${automatic.operator}`:'请先登记实验员';if(!automatic.operator)$('#operatorSettings').open=true;$('#operatorRegistration').textContent=automatic.registered_at?`已登记：${automatic.operator} · ${stamp(automatic.registered_at)}。更换人员后保存即可交接；原使用时段与历史读数保留。`:automatic.operator?`当前相机已分配实验员：${automatic.operator}。设置仅对当前相机生效。`:'首次使用请登记姓名或编号，保存后本机持续运行，关闭网页也有效。';
   if(!operatorDirty && document.activeElement!==$('#operator'))$('#operator').value=automatic.operator||'';
   if(automatic.enabled){
     const session=automatic.session;
@@ -276,10 +387,39 @@ function renderAutomation(){
   updateButtons();
 }
 $('#operator').oninput=()=>{operatorDirty=true;};
+$('#cameraMember').onchange=()=>{
+  operatorDirty=true;personnelRequest=null;
+  $('#operator').value=cameraMembers?.members.find(member=>member.user_id===$('#cameraMember').value)?.display_name||'';
+};
+async function refreshPersonnel(){
+  $('#cameraPersonnel').hidden=!state.personnel_membership_enabled;
+  $('#operator').readOnly=Boolean(state.personnel_membership_enabled);
+  if(!state.personnel_membership_enabled)return;
+  const camera=selectedCameraId||state.camera.id;
+  cameraMembers=await api(`/api/cameras/${encodeURIComponent(camera)}/members`);
+  const selected=operatorDirty?$('#cameraMember').value:cameraMembers.active_user_id||'';
+  $('#cameraMember').innerHTML='<option value="">请选择本次使用人员</option>'+cameraMembers.members.map(member=>`<option value="${esc(member.user_id)}">${esc(member.display_name)} · ${esc(member.user_id)}</option>`).join('');
+  $('#cameraMember').value=selected;
+}
+$('#addCameraMember').onclick=busy($('#addCameraMember'),async()=>{
+  const user_id=$('#cameraMemberId').value.trim();if(!user_id)throw Error('请填写已登记的人员编号');
+  await api(`/api/admin/cameras/${encodeURIComponent(selectedCameraId||state.camera.id)}/members`,json({user_id}));
+  $('#cameraMemberId').value='';await refreshPersonnel();message('使用资格已登记，请明确选择本次实际使用人员。');
+});
+$('#removeCameraMember').onclick=busy($('#removeCameraMember'),async()=>{
+  const id=$('#cameraMember').value;if(!id)throw Error('请选择要取消资格的人员');
+  await api(`/api/admin/cameras/${encodeURIComponent(selectedCameraId||state.camera.id)}/members/${encodeURIComponent(id)}`,{method:'DELETE'});
+  operatorDirty=false;await refreshPersonnel();message('使用资格已取消，历史记录保留。');
+});
 $('#autoEnable').onclick=busy($('#autoEnable'),async()=>{
   const operator=$('#operator').value.trim();
   if(!operator)throw Error('请先登记实验员姓名或编号');
-  await api('/api/automation',{...json({enabled:true,operator}),method:'PUT'});
+  const wearer_id=state.personnel_membership_enabled?$('#cameraMember').value:null;
+  if(state.personnel_membership_enabled&&!wearer_id)throw Error('请选择本次实际使用人员');
+  const intent={enabled:true,operator,wearer_id,expected_revision:cameraMembers?.revision??state.automation?.revision??null};
+  if(!personnelRequest||personnelRequest.intent!==JSON.stringify(intent))personnelRequest={intent:JSON.stringify(intent),body:{...intent,request_id:crypto.randomUUID()}};
+  try{await api('/api/automation',{...json(personnelRequest.body),method:'PUT'});}catch(error){if(error.status===409){personnelRequest=null;await refreshPersonnel();}throw error;}
+  personnelRequest=null;
   operatorDirty=false;await refresh(false);
   message('实验员登记已保存，后台自动运行已开启；关闭网页仍会继续。');
 });
@@ -288,36 +428,36 @@ $('#autoPause').onclick=busy($('#autoPause'),async()=>{
   await refresh(false);message('自动扫码已暂停。已有绑定和语音照片监控仍保留；结束使用请点击结束绑定。');
 });
 function fieldRulesForm(asset){
-  return `<details><summary>读数字段规则</summary><p class="caption">只填写铭牌、说明书或设备设置已确认的信息。留空表示未知；显示小数位数用于检查，不自动补小数点。</p>${['温度','转速','质量'].map(name=>{
+  return `<details><summary>读数字段规则</summary><p class="caption">只填写铭牌、说明书或设备设置已确认的信息。留空表示未知；显示小数位数默认用于检查；仅确认设备为固定小数显示时，勾选按固定小数位换算。</p>${['温度','转速','质量'].map(name=>{
     const r=asset.measurement_ranges?.[name]||{}, units={温度:['°C'],转速:['rpm'],质量:['g','mg','kg']}[name];
-    return `<fieldset><legend>${name}</legend><div class="row"><label class="field">单位<select name="${name}.unit"><option value="">未知</option>${units.map(u=>`<option value="${u}" ${u===r.unit?'selected':''}>${u}</option>`).join('')}</select></label><label class="field">最小值<input name="${name}.low" type="number" step="any" value="${esc(r.range?.[0])}"></label><label class="field">最大值<input name="${name}.high" type="number" step="any" value="${esc(r.range?.[1])}"></label><label class="field">显示小数位<input name="${name}.places" type="number" min="0" max="8" step="1" value="${esc(r.decimal_places)}"></label></div></fieldset>`;
+    return `<fieldset><legend>${name}</legend><div class="row"><label class="field">单位<select name="${name}.unit"><option value="">未知</option>${units.map(u=>`<option value="${u}" ${u===r.unit?'selected':''}>${u}</option>`).join('')}</select></label><label class="field">最小值<input name="${name}.low" type="number" step="any" value="${esc(r.range?.[0])}"></label><label class="field">最大值<input name="${name}.high" type="number" step="any" value="${esc(r.range?.[1])}"></label><label class="field">显示小数位<input name="${name}.places" type="number" min="0" max="8" step="1" value="${esc(r.decimal_places)}"></label><label class="field"><span>固定小数显示</span><input type="checkbox" name="${name}.fixed" ${r.fixed_decimal_display?'checked':''}><small>仅对完整数字串按登记的小数位换算；原始识别文字保留</small></label></div></fieldset>`;
   }).join('')}</details>`;
 }
 function forms(){
-  $('#instrumentForms').innerHTML=state.instruments.map(a=>`<form class="instrument-form" data-id="${esc(a.id)}"><strong>${esc(a.name)}</strong><div class="id">${esc(a.id)}</div><div class="row"><label class="field">仪器名称<input name="name" value="${esc(a.name)}" required maxlength="80"></label><label class="field">所属场景 / 实验区域<input name="scene" value="${esc(a.scene)}" required maxlength="100"></label></div><label class="field">型号（可选）<input name="model" value="${esc(a.model)}" maxlength="100"></label>${fieldRulesForm(a)}<button class="secondary" type="submit">保存登记</button> <a href="/static/labels/Instrument${a.id==='e9434a0a-3319-414a-b988-4cc6884edce4'?'A':'B'}.png" target="_blank" rel="noopener">查看标签 ↗</a></form>`).join('');
+  $('#instrumentForms').innerHTML=state.instruments.map(a=>`<form class="instrument-form" data-id="${esc(a.id)}"><strong>${esc(a.name)}</strong><div class="id">${esc(a.id)}</div><div class="row"><label class="field">仪器名称<input name="name" value="${esc(a.name)}" required maxlength="80"></label><label class="field">设备分类<input name="device_category" value="${esc(a.device_category||'instrument')}" required maxlength="50"></label><label class="field">所属场景 / 实验区域<input name="scene" value="${esc(a.scene)}" required maxlength="100"></label></div><label class="field">型号（可选）<input name="model" value="${esc(a.model)}" maxlength="100"></label>${fieldRulesForm(a)}<button class="secondary" type="submit">保存登记</button> <a href="/static/labels/Instrument${a.id==='e9434a0a-3319-414a-b988-4cc6884edce4'?'A':'B'}.png" target="_blank" rel="noopener">查看标签 ↗</a></form>`).join('');
   document.querySelectorAll('.instrument-form').forEach(form=>form.onsubmit=async e=>{
-    e.preventDefault();const button=form.querySelector('button');button.disabled=true;
+    e.preventDefault();const button=form.querySelector('button');if(cameraSwitching)return;button.disabled=true;pendingButtons.add(button);updateButtons();
     try{
-      const data=new FormData(form),values=Object.fromEntries(['name','scene','model'].map(k=>[k,data.get(k)]));
+      const data=new FormData(form),values=Object.fromEntries(['name','scene','model','device_category'].map(k=>[k,data.get(k)]));
       values.measurement_ranges={...(state.instruments.find(a=>a.id===form.dataset.id)?.measurement_ranges||{})};
       for(const name of ['温度','转速','质量']){
         const raw=k=>String(data.get(`${name}.${k}`)||'').trim(), number=k=>raw(k)===''?null:Number(raw(k));
-        if(['unit','low','high','places'].some(k=>raw(k)!==''))values.measurement_ranges[name]={unit:raw('unit')||null,range:[number('low'),number('high')],decimal_places:number('places')};
+        if(['unit','low','high','places','fixed'].some(k=>raw(k)!==''))values.measurement_ranges[name]={unit:raw('unit')||null,range:[number('low'),number('high')],decimal_places:number('places'),fixed_decimal_display:data.has(`${name}.fixed`)};
         else delete values.measurement_ranges[name];
       }
       await api(`/api/instruments/${form.dataset.id}`,{...json(values),method:'PUT'});await refresh(false);
       if(scan){scan.matches=scan.matches.map(m=>({...m,...state.instruments.find(a=>a.id===m.id)}));renderScan();}
       message('仪器登记和读数规则已保存，新任务使用登记规则快照。');
-    }catch(err){message(err.message,true);}finally{button.disabled=false;}
+    }catch(err){message(err.message,true);}finally{button.disabled=false;pendingButtons.delete(button);updateButtons();}
   });
 }
-async function refresh(renderForms=true){state=await api('/api/state');if(!previewInitialized&&state.camera.mode==='gwhp_main'){previewInitialized=true;if(!picture&&!stream)openPreview();}$('#cameraState').className='pill'+(state.camera.status==='streaming'?'':' warning');$('#cameraState').title=state.camera.id;$('#cameraState').textContent=state.camera.configured?`${{streaming:'主码流在线',discovering:'正在发现',reconnecting:'接收端连接失败',camera_offline:'设备离线',waiting_keyframe:'等待关键帧',not_started:'正在连接'}[state.camera.status]||'已配置取图'}`:`${state.camera.id} · 等待连接`;$('#ocrState').textContent=`PaddleOCR · ${(state.ocr.device||'cpu').toUpperCase()} · ${{not_loaded:'等待加载',queued:'等待后台加载',loading:'模型加载中',ready:'模型常驻 · 已就绪',error:'加载/识别失败'}[state.ocr.status]||state.ocr.status}${state.panel_detector?.enabled?' · '+(state.panel_detector.status==='ready'?'A/B 面板定位已就绪':state.panel_detector.status==='error'?'面板定位异常':'面板定位加载中'):''}`;selectBindings(currentCamera());renderBinding();renderLatestJob();renderPhotoWatch();renderAutomation();const autoScan=state.automation?.session?.scan||state.last_camera_scan;if(autoScan && automationScanId!==autoScan.scan_id){automationScanId=autoScan.scan_id;await showScan(autoScan,{keepLive:state.automation?.session?.status!=='needs_selection',historical:!state.automation?.session?.scan});}if(renderForms)forms();renderHistory();if(historyMode==='readouts'&&location.hash==='#history'&&!historyLoading)loadReadoutPage();if(historyMode==='workbenches'&&location.hash==='#history')loadWorkbenches();}
+async function refresh(renderForms=true){state=await api('/api/state');await refreshPersonnel();if(!previewInitialized&&state.camera.mode==='gwhp_main'){previewInitialized=true;if(!picture&&!stream)openPreview();}$('#cameraState').className='pill'+(state.camera.status==='streaming'?'':' warning');$('#cameraState').title=state.camera.id;$('#cameraState').textContent=state.camera.configured?`${{streaming:'主码流在线',discovering:'正在发现',reconnecting:'接收端连接失败',camera_offline:'设备离线',waiting_keyframe:'等待关键帧',not_started:'正在连接'}[state.camera.status]||'已配置取图'}`:`${state.camera.id} · 等待连接`;$('#ocrState').textContent=`PaddleOCR · ${(state.ocr.device||'cpu').toUpperCase()} · ${{not_loaded:'等待加载',queued:'等待后台加载',loading:'模型加载中',ready:'模型常驻 · 已就绪',error:'加载/识别失败',worker_unavailable:'后台服务恢复中',waiting_service:'等待推理服务恢复 · 照片已排队'}[state.ocr.status]||state.ocr.status}${state.panel_detector?.enabled?' · '+(state.panel_detector.status==='ready'?'A/B 面板定位已就绪':state.panel_detector.status==='error'?'面板定位异常':'面板定位加载中'):''}`;selectBindings(currentCamera());renderBinding();renderLatestJob();renderPhotoWatch();renderAutomation();const autoScan=state.automation?.session?.scan||state.last_camera_scan;if(autoScan && automationScanId!==autoScan.scan_id){automationScanId=autoScan.scan_id;await showScan(autoScan,{keepLive:state.automation?.session?.status!=='needs_selection',historical:!state.automation?.session?.scan});}if(renderForms)forms();renderHistory();if(historyMode==='readouts'&&location.hash==='#history'&&!historyLoading)loadReadoutPage();if(historyMode==='workbenches'&&location.hash==='#history')loadWorkbenches();}
 
 $('#refresh').onclick=busy($('#refresh'),()=>refresh());
 $('#export').onclick=busy($('#export'),async()=>{const data=await api('/api/export');const url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='FieldRecognitionSession.json';a.click();URL.revokeObjectURL(url);});
 $('#operator').value='';
-refresh().then(()=>{renderBinding();pollCamera();}).catch(e=>{message(e.message,true);cameraTimer=setTimeout(pollCamera,2000);});
-window.addEventListener('pagehide',()=>{stopWebcam();closePreview();clearTimeout(cameraTimer);clearTimeout(videoTimer);clearTimeout(scanTimer);if(scanSession)fetch(`/api/camera/scan-sessions/${scanSession}`,{method:'DELETE',keepalive:true}).catch(()=>{});});
+loadCameras().then(()=>refresh()).then(()=>{renderBinding();pollCamera();pollVideo();}).catch(e=>{message(e.message,true);cameraTimer=setTimeout(pollCamera,2000);});
+window.addEventListener('pagehide',()=>{stopWebcam();closePreview();clearTimeout(cameraTimer);clearTimeout(videoTimer);clearTimeout(scanTimer);if(scanSession)fetch(`/api/camera/scan-sessions/${scanSession}`,{method:'DELETE',headers:{'X-Camera-Id':selectedCameraId},keepalive:true}).catch(()=>{});});
 
 $('#enterScene').onclick=busy($('#enterScene'),async()=>{const chosen=$('input[name="scene"]:checked');if(!chosen)throw Error('请选择场景');await api('/api/scene/enter',json({scan_id:scan.scan_id,scene_id:chosen.value}));await refresh(false);selectBindings(scan.camera_id);renderBinding();message('已进入场景，请拍摄仪器二维码并绑定使用。');});
 
@@ -367,7 +507,9 @@ function renderWorkbenches(){
 function renderHistory(){
   if(!state)return;
   const archive=state.archive||{};
-  $('#archiveStatus').textContent=archive.enabled?`NAS 留存：${archive.status==='ready'?'已连接':archive.status==='retrying'?'等待重试，记录保留在本机':'正在连接'} · 已归档 ${archive.archived_receipts||0} 个版本 · 待同步 ${archive.pending_receipts||0} 个版本${archive.navigation_pending?' · 分类索引待同步':''}`:'NAS 留存未启用，记录保存在本机。';
+  const archiveState={ready:'已连接',retrying:'等待重试，记录保留在本机',indexing:'正在整理分类索引',waiting_integrity:'正在校验归档'}[archive.status]||'正在连接';
+  const archiveProgress=archive.status==='indexing'&&archive.progress_total?`（${archive.progress_current||0}/${archive.progress_total}）`:'';
+  $('#archiveStatus').textContent=archive.enabled?`NAS 留存：${archiveState}${archiveProgress} · 已归档 ${archive.archived_receipts||0} 个版本 · 待同步 ${archive.pending_receipts||0} 个版本${archive.navigation_pending?' · 分类索引待同步':''}`:'NAS 留存未启用，记录保存在本机。';
   $('#archiveStatus').title=archive.root||'';
   const integrity=archive.integrity||{},check=integrity.last_report;
   $('#integrityStatus').textContent=integrity.status==='running'?'完整性巡检进行中':check?`最近巡检：${{completed:'校验通过',findings:'发现异常',unavailable:'存储暂不可用',interrupted:'检查中断'}[check.status]||check.status} · ${stamp(check.finished_at)} · ${check.issue_count} 项异常`:'等待首次完整性巡检';
@@ -388,8 +530,8 @@ function renderHistory(){
   document.querySelectorAll('#historyRows tr[data-event]').forEach(row=>{if(opened.has(row.dataset.event)&&row.querySelector('details'))row.querySelector('details').open=true;});
 }
 function showPage(){
-  const titles={workspace:'扫码与读数',registry:'仪器登记',history:'操作记录'};
-  const page=location.hash.slice(1) in titles?location.hash.slice(1):'workspace';
+  const titles={cameras:'多相机工作台',workspace:'扫码与读数',registry:'仪器登记',history:'操作记录'};
+  const page=location.hash.slice(1) in titles?location.hash.slice(1):'cameras';
   document.querySelectorAll('.page-view').forEach(view=>view.hidden=view.id!==page);
   document.querySelectorAll('.nav').forEach(link=>{const selected=link.getAttribute('href')==='#'+page;link.classList.toggle('active',selected);if(selected)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');});
   document.body.classList.toggle('workspace-screen',page==='workspace');

@@ -17,12 +17,23 @@ def predict(core, image, x=0, y=0, *, video=False, allowed_instrument_ids=()):
     started = core['now']()
     begin = time.monotonic()
     allowed = set(allowed_instrument_ids)
-    detection = detector.predict(image) if allowed else {'status':'waiting_binding', 'boxes':[], 'model':'YOLO11n'}
+    detection = detector.predict(image, photo=True) if allowed and not video else detector.predict(image) if allowed else {'status':'waiting_binding', 'boxes':[], 'model':'YOLO11n'}
     from panel_layout import resolve_type_boxes,roles_for_boxes
     detection['boxes']=resolve_type_boxes(detection['boxes'],allowed,core.get('get_instrument',lambda _:{}))
     detection.update(started_at=started, finished_at=core['now']())
     detection['allowed_instrument_ids'] = sorted(allowed)
     detection['skipped_unbound_panels'] = [b for b in detection['boxes'] if b['instrument_id'] not in allowed]
+    diagnostics = detection.setdefault('diagnostics', {})
+    invoked = detection['status'] not in {'waiting_binding', 'failed'}
+    diagnostics.setdefault('raw_candidate_count', len(detection['boxes']) if invoked else None)
+    diagnostics.setdefault('raw_count_basis', 'detector_returned_boxes' if invoked else 'detector_not_run' if not allowed else 'detector_failed')
+    diagnostics.setdefault('quality_filtered_count', len(detection['boxes']) if invoked else None)
+    exclusions = diagnostics.setdefault('excluded_candidates', [])
+    exclusions.extend(dict(b, reason=b.get('association_issue') or 'target_not_allowed')
+                      for b in detection['skipped_unbound_panels'])
+    diagnostics['binding_matched_count'] = len(detection['boxes']) - len(detection['skipped_unbound_panels'])
+    detection['duration_ms'] = round((time.monotonic() - begin) * 1000, 3)
+    ocr_started = time.monotonic()
     roles = roles_for_boxes(detection['boxes'])
     regions, lines, ordinals = [], [], {}
     for box in detection['boxes']:
@@ -37,18 +48,28 @@ def predict(core, image, x=0, y=0, *, video=False, allowed_instrument_ids=()):
         ex,ey = min(image.shape[1],x2+pad),min(image.shape[0],y2+pad)
         panel = image[cy:ey,cx:ex].copy()
         local = core['predict_panel'](panel, x+cx, y+cy)
-        local = refine_digits(core['predict_panel'], panel, local, x+cx, y+cy,
-                              source_image=image,source_offset=(x,y))
+        if box['class_id'] == 1 and not video:
+            from lcd_digits import refine_lcd
+            instrument = core.get('get_instrument',lambda _:{})(box['instrument_id']) or {}
+            local = refine_lcd(core['predict_panel'], panel, local, x+cx, y+cy,
+                               source_image=image, source_offset=(x,y), instrument=instrument)
+        else:
+            local = refine_digits(core['predict_panel'], panel, local, x+cx, y+cy,
+                                  source_image=image,source_offset=(x,y))
         if box['class_id'] == 0:
             from led_digits import verify_digits
             local = verify_digits(panel, local, x+cx, y+cy)
             raw_lines = local.get('panel_ocr', {}).get('lines', [])
             if not local.get('lines') and len(raw_lines) == 1 and raw_lines[0].get('text', '').strip().upper() == 'OFF' and (raw_lines[0].get('confidence') or 0) >= .6:
                 local['display_state'] = {'text': 'OFF', 'basis': 'recognized_display_text',
+                                          'raw_text':raw_lines[0]['text'], 'source':'local_ocr.panel_ocr',
                                           'confidence': raw_lines[0]['confidence']}
         region = {'panel_id':f"panel-{box['class_id']}-{ordinal}", 'class_id':box['class_id'],
             'measurement_name':roles.get(((str(box['class_id']),box.get('instrument_id')),tuple(box['xyxy']))),
             'instrument_id':box['instrument_id'], 'detector_confidence':box['confidence'],
+            'identity_evidence':box.get('identity_evidence') or {'basis':'detector_manifest_asset_mapping',
+                'class_id':box['class_id'], 'weights_sha256':detection.get('weights_sha256'),
+                'model_version':detection.get('model_version')},
             'localization_method':box.get('localization_method','original'),
             'localization_supporting_views':box.get('supporting_views',[]),
             'bbox':[x+x1,y+y1,x+x2,y+y2], 'crop':[x+cx,y+cy,ex-cx,ey-cy], 'local_ocr':local,
@@ -56,17 +77,36 @@ def predict(core, image, x=0, y=0, *, video=False, allowed_instrument_ids=()):
         local['lines'] = validate_lines([dict(line, panel_id=region['panel_id']) for line in local.get('lines', [])],
                                        region['measurement_name'], core.get('get_instrument',lambda _:{})(box['instrument_id']) or {})
         regions.append(region); lines.extend(local['lines'])
+    diagnostics['ocr_input_region_count'] = len(regions)
+    ocr_elapsed_ms = round((time.monotonic() - ocr_started) * 1000, 3) if regions else None
     result = {'status':'completed', 'lines':lines, 'panel_regions':regions, 'panel_detection':detection,
         'model':core['ocr_state']['engine'], 'device':core['OCR_DEVICE'],
         'actual_model_invocation':any(r['local_ocr'].get('actual_model_invocation') for r in regions),
         'ocr_started_at':regions[0]['local_ocr'].get('ocr_started_at', detection['finished_at']) if regions else detection['finished_at'],
-        'ocr_finished_at':core['now'](), 'wall_seconds':round(time.monotonic()-begin,3), 'panel_selection':'detected_display_regions'}
+        'ocr_finished_at':core['now'](), 'ocr_elapsed_ms':ocr_elapsed_ms,
+        'wall_seconds':round(time.monotonic()-begin,3), 'panel_selection':'detected_display_regions'}
     if not regions:
         result.update(panel_selection='no_bound_panel', recognition_skipped=True,
             skip_reason='no_active_instrument_binding' if not allowed else 'no_visible_bound_panel')
+        result['failure_reason'] = ('no_active_instrument_binding' if not allowed else
+            'instrument_identity_unconfirmed' if any(b.get('association_issue') == 'instance_evidence_required' for b in detection['boxes']) else
+            'target_not_allowed' if detection['skipped_unbound_panels'] else
+            'panel_candidates_filtered' if diagnostics.get('raw_candidate_count') else 'panel_not_detected')
     if detection['status'] == 'failed':
         result['detector_error'] = detection['error']
+        result.update(status='failed', error='panel_detection_failed', failure_reason='processing_exception')
     return result
+
+
+def reading_fallback_reason(lines, error=None):
+    checked = []
+    for line in lines:
+        if ((line.get('normalization') or {}).get('method') in {'registered_fixed_decimal_v1','registered_fixed_decimal_v2'}
+                and line.get('value') is not None and not line.get('quality_issue')):
+            checked.append(dict(line, text=str(line['value'])))
+        else:
+            checked.append(line)
+    return vision.fallback_reason(checked, error)
 
 
 def needs_fallback(local):
@@ -74,7 +114,7 @@ def needs_fallback(local):
         if any(l.get('quality_issue') for r in local['panel_regions'] for l in r['local_ocr'].get('lines',[])):
             return 'field_rule_conflict'
         return next((reason for r in local['panel_regions'] if not r.get('display_state')
-                     if (reason := vision.fallback_reason(r['local_ocr'].get('lines', []),
+                     if (reason := reading_fallback_reason(r['local_ocr'].get('lines', []),
                                                          r['local_ocr'].get('error')))), None)
     return vision.fallback_reason(local.get('lines', []), local.get('error'))
 
@@ -82,6 +122,9 @@ def needs_fallback(local):
 def finish(core, document, local, image, *, valid, clock=time.monotonic, started=0):
     from panel_readout import save
     document.update(copy.deepcopy(local))
+    # A completed model call is not a completed business task. Keep the lease
+    # while saving crop evidence and waiting for the optional provider response.
+    document['status'] = 'running'
     document['local_ocr'] = copy.deepcopy(local)
     document['capture_association'] = {k:document.get(k) for k in ('instrument', 'binding_id', 'instrument_candidates', 'workbench')}
     snapshots = document.get('all_binding_snapshots', document.get('binding_snapshots', []))
@@ -114,7 +157,7 @@ def finish(core, document, local, image, *, valid, clock=time.monotonic, started
         result = region['local_ocr']
         lines = copy.deepcopy(result.get('lines', []))
         lines = validate_lines(lines, region.get('measurement_name'), region['instrument'])
-        reason = None if region.get('display_state') else 'field_rule_conflict' if any(l.get('quality_issue') for l in lines) else vision.fallback_reason(lines, result.get('error'))
+        reason = None if region.get('display_state') else 'field_rule_conflict' if any(l.get('quality_issue') for l in lines) else reading_fallback_reason(lines, result.get('error'))
         if reason and vision.public_config()['available'] and valid():
             attempt = {'panel_id':region['panel_id'], 'trigger':reason}
             if not core['vision_call_lock'].acquire(blocking=False):
@@ -129,7 +172,11 @@ def finish(core, document, local, image, *, valid, clock=time.monotonic, started
                         region['fallback'] = attempt
                         document.update(phase='extended_reading')
                         save(core, document)
-                        cloud = vision.read_panel(crop)
+                        provider_started = clock()
+                        try:
+                            cloud = vision.read_panel(crop)
+                        finally:
+                            attempt.update(duration_ms=round((clock()-provider_started)*1000,3), clock_basis='process_monotonic')
                         attempt.update(cloud, finished_at=core['now']())
                         if cloud.get('answer', {}).get('readings'):
                             lines = [{'text':r['text'], 'value':r['value'], 'unit':r.get('unit'),
@@ -138,6 +185,7 @@ def finish(core, document, local, image, *, valid, clock=time.monotonic, started
                 finally:
                     core['vision_call_lock'].release()
             region['fallback'] = attempt; attempts.append(attempt)
+        lines = validate_lines(lines, region.get('measurement_name'), region['instrument'])
         region['lines'] = [dict(line, panel_id=region['panel_id']) for line in lines]
         combined.extend(region['lines'])
     if not valid():
@@ -155,16 +203,18 @@ def finish(core, document, local, image, *, valid, clock=time.monotonic, started
         document.update(status='failed', error='panel_ocr_failed')
     if attempts:
         document['fallback'] = dict(attempts[-1], regions=attempts,
+            duration_ms=sum(a['duration_ms'] for a in attempts if a.get('duration_ms') is not None) if any(a.get('duration_ms') is not None for a in attempts) else None,
             attempted_at=next((a['attempted_at'] for a in attempts if a.get('attempted_at')), None),
             finished_at=next((a['finished_at'] for a in reversed(attempts) if a.get('finished_at')), None))
 
 
 def validate_lines(lines, name, instrument):
-    from measurement_records import field_issues, measurement_value
+    from measurement_records import field_issues, measurement_value, apply_fixed_decimal
     if not name:
         return lines
     result = []
     for line in lines:
+        line = apply_fixed_decimal(name, line, instrument)
         match = re.match(r'\s*('+vision.NUMBER+')',line.get('text',''))
         if not match and line.get('value') is None:
             result.append(line)

@@ -76,3 +76,23 @@ def test_failed_warp_cannot_promote_a_conflicting_wider_crop():
     assert out['digit_consistency']['status']=='disagreement'
     assert out['digit_consistency']['candidates']==['055','065']
     assert out['panel_ocr']==raw
+
+
+def test_small_lcd_retry_keeps_original_empty_output_and_source_coordinates():
+    raw={'status':'completed','lines':[]}
+    calls=[]
+    def predict(image,x,y):
+        calls.append(image.shape[:2])
+        return {'status':'completed','lines':[line('02181',[40,30,100,40])]} if len(calls)==1 else {'lines':[]}
+    out=refine_digits(predict,np.zeros((100,160,3),np.uint8),raw,400,600,recover_small=True)
+    assert calls[0]==(200,320) and len(calls)==2
+    assert out['panel_ocr']==raw and out['small_panel_recovery']['scale']==2
+    assert out['lines'][0]['text']=='02181'
+    assert out['lines'][0]['polygon'][0]==[420,615]
+
+
+def test_small_panel_no_text_retry_is_bounded_to_one():
+    calls=[]
+    raw={'status':'completed','lines':[]}
+    out=refine_digits(lambda *a:calls.append(1) or raw,np.zeros((100,160,3),np.uint8),raw,recover_small=True)
+    assert len(calls)==1 and out['lines']==[]

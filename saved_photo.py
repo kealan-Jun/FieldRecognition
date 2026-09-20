@@ -199,11 +199,15 @@ def install(core):
                 with core['db']() as conn:
                     row = conn.execute('SELECT document FROM automation_settings WHERE camera=?', (target,)).fetchone()
                 registration = json.loads(row['document']) if row else {}
+                from binding_operator import at_time
+                registration = at_time(registration, photo.captured_at)
                 registered = registration.get('registered_at')
                 if registered and datetime.fromisoformat(registered) <= photo.captured_at:
                     capture.update(operator=registration.get('operator') or None,
+                                   wearer_id=registration.get('wearer_id'),
                                    operator_basis='camera_registration',
-                                   operator_registration={'operator': registration.get('operator'), 'registered_at': registered})
+                                   operator_registration={'operator': registration.get('operator'),
+                                                          'wearer_id':registration.get('wearer_id'), 'registered_at': registered})
                 else:
                     capture.update(operator=None, operator_basis='not_recorded', operator_registration=None)
                 with core['db']() as conn:

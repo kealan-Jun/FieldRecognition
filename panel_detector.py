@@ -70,13 +70,19 @@ class PanelDetector:
         env = {k: os.environ[k] for k in ('PATH', 'HOME', 'LANG') if k in os.environ}
         env.update(OMP_NUM_THREADS='2', OPENBLAS_NUM_THREADS='2', YOLO_AUTOINSTALL='false',
                    YOLO_OFFLINE='true', YOLO_CONFIG_DIR=str(path.parent / 'runtime'))
+        device = os.environ.get('FIELD_PANEL_DEVICE', 'gpu:0')
+        if device not in {'cpu', 'gpu:0'}:
+            raise ValueError('FIELD_PANEL_DEVICE must be cpu or gpu:0')
+        if os.environ.get('FIELD_OCR_SERVICE_URL') and device != 'cpu':
+            raise ValueError('The standalone GPU service owns CUDA; local panel detection requires cpu')
+        env['CUDA_VISIBLE_DEVICES'] = '' if device == 'cpu' else '0'
         self.process = subprocess.Popen([config['python'], '-u', str(Path(__file__).with_name('panel_detector_worker.py')),
-            str(weights), str(config.get('imgsz', 960)), str(config.get('confidence', .25))],
+            str(weights), str(config.get('imgsz', 960)), str(config.get('confidence', .25)), device],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None, env=env)
         ready = self._receive(60)
         if ready.get('status') != 'ready' or ready.get('names') != {key:value['name'] for key,value in config['classes'].items()}:
             raise ValueError('unexpected detector classes')
-        self.state.update(status='ready', resident=True, error=None, device='gpu:0',
+        self.state.update(status='ready', resident=True, error=None, device=device,
             weights_sha256=digest, model_version=config['version'],
             load_count=self.state['load_count'] + 1, confidence_threshold=config.get('confidence', .25))
 
@@ -92,7 +98,7 @@ class PanelDetector:
                 self.state.update(status='error', error=type(exc).__name__)
                 return False
 
-    def predict(self, image):
+    def predict(self, image, *, photo=False):
         with self.lock:
             started = time.monotonic()
             try:
@@ -100,10 +106,15 @@ class PanelDetector:
                 ok, encoded = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 95])
                 if not ok:
                     raise ValueError('detector input encoding failed')
-                self.process.stdin.write(json.dumps({'image': base64.b64encode(encoded).decode()}).encode() + b'\n')
+                self.process.stdin.write(json.dumps({'image': base64.b64encode(encoded).decode(), 'photo':photo}).encode() + b'\n')
                 self.process.stdin.flush()
                 result = self._receive(10)
                 boxes = []
+                diagnostics = dict(result.get('diagnostics') or {})
+                diagnostics.setdefault('raw_candidate_count', len(result['boxes']))
+                diagnostics.setdefault('raw_count_basis', 'worker_returned_boxes')
+                excluded = list(diagnostics.get('excluded_candidates', []))
+                excluded.extend(dict(b, reason='candidate_limit') for b in result['boxes'][6:])
                 h, w = image.shape[:2]
                 for item in result['boxes'][:6]:
                     key = str(item['class_id'])
@@ -114,16 +125,21 @@ class PanelDetector:
                     x1, y1 = max(0, math.floor(x1)), max(0, math.floor(y1))
                     x2, y2 = min(w, math.ceil(x2)), min(h, math.ceil(y2))
                     if x2-x1 < 4 or y2-y1 < 4:
+                        excluded.append(dict(item, reason='region_too_small'))
                         continue
                     boxes.append(item | {'xyxy': [x1,y1,x2,y2],
+                        'identity_evidence':{'basis':'detector_manifest_asset_mapping' if self.config['classes'][key].get('instrument_id') else 'detector_manifest_type_mapping',
+                            'class_id':item['class_id'], 'model_version':self.config['version'],
+                            'weights_sha256':self.state['weights_sha256']},
                         **{field:self.config['classes'][key].get(field) for field in ('instrument_id','type_id','layout','measurements')}})
+                diagnostics.update(quality_filtered_count=len(boxes), excluded_candidates=excluded)
                 boxes.sort(key=lambda b: (b['class_id'], b['xyxy'][0], b['xyxy'][1]))
                 self.state.update(status='ready', error=None, last_seconds=round(time.monotonic()-started, 3),
                                   recovery=result.get('recovery'))
                 return {'status': 'completed', 'boxes': boxes, 'model': 'YOLO11n',
                     'weights_sha256': self.state['weights_sha256'], 'model_version': self.config['version'],
-                    'device': 'gpu:0', 'wall_seconds': self.state['last_seconds'], 'speed_ms': result.get('speed_ms'),
-                    'recovery':result.get('recovery')}
+                    'device': self.state['device'], 'wall_seconds': self.state['last_seconds'], 'speed_ms': result.get('speed_ms'),
+                    'recovery':result.get('recovery'), 'diagnostics':diagnostics}
             except Exception as exc:
                 self.close()
                 self.state.update(status='error', error=type(exc).__name__)

@@ -27,6 +27,8 @@ def build_index(rows, instance, timestamp, integrity):
                 target += ' · 归属待确认'
         image_hash = doc.get('image_sha256')
         image = f'Objects/{image_hash[:2]}/{image_hash}.png' if re.fullmatch('[a-f0-9]{64}', image_hash or '') else None
+        published_at = row['published_at'] if 'published_at' in row.keys() else None
+        readable_at = row['readable_at'] if 'readable_at' in row.keys() else None
         items.append({'sequence': row['seq'], 'entity': row['entity'], 'entity_id': row['entity_id'],
             'camera_id': doc.get('camera_id') or (row['entity_id'] if row['entity'] == 'automation_settings' else None),
             'occurred_at': occurred, 'local_time': local.strftime('%Y-%m-%d %H:%M:%S'), 'day': local.date().isoformat(),
@@ -42,8 +44,11 @@ def build_index(rows, instance, timestamp, integrity):
             'record_scope': doc.get('record_scope', 'legacy_test_only') if row['entity'] == 'jobs' else doc.get('record_scope'),
             'measurement_id': doc.get('measurement_id'),
             'receipt': row['receipt_path'], 'image': image, 'archived_at': row['archived_at'],
-            'archive_queue_ms': elapsed_ms(row['recorded_at'], row['archived_at']),
-            'write_to_archive_ms': elapsed_ms((doc.get('timing') or {}).get('source_written_at'), row['archived_at'])})
+            'archive_published_at': published_at, 'archive_readable_at': readable_at,
+            'archive_readability_basis': row['readability_basis'] if 'readability_basis' in row.keys() else None,
+            'archive_queue_ms': elapsed_ms(row['recorded_at'], published_at or row['archived_at']),
+            'write_to_archive_ms': elapsed_ms((doc.get('timing') or {}).get('source_written_at'), published_at or row['archived_at']),
+            'archive_readability_ms': elapsed_ms(published_at, readable_at)})
     return {'schema': 'field-recognition-index/2', 'timezone': 'Asia/Shanghai', 'source_instance': instance,
             'updated_at': timestamp, 'archived_receipts': len(items), 'listed_receipts': len(items),
             'unique_records': len({(i['entity'], i['entity_id']) for i in items}), 'scope': 'all_acknowledged_versions',

@@ -171,7 +171,10 @@ def test_same_value_on_another_decoded_instrument_is_new_evidence(video):
 
 
 def test_localized_panel_votes_and_saved_receipts_are_independent(video,monkeypatch):
-    import copy
+    from datetime import datetime
+    def synced(sequence):
+        return {'sequence':sequence,'clock_sync_valid':True,
+                'global_timestamp_us':int(datetime.fromisoformat(app.now()).timestamp()*1_000_000)}
     from test_multi_readout import two_bindings
     from test_panel_regions import BOXES
     app,client,camera,reader,frame,tick=video
@@ -187,16 +190,16 @@ def test_localized_panel_votes_and_saved_receipts_are_independent(video,monkeypa
                 'bbox':box['xyxy'],'crop':[x,y,x2-x,y2-y],'detector_confidence':.9,'local_ocr':result})
         return {'panel_detection':{'status':'completed'},'panel_regions':regions,
                 'lines':[l for r in regions for l in r['local_ocr']['lines']],'device':'cpu','status':'completed'}
-    reader.accept(frame,{'sequence':1},app.now(),sample('100','0.0000'))
+    reader.accept(frame,synced(1),app.now(),sample('100','0.0000'))
     assert reader.state['latest_lines']==[] and reader.state['evidence_saved']==0
     tick[0]=.5
-    reader.accept(frame,{'sequence':2},app.now(),sample('101','0.0000'))
+    reader.accept(frame,synced(2),app.now(),sample('101','0.0000'))
     result=wait_for_job(client,reader.state['last_job_id'])
     assert [r['text'] for r in result['readings']]==['0.0000']
     assert result['readings'][0]['binding_id']==bindings[1]['binding_id']
     assert result['readings'][0]['temporal_confirmation']['votes']==2
     tick[0]=1
-    reader.accept(frame,{'sequence':3},app.now(),sample('101','0.0000'))
+    reader.accept(frame,synced(3),app.now(),sample('101','0.0000'))
     result=wait_for_job(client,reader.state['last_job_id'])
     assert [r['text'] for r in result['readings']]==['101']
     assert result['readings'][0]['binding_id']==bindings[0]['binding_id']

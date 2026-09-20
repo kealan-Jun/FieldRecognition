@@ -3,14 +3,15 @@
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>现场识别 · 设备绑定与面板读数</title>
-<link rel="icon" href="/static/BrandLogo.png"><link rel="stylesheet" href="/static/style.css?v=22a8146a128b">
+<link rel="icon" href="/static/BrandLogo.png"><link rel="stylesheet" href="/static/style.css?v=multicamera-20260920">
 </head>
 <body>
 <aside>
-  <a class="brand" href="#workspace"><span class="logo-tile"><img src="/static/BrandLogo.png" alt=""></span><span>现场识别<small>FIELD RECOGNITION</small></span></a>
+  <a class="brand" href="#cameras"><span class="logo-tile"><img src="/static/BrandLogo.png" alt=""></span><span>现场识别<small>FIELD RECOGNITION</small></span></a>
   <div class="section-label">设备工作台</div>
   <nav aria-label="主要导航">
-    <a class="nav active" href="#workspace">◉ 扫码与读数</a>
+    <a class="nav active" href="#cameras">◉ 多相机工作台</a>
+    <a class="nav" href="#workspace">▣ 相机详情</a>
     <a class="nav" href="#registry">▤ 仪器登记</a>
     <a class="nav" href="#history">◷ 操作记录</a>
     <a class="nav" href="/photo-measurements">▤ 拍照测量草稿</a>
@@ -18,13 +19,18 @@
   <div class="aside-note"><span class="dot"></span> 本地识别服务</div>
 </aside>
 <main>
-<header><div><span class="eyebrow">FIELD RECOGNITION</span><h1 id="pageTitle">扫码与读数</h1></div><div class="header-status"><span class="pill" id="cameraState">设备连接待配置</span><button class="quiet" id="refresh">刷新状态</button></div></header>
+<header><div><span class="eyebrow">FIELD RECOGNITION</span><h1 id="pageTitle">多相机工作台</h1></div><div class="header-status"><label class="camera-picker">查看相机<select id="cameraSelect" aria-label="选择要查看详情的相机"><option value="">正在读取相机列表…</option></select></label><span class="pill" id="cameraState">设备连接待配置</span><button class="quiet" id="refresh">刷新状态</button></div></header>
 <div id="message" role="status" aria-live="polite" hidden></div>
+<section id="cameras" class="page-view">
+  <div class="camera-overview-intro"><p>拿起任意一台已登记相机，对准仪器码即可自动绑定。各相机同时运行，画面、绑定和产出分别显示，无需切换。</p><p class="caption">同一仪器码在有效绑定期间只能由一台相机占用；关闭网页后后台继续运行。</p><p id="cameraOverviewStatus" class="caption" role="status">正在读取全部相机…</p></div>
+  <div id="cameraCards" class="camera-grid"></div>
+</section>
 <div id="workspace" class="page-view">
   <section class="card automation-card">
     <div class="automation-overview"><div><strong id="operatorSummary">请先登记实验员</strong><p id="automationDetail" role="status" aria-live="polite">正在读取配置</p></div><span class="pill" id="automationState">正在检查</span></div>
     <details id="operatorSettings"><summary>实验员登记与运行设置</summary>
       <div class="automation-controls"><label class="field">实验员姓名或编号<input id="operator" placeholder="由使用者填写" maxlength="80" autocomplete="off"></label><button id="autoEnable" class="primary">保存并开启自动运行</button><button id="autoPause" class="quiet">暂停自动扫码</button></div>
+      <div id="cameraPersonnel" hidden><label class="field">本次实际使用人员<select id="cameraMember"><option value="">请选择本次使用人员</option></select></label><details><summary>设备可使用人员名单</summary><p class="caption">登记使用资格后，再明确选择本次使用人员。更换人员会保留原使用时段和历史读数。</p><label class="field">已有人员编号<input id="cameraMemberId" maxlength="100" autocomplete="off"></label><button id="addCameraMember" class="quiet">登记设备使用资格</button><button id="removeCameraMember" class="quiet">取消所选人员资格</button><p class="caption">名单管理遵守管理员权限；取消资格保留历史记录。</p></details></div>
       <p id="operatorRegistration" class="caption"></p><p class="caption">关闭网页后后台仍会继续运行。</p>
     </details>
   </section>
@@ -63,5 +69,5 @@
 <p id="archiveStatus" class="caption" role="status">正在检查 NAS 留存</p><p class="caption"><a href="/api/archive/files/00_归档导航.html" target="_blank" rel="noopener">打开 NAS 中文归档 ↗</a> · <a href="/api/archive/files/Readme.html" target="_blank" rel="noopener">完整历史版本 ↗</a> · <span id="integrityStatus">正在读取巡检状态</span></p><div id="historyRows" class="empty-text">正在读取记录</div></section>
 <footer>FieldRecognition <span>现场设备识别与面板读数</span></footer>
 </main>
-<script src="/static/auth-session.js?v=direct-access-1"></script><script src="/static/readout-view.js?v=20260916-1"></script><script src="/static/app.js?v=readout-revisions-20260916"></script>
+<script src="/static/auth-session.js?v=direct-access-1"></script><script src="/static/readout-view.js?v=20260916-1"></script><script src="/static/app.js?v=multicamera-20260920"></script><script src="/static/cameras.js?v=multicamera-20260920"></script>
 </body></html>

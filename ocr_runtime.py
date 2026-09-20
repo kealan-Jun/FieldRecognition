@@ -36,6 +36,9 @@ def configured_device():
 
 
 def create_model(device):
+    if os.environ.get('FIELD_OCR_SERVICE_URL'):
+        from remote_ocr import RemoteOcr
+        return RemoteOcr()
     options = local_model_options()
     if device.startswith('gpu:'):
         # Set before Paddle is imported. Allocate as needed alongside other GPU services.

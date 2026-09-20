@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from archive_store import ArchiveStore, immutable_write
+from archive_store import ArchiveStore, immutable_write, receipt_status
 from archive_integrity import relative_file
 from test_demo import app_client, register, scan  # noqa: F401
 
@@ -39,6 +39,50 @@ def test_original_photo_and_decoding_evidence_are_archived(archive):
     assert record['artifacts']['original']['sha256'] == capture['source_sha256']
     assert client.get('/api/state').json()['archive']['pending_receipts'] == 0
     assert (root / 'Readme.html').is_file() and (root / '.System/Index.json').is_file()
+
+
+def test_archive_reports_progress_during_index_build(archive):
+    from archive_progress import observe
+    app, client, root = archive
+    scan(client)
+    updates = []
+    with observe(updates.append, interval=0):
+        app.archive_store.step()
+    verified = [p for p in updates if p.get('work_phase') == 'checking_receipts']
+    assert verified and verified[-1]['progress_current'] == verified[-1]['progress_total']
+    assert (root / '.System/Index.json').is_file()
+
+
+def test_archive_progress_is_scoped_and_never_a_background_timer(monkeypatch):
+    import archive_progress as progress
+    import threading
+    now = [0]
+    monkeypatch.setattr(progress.time, 'monotonic', lambda: now[0])
+    updates = []
+    with progress.observe(updates.append):
+        progress.advance('checking_receipts', 1, 3)
+        assert updates == []
+        now[0] = 1000  # Time alone is not proof of forward progress.
+        thread = threading.Thread(target=progress.advance)
+        thread.start(); thread.join()
+        assert updates == []
+        progress.advance('checking_receipts', 2, 3)
+        assert updates == [{'work_phase':'checking_receipts','progress_current':2,'progress_total':3}]
+    now[0] += 1000
+    progress.advance('checking_receipts', 3, 3)
+    assert len(updates) == 1
+
+
+def test_empty_directory_cleanup_does_not_follow_symlinks(tmp_path):
+    from archive_paths import empty_directories
+    root = tmp_path / 'Archive'; root.mkdir()
+    (root / 'Empty' / 'Nested').mkdir(parents=True)
+    outside = tmp_path / 'Outside'; outside.mkdir()
+    (outside / 'Keep').mkdir()
+    (root / 'Linked').symlink_to(outside, target_is_directory=True)
+    empty_directories(root)
+    assert root.exists() and not (root / 'Empty').exists()
+    assert (root / 'Linked').is_symlink() and (outside / 'Keep').exists()
 
 
 def test_outbox_rolls_back_with_business_transaction_and_keeps_versions(archive):
@@ -168,3 +212,45 @@ def test_binding_lifecycle_and_ocr_result_retain_linked_photo_and_crop(archive, 
     stored = app.get_job(job['job_id'])
     assert stored['archive']['status'] == 'archived'
     assert stored['archive']['archived_at'] and stored['archive']['archive_queue_ms'] >= 0
+    assert stored['timing']['archive_readable_at'] == stored['archive']['readable_at']
+    assert stored['timing']['durations_ms']['archive_publication_ms'] is not None
+    evidence = [json.loads(p.read_text()) for p in root.glob('*/PhotoReadings/*/Evidence.json')]
+    observation = next(o for e in evidence for o in e.get('observations', []) if o['job_id'] == job['job_id'])
+    assert observation['timing']['archive_readable_at'] == stored['archive']['readable_at']
+
+
+def test_archive_status_separates_receipt_publication_and_readability(archive):
+    app, client, root = archive
+    capture = scan(client)
+    app.archive_store.step(batch_size=100)
+    with app.db() as conn:
+        row = conn.execute("SELECT * FROM archive_outbox WHERE entity='scans' AND entity_id=? ORDER BY seq DESC LIMIT 1",
+                           (capture['scan_id'],)).fetchone()
+        status = receipt_status(conn, 'scans', capture['scan_id'])
+    assert row['archived_at'] and row['published_at'] and row['readable_at']
+    assert row['readability_basis'] == 'archive_writer_derived_views_published'
+    assert status['published_at'] == row['published_at'] and status['readable_at'] == row['readable_at']
+    index = json.loads((root / '.System/Index.json').read_text())
+    item = next(item for item in index['items'] if item['entity'] == 'scans' and item['entity_id'] == capture['scan_id'])
+    assert item['archive_published_at'] == row['published_at']
+    assert item['archive_readable_at'] == row['readable_at']
+
+
+def test_readability_retries_after_interrupted_views_without_fabricating_legacy_times(archive, monkeypatch):
+    app, client, root = archive
+    old = scan(client)
+    app.archive_store.step(batch_size=100)
+    with app.db() as conn:
+        conn.execute('UPDATE archive_outbox SET published_at=NULL,readable_at=NULL,readability_basis=NULL')
+    fresh = scan(client)
+    with monkeypatch.context() as patch:
+        patch.setattr(app.archive_store, 'write_index', lambda: None)
+        app.archive_store.step(batch_size=100)
+    with app.db() as conn:
+        pending = receipt_status(conn, 'scans', fresh['scan_id'])
+        assert pending['published_at'] and pending['readable_at'] is None
+    app.archive_store.step(batch_size=100)
+    with app.db() as conn:
+        assert receipt_status(conn, 'scans', fresh['scan_id'])['readable_at']
+        legacy = receipt_status(conn, 'scans', old['scan_id'])
+        assert legacy['published_at'] is None and legacy['readable_at'] is None

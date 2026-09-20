@@ -132,6 +132,28 @@ def test_cookie_csrf_and_foreign_image_access(managed):
     assert client.post('/api/auth/logout',json={},headers={'x-csrf-token':csrf}).status_code==200
 
 
+def test_device_directory_hides_foreign_camera_occupancy(managed):
+    app, client, auth, admin, operator = managed
+    with app.db() as conn:
+        instrument = conn.execute('SELECT id FROM instruments ORDER BY id LIMIT 1').fetchone()['id']
+        conn.execute('INSERT INTO bindings(id,camera,ended,document) VALUES(?,?,?,?)',
+                     ('foreign-binding', 'cam-b', None, json.dumps({
+                         'binding_id': 'foreign-binding', 'camera_id': 'cam-b',
+                         'instrument': {'id': instrument}})))
+
+    operator_token, _ = auth.login('alice', 'test-password')
+    operator_devices = client.get('/api/devices', headers={'Authorization': 'Bearer ' + operator_token.id})
+    assert operator_devices.status_code == 200
+    foreign = next(item for item in operator_devices.json()['items'] if item['device_id'] == instrument)
+    assert foreign['active_binding_id'] is None and foreign['active_camera_id'] is None
+
+    admin_token, _ = auth.login('admin', 'correct horse battery')
+    admin_devices = client.get('/api/devices', headers={'Authorization': 'Bearer ' + admin_token.id})
+    admin_foreign = next(item for item in admin_devices.json()['items'] if item['device_id'] == instrument)
+    assert admin_foreign['active_binding_id'] == 'foreign-binding'
+    assert admin_foreign['active_camera_id'] == 'cam-b'
+
+
 def test_configured_display_classes_and_ambiguous_type_do_not_guess():
     from panel_layout import normalize_classes,resolve_type_boxes,roles_for_boxes
     config=normalize_classes({'7':{'name':'temperature_speed','layout':'horizontal_pair','measurements':['温度','转速'],'type_id':'stirrer'}})
@@ -140,6 +162,32 @@ def test_configured_display_classes_and_ambiguous_type_do_not_guess():
     assert all(b['instrument_id'] is None for b in ambiguous)
     unique=resolve_type_boxes(boxes,['a'],lambda _: {'type_id':'stirrer'})
     assert set(roles_for_boxes(unique).values())=={'温度','转速'}
+
+
+def test_stirrer_registration_migration_seeds_class_zero_units(database):
+    with database.connection() as conn:
+        conn.execute('''INSERT INTO instruments(id,name,scene,model,measurement_ranges,type_id)
+                        VALUES(?,?,?,?,?,?)''',
+                     ('e9434a0a-3319-414a-b988-4cc6884edce4','称量仪器 A','湿实验实验台','', '{}', None))
+        conn.execute('''INSERT INTO instruments(id,name,scene,model,measurement_ranges,type_id)
+                        VALUES(?,?,?,?,?,?)''',
+                     ('eae17924-9fa7-4445-ac45-3987f5687be9','称量仪器 B','湿实验实验台','', '{}', None))
+    # The fixture already applied all migrations; use a pre-v11 database to
+    # exercise the migration body without touching the repository runtime DB.
+    with database.connection() as conn:
+        conn.execute('DELETE FROM schema_migrations WHERE version=11')
+    from database import MIGRATIONS
+    migration = next(item for item in MIGRATIONS if item['version'] == 11)
+    from database import execute_script
+    with database.transaction('IMMEDIATE') as conn:
+        execute_script(conn, migration['up'])
+    with database.connection() as conn:
+        stirrer = conn.execute('SELECT * FROM instruments WHERE id=?',
+                               ('e9434a0a-3319-414a-b988-4cc6884edce4',)).fetchone()
+        assert stirrer['name'] == '搅拌器 A' and stirrer['type_id'] == 'builtin-stirrer-v1'
+        assert json.loads(stirrer['measurement_ranges']) == {
+            '温度': {'unit':'°C','range':[None,None]}, '转速': {'unit':'rpm','range':[None,None]}}
+        assert conn.execute("SELECT 1 FROM instrument_types WHERE id='builtin-stirrer-v1'").fetchone()
 
 
 def test_ipc_roundtrip_is_scoped_and_has_no_network_listener(tmp_path,monkeypatch):

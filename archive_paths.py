@@ -5,7 +5,9 @@ readers accept the old location until the atomic rename has completed.
 """
 import hashlib
 import json
+import os
 from pathlib import Path, PurePosixPath
+from archive_progress import advance
 
 LEDGER = '.System/MigrationMap.json'
 
@@ -18,6 +20,7 @@ def checked(root, relative):
         raise ValueError('Invalid archive path')
     path = (root / relative).resolve()
     path.relative_to(root.resolve())
+    advance()
     return path
 
 
@@ -146,7 +149,10 @@ class ArchivePaths:
             path = checked(self.root, relative)
             if relative not in views and path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == digest:
                 path.unlink()
-        for relative, raw in views.items():
+        # Result files precede Evidence manifests. This is a publication order,
+        # not an atomic multi-file transaction; readers must verify manifest hashes.
+        ordered = sorted(views.items(), key=lambda item: PurePosixPath(item[0]).name == 'Evidence.json')
+        for relative, raw in ordered:
             path = checked(self.root, relative)
             if previous.get(relative) == hashlib.sha256(raw).hexdigest() and path.is_file():
                 continue
@@ -157,9 +163,13 @@ class ArchivePaths:
 
 
 def empty_directories(root):
-    for path in sorted(root.rglob('*'), key=lambda p: len(p.parts), reverse=True):
-        if path.is_dir() and not path.is_symlink():
+    # Yield after each actual directory visit; collecting the whole NAS tree
+    # before reporting progress can exceed the worker watchdog interval.
+    for directory, _, _ in os.walk(root, topdown=False, followlinks=False):
+        path = Path(directory)
+        if path != root and not path.is_symlink():
             try:
                 path.rmdir()
             except OSError:
                 pass
+        advance('removing_empty_directories')

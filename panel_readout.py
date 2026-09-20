@@ -1,6 +1,7 @@
 """One user-requested photograph: resident local OCR first, timed vision fallback."""
 import hashlib
 import json
+import os
 import time
 from concurrent.futures import Future
 from functools import partial
@@ -9,7 +10,7 @@ import cv2
 
 import aliyun_vision as vision
 from panel_regions import needs_fallback, finish as finish_regions
-from readout_timing import update_timing
+from readout_timing import update_timing, record_duration
 
 
 def save(core, document):
@@ -23,6 +24,9 @@ def save(core, document):
         from photo_measurements import refresh
         callback=(lambda conn: refresh(core,conn,document['measurement_id'])) if document.get('measurement_id') else None
         if document['status']=='failed':
+            if document.get('error') == 'InferenceUnavailable':
+                core['task_queue'].defer_task(document['job_id'], document=document)
+                return
             transient=document.get('error') in {'local_ocr_timeout','TimeoutError','OSError','ConnectionError','worker_unavailable'}
             core['task_queue'].fail_task(document['job_id'],document.get('error','ocr_failed'),retry=transient,document=document,refresh=callback)
         else:
@@ -74,7 +78,11 @@ def run(core, document, *, clock=time.monotonic, pause=time.sleep):
         else:
             predictor = partial(core['predict_readout'], binding_snapshots=document.get('all_binding_snapshots', document.get('binding_snapshots', [])),
                                 field_rules=document.get('field_rules')) if 'predict_readout' in core else core['predict_panel']
-            future = core['ocr_pool'].submit(predictor, panel, x, y)
+            def predict_request(pixels, offset_x, offset_y):
+                from remote_ocr import inference_request
+                with inference_request(document['job_id']):
+                    return predictor(pixels, offset_x, offset_y)
+            future = core['ocr_pool'].submit(predict_request, panel, x, y)
         configured = vision.public_config()['available']
         video_elapsed = (document.get('video_observation') or {}).get('no_digits_elapsed_seconds', 0)
         deadline = started + (max(0, vision.no_digits_seconds() - video_elapsed) if configured else 90)
@@ -89,7 +97,9 @@ def run(core, document, *, clock=time.monotonic, pause=time.sleep):
                 break
             if local and (not configured or needs_fallback(local) is None):
                 break
-            remaining = deadline - clock()
+            # An unavailable remote worker must return a durable wait, not trigger
+            # a cloud call or finalize an empty localization before it responds.
+            remaining = (max(deadline, started+75) if os.environ.get('FIELD_OCR_SERVICE_URL') and local is None else deadline) - clock()
             if remaining <= 0:
                 break
             if local and document['phase'] != 'waiting_readout':
@@ -99,7 +109,7 @@ def run(core, document, *, clock=time.monotonic, pause=time.sleep):
         local = result_if_ready()
         if local and local.get('recognition_skipped'):
             document.update(local)
-            document.update(local_ocr=local, outcome='skipped_unbound_or_unlocalized_panel', phase='completed')
+            document.update(local_ocr=local, outcome='processing_failed' if local.get('status') == 'failed' else 'skipped_unbound_or_unlocalized_panel', phase='completed')
             return
         if local and local.get('panel_regions'):
             finish_regions(core, document, local, image, valid=valid, clock=clock, started=started)
@@ -130,7 +140,9 @@ def run(core, document, *, clock=time.monotonic, pause=time.sleep):
                         document.update(phase='extended_reading', fallback={'status': 'running', 'trigger': reason,
                                         'trigger_elapsed_seconds': round(clock() - started + video_elapsed, 3), 'attempted_at': core['now']()})
                         save(core, document)
+                        vision_started = clock()
                         cloud = vision.read_panel(panel)
+                        record_duration(document, 'vision_ms', vision_started, clock())
                         document['fallback'].update(cloud)
                         document['fallback']['finished_at'] = core['now']()
                     else:
@@ -162,12 +174,17 @@ def run(core, document, *, clock=time.monotonic, pause=time.sleep):
             document['capture_association'] = {k:document.get(k) for k in ('instrument','binding_id','instrument_candidates','workbench')}
             document.update(instrument=None, binding_id=None, instrument_candidates=[], binding_ids=[],
                 instrument_association='unbound_photo', instrument_identity_basis='not_localized', association_status='unlocalized')
+        generation_started = clock()
+        document['result_generation_started_at'] = core['now']()
         from reading_results import build_readings
         document['readings'] = build_readings(document)
         from measurement_records import build_records, display_fields
         document['measurement_records'] = build_records(document)
         document['display_fields'] = display_fields(document)
+        document['result_generated_at'] = core['now']()
+        record_duration(document, 'result_generation_ms', generation_started, clock())
         document.update(finished_at=core['now'](), wall_seconds=round(clock() - started, 3))
+        record_duration(document, 'processing_ms', started, clock())
         if future and not document.get('local_ocr'):
             document['local_ocr'] = result_if_ready() or {'status': 'running', 'lines': []}
         save(core, document)

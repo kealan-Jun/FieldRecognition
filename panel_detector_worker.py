@@ -15,25 +15,27 @@ def main():
         from panel_recovery import detect
         settings.update({'sync': False})
         torch.set_num_threads(2)
-        if not torch.cuda.is_available():
+        device = 'cpu' if len(sys.argv) > 4 and sys.argv[4] == 'cpu' else 0
+        if device != 'cpu' and not torch.cuda.is_available():
             raise RuntimeError('GPU unavailable')
         model = YOLO(sys.argv[1])
         imgsz, confidence = int(sys.argv[2]), float(sys.argv[3])
-        model.predict(np.zeros((800, 1280, 3), np.uint8), device=0, imgsz=imgsz, verbose=False)
+        model.predict(np.zeros((800, 1280, 3), np.uint8), device=device, imgsz=imgsz, verbose=False)
     wire.write(json.dumps({'status':'ready', 'names':model.names})+'\n'); wire.flush()
     for request in sys.stdin:
         try:
-            raw = base64.b64decode(json.loads(request)['image'], validate=True)
+            payload = json.loads(request)
+            raw = base64.b64decode(payload['image'], validate=True)
             image = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
             if image is None:
                 raise ValueError('invalid image')
             def infer(pixels, size, threshold):
                 with contextlib.redirect_stdout(sys.stderr):
-                    result = model.predict(pixels, device=0, imgsz=size, conf=threshold, max_det=12, verbose=False)[0]
+                    result = model.predict(pixels, device=device, imgsz=size, conf=threshold, max_det=12, verbose=False)[0]
                 return {'boxes': [{'class_id':int(c), 'confidence':float(s), 'xyxy':b}
                     for b,c,s in zip(result.boxes.xyxy.cpu().tolist(), result.boxes.cls.cpu().tolist(), result.boxes.conf.cpu().tolist())],
                     'speed_ms':result.speed}
-            response = detect(image, infer, imgsz=imgsz, confidence=confidence)
+            response = detect(image, infer, imgsz=imgsz, confidence=confidence, photo=payload.get('photo') is True)
         except Exception as exc:
             response = {'error':type(exc).__name__}
         wire.write(json.dumps(response)+'\n'); wire.flush()

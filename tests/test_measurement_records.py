@@ -10,6 +10,43 @@ from reading_results import build_readings
 from test_demo import app_client, scan, register  # noqa: F401
 
 
+def test_explicit_fixed_decimal_rule_keeps_raw_digits_and_normalization_evidence():
+    from panel_regions import validate_lines, reading_fallback_reason
+    from measurement_records import apply_fixed_decimal
+    instrument={'id':'b','measurement_ranges':{'质量':{'decimal_places':4,'fixed_decimal_display':True}}}
+    for raw,expected in [('02181','0.2181'),('02183','0.2183'),('-02181','-0.2181'),('1115071','111.5071'),('130300','13.0300'),('139330','13.9330')]:
+        line=validate_lines([{'text':raw,'confidence':.9}],'质量',instrument)[0]
+        assert line['text']==raw and line['value']==expected and line['quality_issue'] is None
+        assert line['normalized_value']['value']==float(expected)
+        assert line['normalization']['raw_text']==raw and line['normalization']['instrument_id']=='b'
+        assert line['normalized_value']['unit'] is None  # Precision never supplies a unit.
+        assert reading_fallback_reason([line]) is None
+    for raw in ['0218','002181','2181','0.2181','02181 g','0218I']:
+        assert apply_fixed_decimal('质量',{'text':raw},instrument)=={'text':raw}
+    instrument['measurement_ranges']['质量'].pop('fixed_decimal_display')
+    line=validate_lines([{'text':'02181'}],'质量',instrument)[0]
+    assert line['normalized_value']['value'] is None
+    assert reading_fallback_reason([line]) == 'decimal_uncertain'
+
+
+def test_fixed_decimal_provenance_survives_reading_and_six_field_export():
+    from panel_regions import validate_lines
+    doc=document();region=doc['panel_regions'][-1]
+    region['instrument']['measurement_ranges']={'质量':{'decimal_places':4,'fixed_decimal_display':True}}
+    doc['lines']=validate_lines([{'text':'02181','panel_id':region['panel_id']}],'质量',region['instrument'])
+    doc['readings']=build_readings(doc)
+    result=next(r for r in build_records(doc) if r['instrument_id']=='b')
+    assert result['record']['values'][0]['value']==.2181
+    assert result['evidence']['candidate_readings'][0]['normalization']['method']=='registered_fixed_decimal_v2'
+
+
+def test_fixed_decimal_registration_requires_positive_explicit_precision(app_client):
+    app,_=app_client
+    with pytest.raises(ValueError):app.MeasurementRange(fixed_decimal_display=True)
+    with pytest.raises(ValueError):app.MeasurementRange(fixed_decimal_display=True,decimal_places=0)
+    assert app.MeasurementRange(fixed_decimal_display=True,decimal_places=4).decimal_places==4
+
+
 def document():
     a = {'id':'a','model':'MS-H280-Pro','device_no':'0007',
          'measurement_ranges':{'温度':{'unit':'°C','range':[None,280]}}}
@@ -97,6 +134,42 @@ def test_single_unknown_stirrer_window_does_not_guess_temperature_or_speed():
     assert build_records(doc)==[]
 
 
+def test_stirrer_off_temperature_still_exports_temperature_and_speed():
+    instrument={'id':'stirrer','model':'','measurement_ranges':{
+        '温度':{'unit':'°C','range':[None,None]},
+        '转速':{'unit':'rpm','range':[None,None]}}}
+    doc={'job_id':'job-off','capture_id':'photo-off','status':'completed',
+         'all_binding_snapshots':[{'binding_id':'binding','instrument':instrument}],
+         'panel_regions':[{'panel_id':'temp','class_id':0,'instrument':instrument,
+                           'instrument_id':'stirrer','binding_id':'binding','measurement_name':'温度',
+                           'display_state':{'text':'OFF'}},
+                          {'panel_id':'speed','class_id':0,'instrument':instrument,
+                           'instrument_id':'stirrer','binding_id':'binding','measurement_name':'转速'}],
+         'lines':[{'panel_id':'speed','text':'1140','value':'1140','unit':'rpm'}],
+         'readings':[{'panel_id':'speed','measurement_name':'转速','text':'1140','value':'1140','unit':'rpm',
+                      'instrument':instrument}],
+         'qr_matches':[]}
+    records=build_records(doc)
+    assert len(records)==1
+    assert records[0]['record']['values']==[
+        {'name':'温度','value':None,'unit':'°C','range':[None,None],'display_state':'OFF'},
+        {'name':'转速','value':1140,'unit':'rpm','range':[None,None]}]
+
+    from archive_events import standard_records
+    assert standard_records([{'seq': 1, 'doc': doc}], None)[0]['record'] == records[0]['record']
+    other = copy.deepcopy(doc)
+    other.update(job_id='job-on', capture_id='photo-on')
+    other['panel_regions'][0].pop('display_state')
+    # An unreadable frame cannot corroborate OFF; retain the conflicting evidence.
+    combined = standard_records([{'seq': 1, 'doc': doc}, {'seq': 2, 'doc': other}], None)[0]
+    assert combined['evidence']['conflicting_fields'] == ['温度']
+    assert 'display_state' not in combined['record']['values'][0]
+    corrected = {'fields': [{'instrument': instrument, 'name': '温度', 'value': '72', 'unit': '°C', 'corrected': True}]}
+    revised = standard_records([{'seq': 1, 'doc': doc}], corrected)[0]
+    assert revised['record']['values'][0]['value'] == 72
+    assert 'display_state' not in revised['record']['values'][0]
+
+
 def test_exact_decoded_payload_hash_and_optional_registration_survive_old_form_updates(app_client):
     app,client=app_client
     capture=scan(client);iid=capture['matches'][0]['id'];register(client,iid)
@@ -135,3 +208,15 @@ def test_archive_writes_one_exact_measurement_file_per_instrument_with_shared_ph
         assert set(record)=={'wearer_id','device_model','device_no','qr_hash','photo_time','values'}
     assert index['photos']['image']['sha256']=='a'*64
     assert len([p for p in views if p.endswith('/Record.json') and '/Jobs/' in p])==1
+
+
+def test_fixed_decimal_cloud_output_keeps_unit_and_conflict_checks():
+    from panel_regions import validate_lines
+    instrument={'id':'b','measurement_ranges':{'质量':{'decimal_places':4,'fixed_decimal_display':True,'unit':'g'}}}
+    line=validate_lines([{'text':'130300','value':'130300','unit':'g','reading_source':'vision'}],'质量',instrument)[0]
+    assert line['value']=='13.0300' and line['text']=='130300'
+    assert line['normalized_value']['value']==13.03 and line['normalized_value']['unit']=='g'
+    conflict=validate_lines([{'text':'130300','value':'130300','unit':'kg'}],'质量',instrument)[0]
+    assert conflict['normalized_value']['value'] is None and conflict['quality_issue']=='unit_conflict'
+    explicit=validate_lines([{'text':'8.141','value':'8.141'}],'质量',instrument)[0]
+    assert explicit['normalized_value']['value'] is None and explicit['quality_issue']=='display_precision_mismatch'

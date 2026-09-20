@@ -190,6 +190,10 @@
             "null"
           ]
         },
+        "display_state": {
+          "const": "OFF",
+          "description": "明确识别的屏幕状态；存在时 value 为 null，不表示数值零。"
+        },
         "unit": {
           "type": [
             "string",
@@ -205,6 +209,13 @@
               "number",
               "null"
             ]
+          }
+        }
+      },
+      "dependentSchemas": {
+        "display_state": {
+          "properties": {
+            "value": {"type": "null"}
           }
         }
       }

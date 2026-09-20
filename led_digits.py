@@ -1,7 +1,8 @@
 """Bounded pixel check for integer digits on red seven-segment displays.
 
 This is an independent geometry check, not a measured OCR accuracy score.
-Narrow, fragmented, signed or decimal glyphs remain with the existing reader.
+Separated red bars use a second bounded geometry check. Signed, decimal and
+status displays remain with the existing reader.
 """
 import copy
 import re
@@ -64,7 +65,42 @@ def segment_check(crop, digits):
 def verify_digits(image, local, x=0, y=0):
     lines = local.get('lines', [])
     region = local.get('digit_region') or {}
-    if len(lines) != 1 or region.get('status') != 'located':
+    if region.get('status') != 'located':
+        return local
+    if lines and (len(lines) != 1 or not re.fullmatch(r'\d{2,6}', lines[0].get('text', '').strip())):
+        return local
+    raw_lines = [line for key in ('panel_ocr', 'digit_ocr', 'digit_ocr_check')
+                 for line in local.get(key, {}).get('lines', [])]
+    texts = [line.get('text', '').strip() for line in raw_lines or lines]
+    if any(re.search(r'[+\-.,°/]', text) or text.upper() == 'OFF' for text in texts):
+        return local
+    from red_segments import check as check_fragmented, corroborates
+    fragmented = check_fragmented(image)
+    if fragmented['status'] in {'consistent', 'disagreement'}:
+        output = copy.deepcopy(local)
+        output.update(digit_segment_check=fragmented, pre_segment_lines=copy.deepcopy(lines),
+                      digit_consistency_before_segments=copy.deepcopy(local.get('digit_consistency')))
+        numeric = [text for text in texts if re.fullmatch(r'\d{1,6}', text)]
+        resolved = fragmented['status'] == 'consistent' and corroborates(fragmented['text'], numeric)
+        output['digit_consistency'] = {'status': 'resolved' if resolved else 'disagreement',
+            'candidates': list(dict.fromkeys(texts)), 'basis': fragmented['rule_version']}
+        output['lines'] = []
+        if resolved:
+            # Preserve the measured original-pixel window and all previous OCR
+            # attempts. Never copy a neighbouring photo's reading or confidence.
+            left, top, width, height = fragmented['crop']
+            polygon = [[left+x, top+y], [left+x+width-1, top+y],
+                       [left+x+width-1, top+y+height-1], [left+x, top+y+height-1]]
+            value = fragmented['text']
+            output['digit_region_before_segments'] = copy.deepcopy(region)
+            output['digit_region'] = {'status': 'located', 'method': fragmented['rule_version'],
+                'polygon': polygon, 'size': [width*3, height*3], 'initial_text': texts[0] if texts else None,
+                'refined_readout_available': True}
+            output['lines'] = [{'text': value, 'value': value, 'numeric_candidates': [value],
+                'confidence': None, 'polygon': polygon, 'reading_source': 'led_segment_check',
+                'original_ocr_text': texts[0] if texts else None}]
+        return output
+    if len(lines) != 1:
         return local
     original = lines[0].get('text', '').strip()
     if not re.fullmatch(r'\d{2,6}', original):

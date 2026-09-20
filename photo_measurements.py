@@ -13,7 +13,7 @@ from fastapi import HTTPException
 from fastapi.responses import FileResponse
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, FiniteFloat
 
-from measurement_records import number, unit_evidence, field_issues, measurement_value
+from measurement_records import number, unit_evidence, field_issues, measurement_value, binding_for_region
 
 RULE_VERSION = 'photo-measurement/3'
 TERMINAL = {'completed', 'failed', 'cancelled', 'interrupted'}
@@ -72,7 +72,7 @@ def versions():
             pass
     return {'rules': RULE_VERSION, 'packages': packages,
         'code_sha256': {name: hashlib.sha256((base / name).read_bytes()).hexdigest()
-            for name in ('photo_measurements.py', 'panel_regions.py', 'digit_regions.py', 'led_digits.py', 'panel_layout.py',
+            for name in ('photo_measurements.py', 'panel_regions.py', 'digit_regions.py', 'led_digits.py', 'red_segments.py', 'panel_layout.py',
                          'reading_results.py', 'measurement_records.py', 'ocr_runtime.py',
                          'readout_context.py', 'instrument_ownership.py', 'binding_policy.py', 'result_reprocessing.py')}}
 
@@ -125,17 +125,24 @@ def check_retry(job, context, mode):
 def candidates(jobs):
     fields = {}
     for job in jobs:
-        regions = {r['panel_id']: r for r in job.get('panel_regions', [])}
+        regions = {r['panel_id']: r for r in job.get('panel_regions', []) if binding_for_region(job, r) is not None}
         readings = copy.deepcopy(job.get('readings', []))
         # Preserve a visible but unreadable region so it can be explicitly corrected.
         for pid, region in regions.items():
             if not any(r.get('panel_id') == pid for r in readings):
                 readings.append({'panel_id': pid, 'instrument': region.get('instrument'),
                     'measurement_name': region.get('measurement_name'), 'value': None,
-                    'binding_id': region.get('binding_id'), 'quality_issue': 'unreadable'})
+                    'text': (region.get('display_state') or {}).get('raw_text') or (region.get('display_state') or {}).get('text'),
+                    'binding_id': region.get('binding_id'),
+                    'quality_issue': None if region.get('display_state') else 'unreadable'})
         for reading in readings:
             region = regions.get(reading.get('panel_id'), {})
+            if job.get('panel_detection') and not region:
+                continue
             asset = reading.get('instrument') or {}
+            if region and ((region.get('instrument') or {}).get('id') != asset.get('id')
+                           or reading.get('binding_id', region.get('binding_id')) != region.get('binding_id')):
+                continue
             iid, name = asset.get('id'), reading.get('measurement_name')
             key = (iid, name, None if name else reading.get('panel_id') or reading.get('reading_id'))
             fid = hashlib.sha256(json.dumps(key).encode()).hexdigest()[:20]
@@ -149,26 +156,37 @@ def candidates(jobs):
             field['original_candidates'].append({'job_id': job['job_id'], 'capture_id': job['capture_id'],
                 'image_sha256': job.get('image_sha256'),
                 'raw_text': reading.get('text'), 'raw_value': reading.get('value'), 'value': measurement_value(name, reading, asset)[0]['value'],
+                'display_state':(region.get('display_state') or {}).get('text'),
+                'display_state_source':region.get('display_state'),
                 'unit': unit, 'unit_basis': unit_basis,
                 'quality_issue': next(iter(field_issues(name, reading, asset)), None), 'panel_id': reading.get('panel_id'),
                 'bbox': region.get('bbox'), 'polygon': reading.get('polygon'), 'digit_region': region.get('digit_region'),
                 'panel_image_url': region.get('image_url'), 'panel_image_sha256': region.get('image_sha256'),
                 'confidence': reading.get('confidence'), 'confidence_basis': 'model_score_not_measured_accuracy',
+                'clarity':reading.get('clarity'),
                 'qr_hash': digest if re.fullmatch('[a-f0-9]{64}', digest or '') else None,
                 'qr_scan_id': job['capture_id'] if qr else binding.get('scan_id'),
                 'qr_conflict': bool(job.get('qr_matches')) and iid not in {q['id'] for q in job['qr_matches']},
+                'operator':binding.get('operator'), 'wearer_id':binding.get('wearer_id'),
                 'identity_basis': reading.get('association_basis'), 'binding_id': reading.get('binding_id')})
     for field in fields.values():
         rows = field['original_candidates']
         unique = {(r['value'], r['unit']) for r in rows if r['value'] is not None}
+        states = {r.get('display_state') for r in rows}
+        state_conflict = any(states) and (len(states) > 1 or bool(unique))
+        session_conflict = len({(r.get('binding_id'),r.get('operator'),r.get('wearer_id')) for r in rows}) > 1
         units = {r['unit'] for r in rows}
-        field.update(value=next(iter(unique))[0] if len(unique) == 1 else None,
+        field.update(value=next(iter(unique))[0] if len(unique) == 1 and not state_conflict and not session_conflict else None,
+            display_state=next(iter(states)) if len(states) == 1 and not unique and not session_conflict else None,
             unit=next(iter(units)) if len(units) == 1 else None,
-            agreement={'matching_photos': len({r['image_sha256'] or r['capture_id'] for r in rows if r['value'] is not None}) if len(unique) == 1 else 0,
+            agreement={'matching_photos': len({r['image_sha256'] or r['capture_id'] for r in rows if r['value'] is not None}) if len(unique) == 1 and not state_conflict and not session_conflict else 0,
                        'photos_with_region': len({r['capture_id'] for r in rows}),
                        'basis': 'exact_value_and_unit_agreement', 'accuracy': None})
+        field['display_value'] = next((r['raw_value'] for r in rows if r['value'] == field['value']), None) if field['value'] is not None else None
         issues = []
-        if len(unique) > 1:
+        if session_conflict:
+            issues.append('跨使用时段或实际人员的读数不能合并')
+        if len(unique) > 1 or state_conflict:
             issues.append('多图读数或单位冲突')
         if any(r['quality_issue'] for r in rows):
             issues.append('存在不可读或格式异常的原始结果')
@@ -202,9 +220,11 @@ def blockers(group):
         iid = (field.get('instrument') or {}).get('id')
         if not iid or field.get('name') not in UNITS:
             issues.append(prefix + '需要指定仪器及指标')
-        if field.get('value') is None:
+        if field_binding_issue(group, field):
+            issues.append(prefix + '缺少采集时有效绑定，不能确认仪器归属')
+        if field.get('value') is None and field.get('display_state') != 'OFF':
             issues.append(prefix + '需要校正数值')
-        if field.get('unit') not in UNITS.get(field.get('name'), set()):
+        if field.get('display_state') != 'OFF' and field.get('unit') not in UNITS.get(field.get('name'), set()):
             issues.append(prefix + '单位不符或未知')
         if field_issues(field.get('name'), field | {'corrected':True}, field.get('instrument') or {}):
             issues.append(prefix + '数值不符合仪器登记的单位、量程或显示精度')
@@ -216,6 +236,56 @@ def blockers(group):
             issues.append(prefix + '同一仪器指标存在重复字段，请重新采集清晰区域')
         seen.add(key)
     return list(dict.fromkeys(issues))
+
+
+def field_binding_issue(group, field):
+    """A reviewer may correct digits, but cannot grant historical occupancy."""
+    iid = (field.get('instrument') or {}).get('id')
+    captures = {r.get('capture_id') for r in field.get('original_candidates', [])}
+    sources = [s for s in group.get('sources', []) if s.get('capture_id') in captures]
+    if not iid or not captures or len(sources) != len(captures):
+        return 'historical_binding_missing'
+    sessions = set()
+    for source in sources:
+        at = group.get('capture_time_corrections', {}).get(source['capture_id']) or source.get('captured_at')
+        if not at or source.get('attribution_status') == 'needs_review':
+            return 'capture_attribution_unconfirmed'
+        eligible = []
+        for binding in source.get('binding_snapshots', []):
+            if (binding.get('instrument') or {}).get('id') != iid:
+                continue
+            region = {'instrument':binding['instrument'], 'binding_id':binding.get('binding_id')}
+            document = {'camera_id':group.get('camera_id'), 'external_photo':{'captured_at':at},
+                        'binding_snapshots':source.get('binding_snapshots', [])}
+            if binding_for_region(document, region) is not None:
+                eligible.append(binding)
+        if len(eligible) != 1:
+            return 'historical_binding_missing' if not eligible else 'ambiguous_binding_history'
+        binding = eligible[0]
+        sessions.add((binding.get('binding_id'), binding.get('operator'), binding.get('wearer_id')))
+    if len(sessions) > 1:
+        return 'binding_session_conflict'
+    return None
+
+
+def instrument_completeness(group):
+    """Reviewing a subset of fields does not claim that a whole panel was read."""
+    expected = {}
+    for source in group.get('sources', []):
+        for region in source.get('panel_regions', []):
+            iid = (region.get('instrument') or {}).get('id')
+            names = ['温度','转速'] if region.get('class_id') == 0 else ['质量'] if region.get('class_id') == 1 else []
+            if iid and names:
+                expected.setdefault(iid, names)
+    result = []
+    for iid, names in expected.items():
+        fields = [f for f in group.get('fields', []) if (f.get('instrument') or {}).get('id') == iid]
+        present = {f['name'] for f in fields if (f.get('value') is not None and f.get('unit') in UNITS.get(f['name'],set()) or f.get('display_state') == 'OFF')
+                   and not field_binding_issue(group, f)}
+        missing = [name for name in names if name not in present]
+        result.append({'instrument_id':iid, 'expected_fields':names, 'missing_fields':missing,
+                       'status':'incomplete' if missing else 'complete'})
+    return result
 
 
 def verify_evidence(core, group):
@@ -275,6 +345,7 @@ def refresh(core, conn, mid):
             'operator': job.get('operator'), 'operator_registration': job.get('operator_registration'),
             'binding_snapshots': job.get('all_binding_snapshots', job.get('binding_snapshots', [])),
             'binding_time_basis': job.get('binding_time_basis'), 'ownership_conflicts': job.get('ownership_conflicts', []),
+            'attribution_status':job.get('attribution_status'), 'attribution_reason':job.get('attribution_reason'),
             'image_url': capture['image_url'], 'image_sha256': capture['image_sha256'],
             'original_blob': capture.get('original_blob'), 'source_sha256': capture.get('source_sha256'),
             'original_url': f"/api/captures/{job['capture_id']}/original",
@@ -292,6 +363,7 @@ def refresh(core, conn, mid):
         return
     group['revision'] += 1
     group['updated_at'] = core['now']()
+    group['instrument_completeness'] = instrument_completeness(group)
     group['blockers'] = blockers(group)
     conn.execute('UPDATE photo_measurements SET status=?,document=? WHERE id=?',
         (group['status'], json.dumps(group), mid))
@@ -322,6 +394,7 @@ def install(core):
     def store(conn, group):
         group['revision'] += 1
         group['updated_at'] = core['now']()
+        group['instrument_completeness'] = instrument_completeness(group)
         group['blockers'] = blockers(group)
         conn.execute('UPDATE photo_measurements SET status=?,document=? WHERE id=?',
             (group['status'], json.dumps(group), group['measurement_id']))
@@ -389,7 +462,7 @@ def install(core):
                 if field_issues(change.name, {'value': change.value, 'unit': change.unit, 'corrected': True}, asset):
                     raise HTTPException(422, '校正值不符合仪器登记的单位、量程或显示精度')
                 field.update(instrument=asset, name=change.name, value=change.value, unit=change.unit,
-                    corrected=True, identity_basis='user_correction')
+                    corrected=True, identity_basis='user_correction', display_state=None, display_value=str(change.value))
             if not set(body.capture_times) <= {s['capture_id'] for s in group['sources']}:
                 raise HTTPException(422, '采集时间必须对应本次测量的照片')
             if body.experiment_context_ref:
@@ -429,6 +502,7 @@ def install(core):
             group['record_id'] = record_id
             record = copy.deepcopy(group) | {'record_id': record_id, 'record_scope': 'production_confirmed',
                 'confirmed_fields': [{k: f[k] for k in ('field_id', 'instrument', 'name', 'value', 'unit')}
+                                     | ({'display_state':f['display_state']} if f.get('display_state') else {})
                                      for f in group['fields']]}
             conn.execute('INSERT INTO experiment_records(id,document) VALUES(?,?)', (record_id, json.dumps(record)))
             store(conn, group)

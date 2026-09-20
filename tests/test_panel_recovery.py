@@ -59,3 +59,23 @@ def test_affine_coordinates_return_to_source_and_clip_to_image():
     matrix=np.asarray([[1,0,12],[0,1,-5]],np.float32)
     assert source_box([17,15,27,25],matrix,100,100)==[5,20,15,30]
     assert source_box([-10,-10,120,120],None,100,100)==[0,0,100,100]
+
+
+def test_photo_closeup_maps_two_scale_consensus_back_to_source():
+    import cv2
+    image=np.full((100,100,3),(20,20,180),np.uint8);calls=[]
+    target=[[10,30,35,55],[55,30,85,55]]
+    def infer(pixels,size,threshold):
+        calls.append(1)
+        if len(calls)<=4:return {'boxes':[]}
+        scale=.35 if len(calls)==5 else .45
+        boxes=[box(coords=[50+(x-50)*scale,50+(y-50)*scale,50+(ex-50)*scale,50+(ey-50)*scale]) for x,y,ex,ey in target]
+        # Complete primary detections skip the ordinary exposure passes.
+        return {'boxes':boxes+[box(class_id=1)]}
+    result=detect(image,infer,photo=True)
+    assert len(calls)==6
+    assert len(result['boxes'])==2
+    for got,want in zip(result['boxes'],target):
+        assert got['localization_method']=='photo_closeup_scale_v1'
+        assert np.allclose(got['xyxy'],want,atol=1e-4)
+        assert got['supporting_views']==[.35,.45]

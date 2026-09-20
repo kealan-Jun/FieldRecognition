@@ -31,28 +31,43 @@ def stop_child(child):
     except subprocess.TimeoutExpired:child.kill();child.wait(timeout=5)
 
 
+def capture_stalled(pid, row, progress, now, timeout=120):
+    """Only a new heartbeat from this child extends its monotonic deadline."""
+    if row is not None:
+        document = json.loads(row['document'])
+        if document.get('pid') == pid and row['updated_at'] != progress.get('stamp'):
+            progress.update(stamp=row['updated_at'], seen=now)
+    return now - progress['seen'] > timeout
+
+
 def run():
     data=Path(os.environ.get('FIELD_DEMO_DATA','Data')).resolve()
     db=Database(os.environ.get('FIELD_DATABASE_PATH',str(data/'Demo.sqlite3')))
-    stop=threading.Event();children={};retry={}
+    stop=threading.Event();children={};retry={};progress={}
     for sig in (signal.SIGTERM,signal.SIGINT):signal.signal(sig,lambda *_:stop.set())
     with process_lock(data,'camera-supervisor'):
         try:
             while not stop.is_set():
                 with db.connection() as conn:
-                    rows=conn.execute('SELECT c.*,u.id user_id,u.display_name FROM camera_registry c JOIN camera_users a USING(camera_id) JOIN users u ON u.id=a.user_id WHERE c.enabled=1 AND u.disabled=0').fetchall()
+                    rows=conn.execute('''SELECT c.*,u.id user_id,u.display_name FROM camera_registry c
+                                         JOIN camera_active_users a USING(camera_id) JOIN users u ON u.id=a.user_id
+                                         WHERE c.enabled=1 AND u.disabled=0''').fetchall()
+                    statuses={r['name']:dict(r) for r in conn.execute("SELECT * FROM runtime_status WHERE name LIKE 'camera:%'")}
                 desired={r['camera_id']:dict(r) for r in rows}
                 for key,(child,fingerprint) in list(children.items()):
                     if key not in desired or fingerprint!=json.dumps(desired[key],sort_keys=True):
                         stop_child(child);del children[key]
                     elif child.poll() is not None:
                         del children[key];retry[key]=time.monotonic()+10
+                    elif capture_stalled(child.pid,statuses.get('camera:'+key),progress[key],time.monotonic()):
+                        stop_child(child);del children[key];retry[key]=time.monotonic()+10
                 for key,row in desired.items():
                     if key in children or time.monotonic()<retry.get(key,0):continue
                     try:
                         env=camera_environment(row,os.environ)
                         process=subprocess.Popen([sys.executable,'-m','capture_worker'],cwd=Path(__file__).parent,env=env)
                         children[key]=(process,json.dumps(row,sort_keys=True))
+                        progress[key]={'seen':time.monotonic()}
                     except (ValueError,OSError):retry[key]=time.monotonic()+30
                 heartbeat(db,'camera-supervisor',{'status':'running','cameras':list(children),'registered':list(desired)})
                 stop.wait(2)

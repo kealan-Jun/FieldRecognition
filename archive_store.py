@@ -11,6 +11,7 @@ import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from readout_timing import elapsed_ms
+from archive_progress import advance
 
 
 TABLES = {'scans': 'id', 'bindings': 'id', 'scene_visits': 'id', 'jobs': 'id', 'automation_settings': 'camera',
@@ -23,10 +24,23 @@ def receipt_status(conn, entity, entity_id, source_written_at=None):
                        (entity, entity_id)).fetchone()
     if not row:
         return {'status': 'not_queued'}
-    return {'status': 'archived' if row['archived_at'] else 'pending', 'sequence': row['seq'],
-            'queued_at': row['recorded_at'], 'archived_at': row['archived_at'], 'receipt_path': row['receipt_path'],
-            'archive_queue_ms': elapsed_ms(row['recorded_at'], row['archived_at']),
-            'write_to_archive_ms': elapsed_ms(source_written_at, row['archived_at'])}
+    keys = row.keys()
+    published_at = row['published_at'] if 'published_at' in keys else None
+    readable_at = row['readable_at'] if 'readable_at' in keys else None
+    readability_basis = row['readability_basis'] if 'readability_basis' in keys else None
+    archived_at = row['archived_at']
+    # Keep the legacy archived_at contract while exposing the explicit
+    # publication/readability milestones. Older rows intentionally stay null.
+    queue_end = published_at or archived_at
+    return {'status': 'archived' if archived_at else 'pending', 'sequence': row['seq'],
+            'queued_at': row['recorded_at'], 'archived_at': archived_at,
+            'published_at': published_at, 'readable_at': readable_at,
+            'archive_published_at': published_at, 'archive_readable_at': readable_at,
+            'readability_basis': readability_basis, 'receipt_path': row['receipt_path'],
+            'archive_queue_ms': elapsed_ms(row['recorded_at'], queue_end),
+            'write_to_archive_ms': elapsed_ms(source_written_at, queue_end),
+            'archive_publication_ms': elapsed_ms(row['recorded_at'], published_at),
+            'archive_readability_ms': elapsed_ms(published_at, readable_at)}
 
 
 def canonical(value):
@@ -44,6 +58,7 @@ def replace_view(path, data):
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+    advance()
 
 
 def immutable_write(path, data):
@@ -53,6 +68,7 @@ def immutable_write(path, data):
     if path.exists():
         if path.read_bytes() != data:
             raise ValueError('Archive content conflict')
+        advance()
         return
     temporary = path.with_name('.' + path.name + '.' + uuid.uuid4().hex + '.tmp')
     try:
@@ -69,6 +85,7 @@ def immutable_write(path, data):
             os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+    advance()
 
 
 class ArchiveStore:
@@ -89,6 +106,7 @@ class ArchiveStore:
                 CREATE TABLE IF NOT EXISTS archive_outbox(
                     seq INTEGER PRIMARY KEY AUTOINCREMENT, entity TEXT NOT NULL, entity_id TEXT NOT NULL,
                     document TEXT NOT NULL, recorded_at TEXT NOT NULL, archived_at TEXT, receipt_path TEXT,
+                    published_at TEXT, readable_at TEXT, readability_basis TEXT,
                     retry_after REAL NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT);
                 CREATE INDEX IF NOT EXISTS archive_entity_version ON archive_outbox(entity,entity_id,seq);
             ''')
@@ -97,6 +115,9 @@ class ArchiveStore:
                                       ('attempts', 'INTEGER NOT NULL DEFAULT 0'), ('last_error', 'TEXT')]:
                 if name not in columns:
                     conn.execute(f'ALTER TABLE archive_outbox ADD COLUMN {name} {declaration}')
+            for name in ('published_at', 'readable_at', 'readability_basis'):
+                if name not in columns:
+                    conn.execute(f'ALTER TABLE archive_outbox ADD COLUMN {name} TEXT')
             conn.execute('INSERT OR IGNORE INTO archive_meta VALUES(?,?)', ('source_instance', str(uuid.uuid4())))
             self.instance = conn.execute("SELECT value FROM archive_meta WHERE key='source_instance'").fetchone()[0]
             for table, key in TABLES.items():
@@ -255,8 +276,19 @@ class ArchiveStore:
         with self.core['db']() as conn:
             rows = conn.execute('SELECT * FROM archive_outbox WHERE archived_at IS NOT NULL ORDER BY seq DESC').fetchall()
         # The verifier cannot observe a file between path resolution and rename.
-        with self.integrity.lock:
-            return rebuild(self, rows)
+        if not self.integrity.lock.acquire(timeout=5):
+            with self.lock:
+                self.status.update(status='waiting_integrity')
+            return None
+        try:
+            started = time.monotonic()
+            result = rebuild(self, rows)
+            with self.lock:
+                self.status['last_view_rebuild'] = {'duration_ms': round((time.monotonic()-started)*1000, 2),
+                    'clock_basis': 'process_monotonic', 'scope': 'whole_archive_derived_views', **result}
+            return result
+        finally:
+            self.integrity.lock.release()
 
     def step(self, batch_size=20):
         if not self.enabled():
@@ -270,6 +302,7 @@ class ArchiveStore:
             if self.stop.is_set():
                 return
             try:
+                publication_started = time.monotonic()
                 relative = self.publish(row)
             except Exception as exc:
                 with self.core['db']() as conn:
@@ -280,21 +313,44 @@ class ArchiveStore:
                 continue
             timestamp = self.core['now']()
             with self.core['db']() as conn:
-                conn.execute('UPDATE archive_outbox SET archived_at=?,receipt_path=?,last_error=NULL WHERE seq=?',
-                             (timestamp, relative, row['seq']))
+                conn.execute('UPDATE archive_outbox SET archived_at=?,published_at=?,receipt_path=?,last_error=NULL WHERE seq=?',
+                             (timestamp, timestamp, relative, row['seq']))
             with self.lock:
                 self.status.update(last_archived_at=timestamp)
+                doc = json.loads(row['document'])
+                self.status['last_receipt_publication'] = {'sequence': row['seq'],
+                    'entity': row['entity'], 'entity_id': row['entity_id'], 'task_id': doc.get('job_id'),
+                    'group_id': (doc.get('measurement_context') or {}).get('burst_id') or doc.get('measurement_id'),
+                    'duration_ms': round((time.monotonic()-publication_started)*1000, 2),
+                    'clock_basis': 'process_monotonic', 'scope': 'receipt_and_artifacts'}
         self.integrity.publish_pending()
         with self.core['db']() as conn:
+            # Include publications whose view pass was interrupted in an earlier
+            # step. Legacy receipts have no measured published_at and stay null.
+            published_sequences = [r[0] for r in conn.execute(
+                'SELECT seq FROM archive_outbox WHERE published_at IS NOT NULL AND readable_at IS NULL')]
             archived = conn.execute('SELECT count(*) FROM archive_outbox WHERE archived_at IS NOT NULL').fetchone()[0]
             indexed = conn.execute("SELECT value FROM archive_meta WHERE key='index_count'").fetchone()
             version = conn.execute("SELECT value FROM archive_meta WHERE key='index_version'").fetchone()
             audit = conn.execute("SELECT value FROM archive_meta WHERE key='index_integrity'").fetchone()
         root = self._root()
-        if (not indexed or int(indexed[0]) != archived or not version or version[0] != self.index_version
+        index_ready = False
+        if (published_sequences or not indexed or int(indexed[0]) != archived or not version or version[0] != self.index_version
                 or not audit or audit[0] != (self.integrity.snapshot()['report_path'] or '')
                 or not (root / 'Readme.html').is_file() or not (root / '.System/Audit.html').is_file() or not (root / '.System/Index.json').is_file()
                 or not (root / '.System/MigrationMap.json').is_file()):
+            index_ready = self.write_index() is not None
+        if index_ready and published_sequences:
+            readable_at = self.core['now']()
+            placeholders = ','.join('?' for _ in published_sequences)
+            with self.core['db']() as conn:
+                conn.execute(f"""UPDATE archive_outbox SET readable_at=?,readability_basis=?
+                                 WHERE seq IN ({placeholders}) AND published_at IS NOT NULL
+                                   AND readable_at IS NULL""",
+                             (readable_at, 'archive_writer_derived_views_published', *published_sequences))
+                # Force a second derived-view pass so Evidence.json and the
+                # index expose the readability confirmation just established.
+                conn.execute("INSERT OR REPLACE INTO archive_meta VALUES('index_version','readability_metadata_pending')")
             self.write_index()
         with self.core['db']() as conn:
             failed = conn.execute('SELECT last_error FROM archive_outbox WHERE archived_at IS NULL AND last_error IS NOT NULL LIMIT 1').fetchone()

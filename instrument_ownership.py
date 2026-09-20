@@ -33,7 +33,7 @@ def expire_requests(conn):
             conn.execute('UPDATE binding_handoffs SET status=?,document=? WHERE id=?',('expired',json.dumps(item),item['handoff_id']))
 
 
-def check_available(conn, instrument_id, camera_id, *, handoff_id=None):
+def check_available(conn, instrument_id, camera_id, *, qr_hash=None, handoff_id=None):
     expire_requests(conn)
     for row in conn.execute("SELECT document FROM bindings WHERE ended IS NULL AND json_extract(document,'$.instrument.id')=?", (instrument_id,)):
         active = json.loads(row[0])
@@ -41,6 +41,14 @@ def check_available(conn, instrument_id, camera_id, *, handoff_id=None):
             raise HTTPException(409, {'code': 'instrument_in_use', 'message': '仪器正在被另一位实验员使用，必须明确交接',
                 'binding_id': active['binding_id'], 'camera_id': active['camera_id'], 'operator': active['operator'],
                 'instrument_id': instrument_id, 'started_at': active['started_at'], 'handoff_required': True})
+    if qr_hash:
+        for row in conn.execute("SELECT document FROM bindings WHERE ended IS NULL AND json_extract(document,'$.qr_hash')=?", (qr_hash,)):
+            active = json.loads(row[0])
+            if active['camera_id'] != camera_id:
+                raise HTTPException(409, {'code': 'qr_in_use', 'message': '该二维码已绑定到另一台设备，不能重复绑定',
+                    'binding_id': active['binding_id'], 'camera_id': active['camera_id'],
+                    'device_id': active['instrument']['id'], 'qr_hash': qr_hash,
+                    'handoff_required': True})
     for row in conn.execute("SELECT document FROM binding_handoffs WHERE instrument_id=? AND status='released'", (instrument_id,)):
         transfer = json.loads(row[0])
         if transfer['handoff_id'] != handoff_id:
@@ -62,6 +70,13 @@ def install(core):
                     SELECT 1 FROM bindings WHERE ended IS NULL AND id<>NEW.id AND
                     json_extract(document,'$.instrument.id')=json_extract(NEW.document,'$.instrument.id'))
                 BEGIN SELECT RAISE(ABORT,'Instrument already occupied'); END''')
+        for action in ('INSERT', 'UPDATE'):
+            conn.execute(f'''CREATE TRIGGER IF NOT EXISTS exclusive_qr_{action.lower()}
+                BEFORE {action} ON bindings WHEN NEW.ended IS NULL AND
+                    json_extract(NEW.document,'$.qr_hash') IS NOT NULL AND EXISTS (
+                    SELECT 1 FROM bindings WHERE ended IS NULL AND id<>NEW.id AND
+                    json_extract(document,'$.qr_hash')=json_extract(NEW.document,'$.qr_hash'))
+                BEGIN SELECT RAISE(ABORT,'QR already occupied'); END''')
 
     def fetch(conn, hid):
         row = conn.execute('SELECT document FROM binding_handoffs WHERE id=?', (str(hid),)).fetchone()

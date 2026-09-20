@@ -29,9 +29,12 @@ def test_direct_instrument_binding_and_scene_evidence_isolation(app_client):
     visit = enter_scene(client).json()
     bound = client.post('/api/bindings', json=args)
     assert bound.status_code == 200
-    assert bound.json()['scene_visit_id'] == visit['visit_id']
+    current_visit=enter_scene(client).json()
+    assert bound.json()['scene_visit_id'] == current_visit['visit_id']
+    assert current_visit['supersedes_visit_id'] == visit['visit_id']
+    assert current_visit['scan_id'] == visit['scan_id']
     assert bound.json()['scene_qr_verified'] is True
-    assert enter_scene(client).json()['visit_id'] == visit['visit_id']
+    assert enter_scene(client).json()['visit_id'] == current_visit['visit_id']
     # Instrument photos cannot serve as scene-entry evidence.
     assert client.post('/api/tools/enter_scene', json={'scan_id':picture['scan_id'],'scene_id':visit['scene']['id']}).status_code == 409
     assert enter_scene(client, scene_id=str(uuid.uuid4())).status_code == 409
@@ -50,7 +53,11 @@ def test_independent_scene_associations_preserve_bindings_and_end_together(app_c
     with app.db() as conn:conn.execute('INSERT INTO scenes VALUES(?,?)',(second,'其他场景'))
     assert enter_scene(client,scene_id=second).status_code==200
     assert len(client.get('/api/state').json()['scene_visits'])==2
-    assert client.post('/api/bindings',json=args).json()['binding_id']==bound['binding_id']
+    updated=client.post('/api/bindings',json=args).json()
+    assert updated['binding_id']!=bound['binding_id']
+    assert updated['supersedes_binding_id']==bound['binding_id']
+    assert updated['scene_qr_verified']
+    assert len(client.get('/api/state').json()['scene_visits'])==2
     assert client.post('/api/camera/relations/end',json={'camera_id':'TestCamera'}).status_code==200
     assert not client.get('/api/state').json()['scene_visits']
     assert client.post('/api/ocr',json={'binding_id':bound['binding_id'],'capture_id':picture['capture_id']}).status_code==409

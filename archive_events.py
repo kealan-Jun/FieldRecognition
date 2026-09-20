@@ -4,16 +4,29 @@ import hashlib
 import html
 import json
 import posixpath
+import time
 from datetime import datetime
 from pathlib import PurePosixPath
 from zoneinfo import ZoneInfo
 
 from archive_browse import page, token
 from archive_readable import raw_json
-from measurement_records import build_records, capture_clock, measurement_value, photo_time, string, RULE_VERSION
+from measurement_records import build_records, capture_clock, measurement_value, RULE_VERSION
 
 KINDS = {'Bindings': '二维码与绑定', 'VideoReadings': '视频面板读数',
          'VoicePhotoReadings': '语音照片读数', 'PhotoReadings': '上传照片读数'}
+
+
+def processing_outcome(job):
+    """Recognition completion is independent of later human confirmation."""
+    status = job.get('status')
+    terminal = status in {'completed', 'failed', 'cancelled', 'interrupted'}
+    if job.get('resume_pending') or job.get('phase') in {'retry_wait', 'replayed', 'waiting_service'}:
+        terminal = False
+    skipped = job.get('recognition_skipped') or (job.get('local_ocr') or {}).get('recognition_skipped')
+    return {'task_id': job.get('job_id'), 'capture_id': job.get('capture_id'), 'status': status,
+            'terminal': terminal, 'outcome': ('failed' if status != 'completed' else 'skipped' if skipped else 'succeeded') if terminal else 'pending',
+            'reason': job.get('skip_reason') or (job.get('local_ocr') or {}).get('skip_reason') or job.get('error')}
 
 
 def aware(value):
@@ -28,8 +41,13 @@ def latest_rows(rows):
     latest, versions = {}, {}
     for row in sorted(rows, key=lambda r: r['seq']):
         key = (row['entity'], row['entity_id'])
-        latest[key] = dict(row) | {'doc': json.loads(row['document'])}
-        versions.setdefault(key, []).append({'sequence': row['seq'], 'receipt': row['receipt_path']})
+        current = dict(row)
+        for field in ('published_at', 'readable_at', 'readability_basis'):
+            current.setdefault(field, None)
+        latest[key] = current | {'doc': json.loads(row['document'])}
+        versions.setdefault(key, []).append({'sequence': row['seq'], 'receipt': row['receipt_path'],
+            'queued_at': row['recorded_at'], 'published_at': current['published_at'],
+            'readable_at': current['readable_at'], 'readability_basis': current['readability_basis']})
     return latest, versions
 
 
@@ -120,7 +138,7 @@ def prepare(rows, paths):
     return bundles, latest
 
 
-def standard_records(job_rows, group):
+def standard_records(job_rows, group, *, diagnostics=None):
     """Aggregate only an explicit burst; conflicting values remain null for correction."""
     by_capture = {}
     from result_reprocessing import preferred_jobs
@@ -136,35 +154,31 @@ def standard_records(job_rows, group):
             job['external_photo'] = (job.get('external_photo') or {}) | {'captured_at': group['capture_time_corrections'][job['capture_id']]}
         # Recompute derived output under current explicit rules, without rewriting receipts.
         for entry in build_records(job):
+            snapshot = next((b for b in job.get('all_binding_snapshots', job.get('binding_snapshots', []))
+                             if b.get('binding_id') == entry['evidence'].get('binding_id')), {})
+            entry['evidence']['operator'] = snapshot.get('operator', job.get('operator'))
             entries.setdefault(entry['instrument_id'], []).append(entry)
-    # A reviewer can explicitly assign initially unbound material. That decision
-    # is separate from a QR binding; do not manufacture a binding or QR digest.
-    for field in (group or {}).get('fields', []):
-        asset = field.get('instrument') or {}
-        iid = asset.get('id')
-        if not iid or iid in entries or not field.get('corrected'):
-            continue
-        names = ['质量'] if field.get('name') == '质量' else ['温度', '转速'] if field.get('name') in {'温度', '转速'} else []
-        if not names:
-            continue
-        source = next(iter(by_capture.values()), {})
-        entries[iid] = [{'instrument_id': iid, 'record': {
-            'wearer_id': string((source.get('operator_registration') or {}).get('wearer_id')),
-            'device_model': string(asset.get('model')), 'device_no': string(asset.get('device_no')),
-            'qr_hash': None, 'photo_time': photo_time(source),
-            'values': [measurement_value(name, {}, asset)[0] for name in names]},
-            'evidence': {'identity_basis': 'explicit_field_correction', 'qr_basis': None,
-                         'capture_id': source.get('capture_id')}}]
+    # Corrections remain in the decision/evidence history. Only an instrument
+    # established by build_records from the task's binding/region evidence may
+    # receive a Result; a correction cannot manufacture a missing QR binding.
     result = []
     for iid, parts in entries.items():
+        sessions = {(part['evidence'].get('binding_id'), part['record'].get('wearer_id'),
+                     part['evidence'].get('operator')) for part in parts}
+        if len(sessions) > 1:
+            if diagnostics is not None:
+                diagnostics.append({'instrument_id': iid, 'reason': 'binding_session_conflict',
+                    'status': 'needs_review', 'observations': [part['evidence'] for part in parts]})
+            continue  # A burst cannot collapse usage periods into its first wearer.
         first = copy.deepcopy(parts[0])
         conflicts = []
         for value in first['record']['values']:
             name = value['name']
             alternatives = [v for p in parts for v in p['record']['values'] if v['name'] == name]
-            unique = {(v['value'], v['unit']) for v in alternatives}
+            unique = {(v['value'], v['unit'], v.get('display_state')) for v in alternatives}
             if len(unique) > 1:
                 value.update(value=None, unit=value['unit'] if len({v['unit'] for v in alternatives}) == 1 else None)
+                value.pop('display_state', None)
                 conflicts.append(name)
             field = next((f for f in (group or {}).get('fields', []) if (f.get('instrument') or {}).get('id') == iid and f.get('name') == name), None)
             if field:
@@ -173,6 +187,8 @@ def standard_records(job_rows, group):
                 if not field.get('corrected') and any(c.get('unit_basis') == 'unit_conflict' for c in field.get('original_candidates', [])):
                     revised.update(value=None, unit=None, range=[None, None])
                 value.update(revised)
+                if field.get('corrected') or revised['value'] is not None:
+                    value.pop('display_state', None)
                 if field.get('corrected') and name in conflicts:
                     conflicts.remove(name)
         first['evidence'] = {'schema_version': 'instrument-measurement/1', 'rule_version': RULE_VERSION,
@@ -222,22 +238,43 @@ def make_views(bundles, paths, receipts):
                 'scene_matches': source.get('scene_matches', [])})
         group = bundle['group']
         doc = max(bundle['members'], key=lambda r: r['seq'])['doc']
-        records = standard_records(bundle['jobs'], group)
+        merge_started = time.monotonic()
+        aggregation_issues = []
+        records = standard_records(bundle['jobs'], group, diagnostics=aggregation_issues)
+        candidate_merge_ms = round((time.monotonic() - merge_started) * 1000, 2)
         observations = []
         for job in bundle['jobs']:
-            job = job['doc']
+            row = job
+            job = copy.deepcopy(row['doc'])
+            job['archive'] = {'published_at': row['published_at'], 'readable_at': row['readable_at']}
+            if job.get('submitted_at'):
+                from readout_timing import update_timing
+                update_timing(job, preserve_recorded_durations=True)
             observations.append({k: job.get(k) for k in ('job_id', 'capture_id', 'status', 'lines', 'readings',
+                'operator','wearer_id','operator_basis','attribution_status','attribution_reason',
+                'binding_snapshot_version','binding_effective_at','binding_time_basis',
+                'allowed_instrument_ids','allowed_instrument_ids_basis',
                 'local_ocr', 'fallback', 'panel_regions', 'recognition_versions', 'panel_detection', 'timing',
                 'instrument', 'all_binding_snapshots', 'binding_snapshots', 'workbench', 'workbenches', 'ownership_conflicts',
                 'frame_metadata', 'video_observation', 'model', 'device', 'submitted_at', 'finished_at', 'request_trigger',
                 'field_rules','recognition_root_job_id','recognition_revision','supersedes_job_id','reprocessing','display_fields',
-                'actual_model_invocation','recognition_skipped','skip_reason','outcome')})
+                'actual_model_invocation','recognition_skipped','skip_reason','failure_reason','error','outcome')})
         content = {'schema': 'field-recognition-event/2', 'derived_view': True, 'event_id': bundle['key'],
             'event_at': bundle['event_at'], 'time_basis': bundle['time_basis'], 'folder_time_basis': bundle['folder_time_basis'],
             'camera_id': bundle['camera_id'], 'operator': doc.get('operator') or next((s['operator'] for s in sources if s['operator']), None),
             'category': bundle['kind'], 'record_scope': (group or doc).get('record_scope', 'evidence' if bundle['kind'] == 'Bindings' else 'legacy_test_only'),
             'status': (group or doc).get('status') or ('ended' if doc.get('ended_at') else 'active' if doc.get('binding_id') else 'source_retained'),
             'sources': sources, 'photos': photos, 'receipt_versions': history}
+        if observations:
+            people = {(b.get('operator'),b.get('wearer_id')) for observation in observations
+                      for b in observation.get('all_binding_snapshots') or observation.get('binding_snapshots') or []}
+            if len(people) > 1:
+                content.update(operator=None, personnel_attribution='multiple_sessions_see_observations')
+        latest_member = max(bundle['members'], key=lambda r: r['seq'])
+        content['archive'] = {'queued_at': latest_member['recorded_at'],
+                              'published_at': latest_member['published_at'],
+                              'readable_at': latest_member['readable_at'],
+                              'readability_basis': latest_member['readability_basis']}
         if bundle['kind'] == 'Bindings':
             content['binding'] = doc
         else:
@@ -252,10 +289,25 @@ def make_views(bundles, paths, receipts):
                 measurement_files.append({'instrument_id': entry['instrument_id'], 'instrument_name': name, 'result': result_file,
                     'sha256': hashlib.sha256(raw).hexdigest(), 'evidence': entry['evidence']})
             content.update(measurement_id=group.get('measurement_id') if group else bundle['key'].split(':', 1)[1],
-                measurement_files=measurement_files, observations=observations)
+                measurement_files=measurement_files, observations=observations,
+                aggregation_issues=aggregation_issues)
             # Completed is a worker lifecycle state, not proof that OCR was invoked.
             from result_reprocessing import preferred_jobs
             current_jobs = preferred_jobs([r['doc'] for r in bundle['jobs']])
+            latest_attempts = {}
+            for row in bundle['jobs']:
+                job = row['doc']
+                key = job.get('recognition_root_job_id', job['job_id'])
+                if key not in latest_attempts or job.get('recognition_revision', 1) > latest_attempts[key].get('recognition_revision', 1):
+                    latest_attempts[key] = job
+            processing_jobs = list(latest_attempts.values())
+            content['group_id'] = (group or {}).get('context', {}).get('burst_id') or content['measurement_id']
+            content['task_ids'] = [j['job_id'] for j in processing_jobs]
+            content['task_outcomes'] = [processing_outcome(j) for j in processing_jobs]
+            expected = (group or {}).get('context', {}).get('expected_photos', 1)
+            content['processing_terminal'] = bool(processing_jobs) and all(t['terminal'] for t in content['task_outcomes']) and len({j.get('capture_id') for j in processing_jobs}) >= expected
+            outcomes = {t['outcome'] for t in content['task_outcomes']}
+            content['processing_outcome'] = ('failed' if 'failed' in outcomes else 'skipped' if outcomes == {'skipped'} else 'succeeded') if content['processing_terminal'] else 'pending'
             content['processing_status'] = content['status']
             if content['status'] == 'completed' and not records:
                 skipped = current_jobs and all(j.get('recognition_skipped') or
@@ -270,6 +322,25 @@ def make_views(bundles, paths, receipts):
             if group:
                 # Sources/evidence are normalized above; the decision history stays intact.
                 content['decision'] = {k: v for k, v in group.items() if k != 'sources'}
+            # Each file is atomic independently. Readers use this manifest and
+            # validate hashes; a new Result with an old Evidence is not a snapshot.
+            content['publication'] = {'protocol': 'evidence_manifest_sha256/1',
+                'atomic_scope': 'one_file_same_directory_rename',
+                'reader_rule': 'parse Evidence, parse every measurement_file and verify sha256; retry mismatches',
+                'result_count': len(measurement_files),
+                'generation': hashlib.sha256(json.dumps({'receipts': [v['sequence'] for v in history],
+                    'results': [(m['result'], m['sha256']) for m in measurement_files]}, sort_keys=True).encode()).hexdigest()}
+            # Keep the first measured rebuild for this generation. Re-reading or
+            # re-indexing unchanged history must not rewrite its evidence bytes.
+            timings = paths.data.setdefault('event_stage_timings', {})
+            previous = timings.get(bundle['key'], {})
+            if previous.get('generation') != content['publication']['generation']:
+                timings[bundle['key']] = {'generation': content['publication']['generation'],
+                    'group_id': content['group_id'], 'task_ids': content['task_ids'],
+                    'durations_ms': {'candidate_merge_ms': candidate_merge_ms},
+                    'duration_clock_basis': {'candidate_merge_ms': 'process_monotonic'},
+                    'scope': 'first_derived_view_rebuild_for_generation'}
+            content['timing'] = timings[bundle['key']]
         views[file] = raw_json(content)
         for entity, ident in bundle['entity_keys']:
             old = 'Records/' + ''.join(w.title() for w in entity.split('_')) + '/' + token(ident)

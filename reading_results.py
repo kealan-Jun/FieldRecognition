@@ -4,6 +4,7 @@ from aliyun_vision import READOUT, NUMBER
 
 
 def build_readings(document):
+    from measurement_records import binding_for_region
     candidates = document.get('instrument_candidates') or ([{'instrument': document['instrument'],
         'binding_id': document.get('binding_id'), 'basis': document.get('instrument_association')}]
         if document.get('instrument') else [])
@@ -17,10 +18,17 @@ def build_readings(document):
         if not match and line.get('value') is None:
             continue
         region = regions.get(line.get('panel_id'))
+        # Background candidates remain in raw lines/local_ocr for diagnostics.
+        # A detected region may only become a reading under its task snapshot.
+        if ((region is not None and binding_for_region(document, region) is None)
+                or (document.get('panel_detection') and region is None)):
+            continue
         local_candidates = ([{'instrument':region['instrument'], 'binding_id':region.get('binding_id'),
                               'basis':region['association_basis']}] if region and region.get('instrument') else
                             [] if document.get('panel_detection') else candidates)
-        unique = local_candidates[0] if len(local_candidates) == 1 else None
+        # A QR somewhere in a whole photo or the sole active binding does not
+        # establish which screen produced an unlocalized number.
+        unique = local_candidates[0] if region is not None and len(local_candidates) == 1 else None
         value = str(line['value']) if line.get('value') is not None else match[1]
         issue = 'decimal_uncertain' if re.fullmatch(r'[+-]?0\d+', value) else None
         if re.fullmatch(r'[+-]?8{5,}(?:\.8+)?', value):
@@ -28,9 +36,11 @@ def build_readings(document):
         result.append({'reading_id': f"{document['job_id']}:{len(result) + 1}",
             'text': text, 'value': value, 'unit': line.get('unit') or (text[match.end():].strip() if match else None) or None,
             'polygon': line.get('polygon'), 'confidence': line.get('confidence'),
+            'clarity':line.get('clarity'),
+            'normalization': line.get('normalization'),
             'instrument': unique['instrument'] if unique else None,
             'binding_id': unique.get('binding_id') if unique else None,
-            'association_basis': unique.get('basis') if unique else 'ambiguous' if local_candidates else 'unlocalized' if document.get('panel_detection') else 'unbound',
+            'association_basis': unique.get('basis') if unique else 'ambiguous' if len(local_candidates)>1 else 'unlocalized' if local_candidates or document.get('panel_detection') else 'unbound',
             'instrument_candidates': local_candidates, 'quality_issue': line.get('quality_issue') or issue,
             'human_verified': False, 'status': 'needs_review',
             'workbench': region.get('workbench') if region else document.get('workbench'), 'workbenches': document.get('workbenches', []),

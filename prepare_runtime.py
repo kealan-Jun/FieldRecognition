@@ -52,11 +52,8 @@ def prepare(data, username, display_name, camera_id, receiver_url=None, photo_ro
         registry.register_camera(camera_id,camera_id,receiver_url=receiver_url,nas_photo_root=photo_root)
     if camera_id:
         with db.transaction('IMMEDIATE') as conn:
-            owner=conn.execute('SELECT user_id FROM camera_users WHERE camera_id=?',(camera_id,)).fetchone()
-            if owner and owner[0]!=user.id:raise ValueError('Existing camera ownership must use explicit reassignment')
-            active=conn.execute('SELECT document FROM bindings WHERE camera=? AND ended IS NULL',(camera_id,)).fetchall()
-            if any(json.loads(r[0]).get('operator')!=display_name for r in active):raise ValueError('Camera is in use by a different operator')
-            conn.execute('INSERT OR IGNORE INTO camera_users VALUES(?,?)',(camera_id,user.id))
+            from binding_operator import activate_member
+            activate_member(conn, camera_id, user.id, datetime.now(timezone.utc).isoformat())
     if credentials:
         access=data/'Access';access.mkdir(mode=0o700,exist_ok=True);os.chmod(access,0o700)
         path=access/'InitialAccess.json'

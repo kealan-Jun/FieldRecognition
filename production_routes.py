@@ -47,7 +47,9 @@ def install(core):
                 if core['RUNTIME_ENABLED']:
                     workers={r['name']:(time.time()-r['updated_at']<30 and json.loads(r['document']).get('status')!='stopped') for r in conn.execute('SELECT * FROM runtime_status')}
                     required={'ocr','camera-supervisor'}
-                    required.update('camera:'+r[0] for r in conn.execute('SELECT r.camera_id FROM camera_registry r JOIN camera_users c USING(camera_id) JOIN users u ON c.user_id=u.id WHERE r.enabled=1 AND u.disabled=0'))
+                    required.update('camera:'+r[0] for r in conn.execute('''SELECT r.camera_id FROM camera_registry r
+                        JOIN camera_active_users c USING(camera_id) JOIN users u ON c.user_id=u.id
+                        WHERE r.enabled=1 AND u.disabled=0'''))
                     if any(not workers.get(name) for name in required):
                         return JSONResponse({'status':'unavailable','database':'ready','workers':workers},status_code=503)
             return {'status':'ready' if not core['RUNTIME_ENABLED'] or workers.get('archive') else 'degraded','database':'ready','queued_or_running':pending}

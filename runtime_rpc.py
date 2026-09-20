@@ -72,11 +72,14 @@ def send(sock,value):
 
 
 def call(name,method,*args,**kwargs):
-    with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as sock:
-        sock.settimeout(90 if name=='ocr' else 5)
-        sock.connect(str(socket_path(name)))
-        send(sock,{'method':method,'args':args,'kwargs':kwargs})
-        result=receive(sock)
+    try:
+        with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as sock:
+            sock.settimeout(90 if name=='ocr' else 5)
+            sock.connect(str(socket_path(name)))
+            send(sock,{'method':method,'args':args,'kwargs':kwargs})
+            result=receive(sock)
+    except (OSError, ConnectionError) as exc:
+        raise HTTPException(503, '后台服务暂不可用，正在等待自动恢复；已保存的数据和任务保留') from exc
     if 'error' in result:
         raise HTTPException(result.get('status',503),result['error'])
     return result['result']

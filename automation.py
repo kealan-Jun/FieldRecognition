@@ -4,6 +4,7 @@ import json
 import os
 import threading
 import time
+import uuid
 
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
@@ -14,6 +15,9 @@ from live_scan import ACTIVE
 class AutomationSettings(BaseModel):
     enabled: bool
     operator: str | None = Field(default=None, max_length=80)
+    wearer_id: str | None = Field(default=None, max_length=100)
+    request_id: uuid.UUID | None = None
+    expected_revision: int | None = Field(default=None, ge=0)
 
 
 class AutomaticRunner:
@@ -36,16 +40,22 @@ class AutomaticRunner:
     def settings(self):
         with self.core['db']() as conn:
             row = conn.execute('SELECT document FROM automation_settings WHERE camera=?', (self.target(),)).fetchone()
-        if row:
-            settings = json.loads(row['document'])
+            settings = json.loads(row['document']) if row else {
+                'enabled': os.environ.get('FIELD_AUTO_RUN_ENABLED', '0').lower() in {'1', 'true', 'yes'},
+                'operator': '', 'registered_at': None, 'pause_reason': None,
+            }
             if self.core.get('RUNTIME_ENABLED'):
-                with self.core['db']() as conn:
-                    owner=conn.execute('SELECT u.id,u.display_name FROM camera_users c JOIN users u ON u.id=c.user_id WHERE c.camera_id=? AND u.disabled=0',(self.target(),)).fetchone()
-                if not owner:return settings | {'enabled':False,'operator':'','pause_reason':'unassigned_camera'}
+                owner=conn.execute('''SELECT u.id,u.display_name FROM camera_active_users a
+                                      JOIN users u ON u.id=a.user_id
+                                      WHERE a.camera_id=? AND u.disabled=0''',(self.target(),)).fetchone()
+                if not owner:
+                    from binding_operator import camera_revision
+                    return settings | {'enabled':False,'operator':'','wearer_id':None,
+                                       'revision':camera_revision(conn,self.target()),'pause_reason':'unassigned_camera'}
                 settings.update(operator=owner['display_name'],wearer_id=owner['id'])
+            from binding_operator import camera_revision
+            settings['revision'] = camera_revision(conn, self.target())
             return settings
-        return {'enabled': os.environ.get('FIELD_AUTO_RUN_ENABLED', '0').lower() in {'1', 'true', 'yes'},
-                'operator': '', 'registered_at': None, 'pause_reason': None}
 
     def _save(self, settings):
         with self.core['db']() as conn:
@@ -56,21 +66,48 @@ class AutomaticRunner:
         with self.lock:
             settings = self.settings()
             operator = settings['operator'] if body.operator is None else body.operator.strip()
-            if body.enabled and not operator:
+            if (body.enabled or body.operator is not None) and not operator:
                 raise HTTPException(422, '请先登记实验员姓名或编号，再开启自动运行')
-            binding = self.scanner.active_binding() if self.core['receiver_camera'] else None
-            if binding and (body.enabled or body.operator is not None) and operator != binding['operator']:
-                raise HTTPException(409, '请先结束当前仪器绑定，再登记新的实验员；历史记录会保留')
-            for visit in self.core['scene_visits']():
-                if (visit['camera_id'] == self.target() and visit.get('operator')
-                        and (body.enabled or body.operator is not None) and operator != visit['operator']):
-                    raise HTTPException(409, '请先结束当前场景关联，再登记新的实验员；历史记录会保留')
+            timestamp = self.core['now']()
+            if body.enabled or body.operator is not None:
+                from binding_operator import activate_member, changed_document, resolve_wearer, update_camera_relations
+                with self.core['db']() as conn:
+                    conn.execute('BEGIN IMMEDIATE')
+                    from binding_operator import (request_fingerprint,replay_request,remember_request,
+                                                  check_revision,camera_revision)
+                    fingerprint=request_fingerprint({'operation':'automation','camera_id':self.target(),
+                                                     'body':body.model_dump(mode='json')})
+                    replay=replay_request(conn,body.request_id,fingerprint)
+                    if replay is not None:
+                        return replay
+                    check_revision(conn,self.target(),body.expected_revision)
+                    wearer_id = None
+                    if self.core.get('RUNTIME_ENABLED'):
+                        requested = body.wearer_id or (settings.get('wearer_id') if body.operator is None else None)
+                        wearer_id = resolve_wearer(conn, self.target(), operator, requested)
+                        if not wearer_id:
+                            raise HTTPException(422, '请选择已登记的相机人员；同名人员请提供 wearer_id')
+                        activate_member(conn, self.target(), wearer_id, timestamp)
+                    else:
+                        update_camera_relations(conn, self.target(), operator, timestamp=timestamp,
+                                                reason='camera_operator_setting_changed')
+                    row = conn.execute('SELECT document FROM automation_settings WHERE camera=?', (self.target(),)).fetchone()
+                    prior = json.loads(row[0]) if row else settings
+                    settings, changed = changed_document(prior, operator, wearer_id, timestamp,
+                                                         reason='camera_operator_setting_changed')
+                    if changed or not settings.get('registered_at'):
+                        settings['registered_at'] = timestamp
+                    settings.update(enabled=body.enabled, pause_reason=None if body.enabled else 'user_paused')
+                    settings['revision'] = camera_revision(conn,self.target())
+                    conn.execute('INSERT OR REPLACE INTO automation_settings VALUES(?,?)',
+                                 (self.target(), json.dumps(settings)))
+                    remember_request(conn,body.request_id,self.target(),fingerprint,settings)
+                if self.core.get('receiver_camera'):
+                    self.scanner.refresh_bindings()
+            else:
+                settings.update(enabled=False, pause_reason='user_paused')
+                self._save(settings)
             self._stop_scan('自动运行设置已更新')
-            settings.update(enabled=body.enabled, operator=operator,
-                            pause_reason=None if body.enabled else 'user_paused')
-            if body.operator is not None:
-                settings['registered_at'] = self.core['now']()
-            self._save(settings)
             self.failed_session, self.retry_at = None, 0
             # A reviewed resume starts a fresh scan, including after a multi-code pause.
             if self.scanner.session and self.scanner.session.get('owner') == 'automation':
@@ -132,6 +169,12 @@ class AutomaticRunner:
                 self.state = {'status': 'waiting_camera', 'message': '等待相机采集服务上线，恢复后自动扫码'}
                 return
             session = self.scanner.session
+            if session and session.get('owner') == 'automation' and (
+                    session.get('operator') != settings['operator'] or
+                    session.get('wearer_id') != settings.get('wearer_id')):
+                self._stop_scan('实际使用人已交接，正在建立新的扫码会话')
+                self.scanner.session = None
+                session = None
             if session and session.get('owner') != 'automation' and session['status'] in ACTIVE:
                 self.state = {'status': 'manual_scan', 'message': '当前由手动扫码会话控制'}
                 return
@@ -150,7 +193,7 @@ class AutomaticRunner:
                     self.state = {'status': session['status'], 'message': session['message'],
                                   'binding_ids': [b['binding_id'] for b in session['bindings']]}
                     return
-            session = self.scanner.start(settings['operator'], owner='automation')
+            session = self.scanner.start(settings['operator'], owner='automation', wearer_id=settings.get('wearer_id'))
             self.state = {'status': session['status'], 'message': session['message']}
 
     def start(self):
@@ -189,6 +232,10 @@ def install(core):
 
     @core['app'].put('/api/automation')
     def configure(body: AutomationSettings):
+        from security import current
+        actor = current()
+        if actor and (body.enabled or body.operator is not None):
+            body = body.model_copy(update={'operator': actor.display_name, 'wearer_id': actor.user_id})
         return runner.configure(body)
 
     return runner

@@ -43,10 +43,12 @@ def test_small_detector_border_overlap_keeps_temperature_and_speed_roles():
 
 def configure(app, monkeypatch, boxes=BOXES):
     # These tests isolate association/crop routing; digit refinement has its own tests.
+    import lcd_digits
+    monkeypatch.setattr(lcd_digits,'refine_lcd',lambda predict,image,initial,*args,**kw:initial)
     monkeypatch.setattr(panel_regions,'refine_digits',lambda predict,image,initial,x=0,y=0,**kw:initial)
     monkeypatch.setenv('FIELD_PANEL_DETECTOR_ENABLED', '1')
     monkeypatch.setattr(app.panel_detector, 'warmup', lambda: True)
-    monkeypatch.setattr(app.panel_detector, 'predict', lambda image: {'status':'completed', 'boxes':copy.deepcopy(boxes), 'weights_sha256':'a'*64})
+    monkeypatch.setattr(app.panel_detector, 'predict', lambda image, **kw: {'status':'completed', 'boxes':copy.deepcopy(boxes), 'weights_sha256':'a'*64})
     monkeypatch.setattr(app, 'predict_panel', lambda image, x=0, y=0: {
         'status':'completed', 'device':'cpu', 'model':'test', 'actual_model_invocation':True,
         'lines':[{'text':'12.3 g' if x<100 else '200 g', 'polygon':[[x,y],[x+10,y],[x+10,y+8],[x,y+8]]}]})
@@ -148,6 +150,40 @@ def test_missing_a_uses_its_crop_for_fallback_even_when_b_has_digits(app_client,
     assert calls==[(24,64)]
     assert [r['value'] for r in done['readings']]==['12.34','200']
     assert [r['instrument']['id'] for r in done['readings']]==[A,B]
+
+
+def test_managed_fallback_does_not_complete_or_release_lease_before_result(app_client,monkeypatch):
+    import aliyun_vision as vision
+    from task_queue import TaskQueue
+    app,client=app_client
+    monkeypatch.setenv('FIELD_CAMERA_ID','TestCamera')
+    bindings=two_bindings(app,client)
+    configure(app,monkeypatch,BOXES[1:])
+    monkeypatch.setattr(app.readout_pool,'submit',lambda *a:None)
+    job=app.read_saved_panel(app.SavedPhotoRequest(photo=photo(app)),trigger='voice_photo_directory')
+    local=app.predict_readout(np.zeros((300,400,3),np.uint8),binding_snapshots=bindings)
+    local['panel_regions'][0]['local_ocr']['lines']=[];local['lines']=[]
+    from database import apply_migrations
+    apply_migrations(app.database)
+    queue=TaskQueue(app.database,'regression')
+    task=queue.claim_task();task['precomputed_local']=local
+    monkeypatch.setenv('FIELD_ALIYUN_FALLBACK_ENABLED','1')
+    monkeypatch.setenv('DASHSCOPE_API_KEY','test-only-key')
+    def cloud(crop):
+        with app.db() as c:
+            row=c.execute('select status,lease_holder from jobs where id=?',(job['job_id'],)).fetchone()
+            assert row['status']=='running' and row['lease_holder']==task['lease_holder']
+        assert queue.renew_lease(task['job_id'],task['lease_holder'])
+        return cloud_result()
+    monkeypatch.setattr(vision,'read_panel',cloud)
+    clock=Clock();panel_readout.run(dict(vars(app),task_queue=queue),task,clock=clock,pause=clock.pause)
+    done=app.get_job(job['job_id'])
+    assert done['status']==done['phase']=='completed' and done['finished_at']
+    assert done['readings'][0]['value']=='12.34'
+    assert done['readings'][0]['instrument']['id']==B
+    assert done['fallback']['status']=='completed'
+    with app.db() as c:
+        assert c.execute('select lease_holder from jobs where id=?',(job['job_id'],)).fetchone()[0] is None
 
 
 def test_no_panel_in_video_skips_ocr_and_does_not_use_background_numbers(app_client,monkeypatch):

@@ -38,6 +38,7 @@ class OCRWorker:
     def run(self,persistent=True):
         from runtime_rpc import RpcServer
         with process_lock(self.core['DATA'],'ocr'):
+            self.queue.recover_interrupted()
             server=RpcServer('ocr',{
                 'predict_panel':self.core['predict_panel'],
                 'predict_readout':self.core['predict_readout'],
@@ -48,13 +49,20 @@ class OCRWorker:
             self.core['queue_ocr_warmup']()
             try:
                 pending=set()
+                health_at = 0
                 while not self.stop.is_set():
                     self.core['queue_ocr_warmup']()
+                    model = self.core.get('ocr_model')
+                    if hasattr(model, 'health') and time.monotonic() >= health_at:
+                        self.core['ocr_state'].update(model.health())
+                        model.cleanup()
+                        health_at = time.monotonic()+2
                     heartbeat(self.db,'ocr',{'status':'running','ocr':self.core['ocr_state'],'active_tasks':len(pending)})
                     finished={f for f in pending if f.done()}
                     for future in finished:future.result()
                     pending-=finished
-                    if len(pending)<4:
+                    available = not hasattr(model, 'health') or self.core['ocr_state'].get('resident')
+                    if len(pending)<4 and available:
                         task=self.queue.claim_task('ocr')
                         if task:
                             pending.add(self.core['readout_pool'].submit(self._process_ocr_task,task))

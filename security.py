@@ -129,7 +129,9 @@ class SecurityMiddleware(BaseHTTPMiddleware):
                         raise HTTPException(401,'缺少相机编号')
                     await run_in_threadpool(auth.verify_device,device,authorization[7:])
                     with self.core['db']() as conn:
-                        row=conn.execute('SELECT u.* FROM users u JOIN camera_users c ON c.user_id=u.id JOIN camera_registry r ON r.camera_id=c.camera_id WHERE c.camera_id=? AND u.disabled=0 AND r.enabled=1',(device,)).fetchone()
+                        row=conn.execute('''SELECT u.* FROM users u JOIN camera_active_users a ON a.user_id=u.id
+                                            JOIN camera_registry r ON r.camera_id=a.camera_id
+                                            WHERE a.camera_id=? AND u.disabled=0 AND r.enabled=1''',(device,)).fetchone()
                     if not row:
                         raise HTTPException(403,'相机尚未分配给有效账号')
                     principal=Principal(row['id'],row['display_name'],'operator',frozenset([device]),True)
@@ -327,13 +329,89 @@ def install(core, enabled):
         if not re.fullmatch(r'[A-Za-z0-9_-]{1,100}',camera_id):
             raise HTTPException(422,'相机编号无效')
         with core['database'].transaction('IMMEDIATE') as conn:
-            if conn.execute('SELECT 1 FROM bindings WHERE camera=? AND ended IS NULL',(camera_id,)).fetchone():
-                raise HTTPException(409,'请先结束相机已有绑定再分配使用人')
+            from binding_operator import request_fingerprint, replay_request, remember_request, check_revision, camera_revision
+            fingerprint = request_fingerprint({'operation':'assign_owner','camera_id':camera_id,'body':body,
+                                               'principal':current().user_id if current() else None})
+            replay = replay_request(conn, body.get('request_id'), fingerprint)
+            if replay is not None:
+                return replay
+            check_revision(conn, camera_id, body.get('expected_revision'))
             user=conn.execute('SELECT id FROM users WHERE id=? AND disabled=0',(body.get('user_id'),)).fetchone()
             if not user:
                 raise HTTPException(422,'账号不存在')
-            conn.execute('INSERT INTO camera_users VALUES(?,?) ON CONFLICT(camera_id) DO UPDATE SET user_id=excluded.user_id',(camera_id,user[0]))
-        return {'camera_id':camera_id,'user_id':user[0]}
+            from binding_operator import activate_member
+            activate_member(conn, camera_id, user[0], core['now']())
+            members=conn.execute('''SELECT u.id,u.display_name FROM camera_users c JOIN users u ON u.id=c.user_id
+                                    WHERE c.camera_id=? AND u.disabled=0 ORDER BY u.display_name,u.id''',(camera_id,)).fetchall()
+            result = {'camera_id':camera_id,'user_id':user[0], 'revision':camera_revision(conn,camera_id),
+                      'members':[{'user_id':r['id'],'display_name':r['display_name']} for r in members]}
+            return remember_request(conn, body.get('request_id'), camera_id, fingerprint, result)
+
+    @app.post('/api/admin/cameras/{camera_id}/members')
+    def register_member(camera_id:str,body:dict):
+        require_role('admin')
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,100}',camera_id):
+            raise HTTPException(422,'相机编号无效')
+        with core['database'].transaction('IMMEDIATE') as conn:
+            if not conn.execute('SELECT 1 FROM users WHERE id=? AND disabled=0',(body.get('user_id'),)).fetchone():
+                raise HTTPException(422,'人员不存在或已停用')
+            conn.execute('INSERT OR IGNORE INTO camera_users(camera_id,user_id) VALUES(?,?)',(camera_id,body['user_id']))
+        return camera_members(camera_id)
+
+    @app.get('/api/cameras/{camera_id}/members')
+    def camera_members(camera_id:str):
+        require_camera(camera_id)
+        with core['database'].connection() as conn:
+            from binding_operator import camera_revision
+            rows=conn.execute('''SELECT u.id,u.display_name FROM camera_users c JOIN users u ON u.id=c.user_id
+                                 WHERE c.camera_id=? AND u.disabled=0 ORDER BY u.display_name,u.id''',(camera_id,)).fetchall()
+            active=conn.execute('SELECT user_id FROM camera_active_users WHERE camera_id=?',(camera_id,)).fetchone()
+            return {'camera_id':camera_id, 'active_user_id':active[0] if active else None,
+                    'revision':camera_revision(conn,camera_id),
+                    'members':[{'user_id':r['id'],'display_name':r['display_name']} for r in rows]}
+
+    @app.put('/api/cameras/{camera_id}/active-user')
+    def select_member(camera_id:str,body:dict):
+        require_camera(camera_id)
+        actor=current()
+        if actor and (actor.device or actor.role not in {'admin','operator'} or
+                      actor.role != 'admin' and body.get('user_id') != actor.user_id):
+            raise HTTPException(403,'只能选择自己的人员身份；管理员可明确交接给登记人员')
+        with core['database'].transaction('IMMEDIATE') as conn:
+            from binding_operator import (activate_member,check_revision,camera_revision,
+                                          request_fingerprint,replay_request,remember_request)
+            fingerprint=request_fingerprint({'operation':'select_member','camera_id':camera_id,'body':body,
+                                             'principal':actor.user_id if actor else None})
+            replay=replay_request(conn,body.get('request_id'),fingerprint)
+            if replay is not None:
+                return replay
+            check_revision(conn,camera_id,body.get('expected_revision'))
+            if not conn.execute('''SELECT 1 FROM camera_users c JOIN users u ON c.user_id=u.id
+                                   WHERE c.camera_id=? AND c.user_id=? AND u.disabled=0''',
+                                (camera_id,body.get('user_id'))).fetchone():
+                raise HTTPException(422,'请先登记此人员的相机使用资格')
+            activate_member(conn,camera_id,body['user_id'],core['now']())
+            return remember_request(conn,body.get('request_id'),camera_id,fingerprint,
+                {'camera_id':camera_id,'active_user_id':body['user_id'],'revision':camera_revision(conn,camera_id)})
+
+    @app.get('/api/admin/cameras/{camera_id}/members')
+    def members(camera_id:str):
+        require_role('admin')
+        return camera_members(camera_id)
+
+    @app.delete('/api/admin/cameras/{camera_id}/members/{user_id}')
+    def remove_member(camera_id:str,user_id:str):
+        require_role('admin')
+        with core['database'].transaction('IMMEDIATE') as conn:
+            active=conn.execute('SELECT user_id FROM camera_active_users WHERE camera_id=?',(camera_id,)).fetchone()
+            if active and active['user_id']==user_id:
+                raise HTTPException(409,'请先切换当前使用人再移除此成员')
+            conn.execute('DELETE FROM camera_users WHERE camera_id=? AND user_id=?',(camera_id,user_id))
+            if not conn.execute('SELECT 1 FROM camera_users WHERE camera_id=?',(camera_id,)).fetchone():
+                raise HTTPException(409,'相机至少需要保留一名登记人员')
+            rows=conn.execute('''SELECT u.id,u.display_name FROM camera_users c JOIN users u ON u.id=c.user_id
+                                 WHERE c.camera_id=? AND u.disabled=0 ORDER BY u.display_name,u.id''',(camera_id,)).fetchall()
+        return {'camera_id':camera_id,'members':[{'user_id':r['id'],'display_name':r['display_name']} for r in rows]}
 
     @app.post('/api/admin/cameras/{camera_id}/credential')
     def credential(camera_id:str):

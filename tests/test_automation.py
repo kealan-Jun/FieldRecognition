@@ -44,6 +44,33 @@ def enable(client):
     return response.json()
 
 
+def test_missing_settings_row_uses_active_camera_member(automatic, monkeypatch):
+    app, client, camera, runner, info = automatic
+    # Managed capture workers can start before the settings document is created.
+    # The persisted active member is still the authoritative operator identity.
+    from database import apply_migrations
+    apply_migrations(app.database)
+    monkeypatch.setattr(app, 'RUNTIME_ENABLED', True)
+    monkeypatch.setenv('FIELD_AUTO_RUN_ENABLED', '1')
+    with app.db() as conn:
+        conn.execute('''INSERT INTO users(id,username,display_name,role,created_at)
+                        VALUES(?,?,?,?,?)''', ('fallback-user', 'fallback-user', '活动人员', 'operator', app.now()))
+        conn.execute('INSERT INTO camera_active_users(camera_id,user_id) VALUES(?,?)',
+                     (camera.target, 'fallback-user'))
+        conn.execute('INSERT INTO camera_users(camera_id,user_id) VALUES(?,?)',
+                     (camera.target, 'fallback-user'))
+        conn.execute('DELETE FROM automation_settings WHERE camera=?', (camera.target,))
+    recovered = AutomaticRunner(vars(app))
+    settings = recovered.settings()
+    assert settings['operator'] == '活动人员'
+    assert settings['wearer_id'] == 'fallback-user'
+    assert settings['enabled']
+    recovered.step()
+    assert recovered.snapshot()['status'] == 'scanning'
+    assert recovered.snapshot()['session']['camera_id'] == camera.target
+    recovered.close()
+
+
 def bind_from_video(app, client, camera, runner):
     enable(client)
     camera.publish(label(app, 'Scene01'))
@@ -193,14 +220,18 @@ def test_pause_during_decode_prevents_late_binding(automatic, monkeypatch):
     assert not runner.settings()['enabled']
 
 
-def test_operator_change_requires_ending_current_binding(automatic):
+def test_operator_change_closes_old_interval_and_opens_successor(automatic):
     app, client, camera, runner, info = automatic
     binding_id = bind_from_video(app, client, camera, runner)
-    assert client.put('/api/automation', json={'enabled': True, 'operator': '登记人员 002'}).status_code == 409
-    assert client.post('/api/camera/relations/end', json={'camera_id': runner.target()}).status_code == 200
     assert client.put('/api/automation', json={'enabled': True, 'operator': '登记人员 002'}).status_code == 200
     history = client.get('/api/state').json()['bindings']
-    assert history[0]['operator'] == '登记人员 001'
+    assert history[0]['operator'] == '登记人员 002'
+    assert history[0]['binding_id'] != binding_id
+    assert history[0]['ended_at'] is None
+    assert history[0]['supersedes_binding_id'] == binding_id
+    previous=next(b for b in history if b['binding_id']==binding_id)
+    assert previous['operator']=='登记人员 001'
+    assert previous['ended_at']==history[0]['started_at']
     assert runner.settings()['operator'] == '登记人员 002'
 
 

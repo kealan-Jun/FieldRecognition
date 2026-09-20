@@ -350,7 +350,15 @@ def _compatible_schema(conn):
             seq INTEGER PRIMARY KEY AUTOINCREMENT,entity TEXT NOT NULL,entity_id TEXT NOT NULL,
             document TEXT NOT NULL,recorded_at TEXT NOT NULL,archived_at TEXT,receipt_path TEXT,
             retry_after REAL NOT NULL DEFAULT 0,attempts INTEGER NOT NULL DEFAULT 0,last_error TEXT);
-        CREATE TABLE IF NOT EXISTS camera_users(camera_id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id));
+        CREATE TABLE IF NOT EXISTS camera_users(
+            camera_id TEXT NOT NULL,
+            user_id TEXT NOT NULL REFERENCES users(id),
+            PRIMARY KEY (camera_id,user_id));
+        CREATE INDEX IF NOT EXISTS idx_camera_users_user ON camera_users(user_id);
+        CREATE TABLE IF NOT EXISTS scene_visits(id TEXT PRIMARY KEY,camera TEXT,ended TEXT,document TEXT);
+        CREATE TABLE IF NOT EXISTS camera_active_users(
+            camera_id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL REFERENCES users(id));
         CREATE TABLE IF NOT EXISTS runtime_leases(name TEXT PRIMARY KEY,owner TEXT NOT NULL,expires_at REAL NOT NULL);
         CREATE TABLE IF NOT EXISTS runtime_status(name TEXT PRIMARY KEY,document TEXT NOT NULL,updated_at REAL NOT NULL);
         CREATE TABLE IF NOT EXISTS camera_schedule(camera_id TEXT PRIMARY KEY,last_claimed REAL NOT NULL);
@@ -372,6 +380,111 @@ MIGRATIONS.append({'version':10,'name':'shared_capture_runtime_tables','descript
       WHERE status='interrupted' AND json_extract(document,'$.resume_pending')=1
       AND coalesce(json_extract(document,'$.request_trigger'),'')<>'video_stream';
 """,'down':None})
+
+
+MIGRATIONS.append({'version':11,'name':'register_stirrer_panel_assets',
+    'description':'Register the class-0 temperature/speed panel as a stirrer with explicit units',
+    'up':"""
+    INSERT OR IGNORE INTO instrument_types(id,name,measurements_json,created_at,updated_at)
+    VALUES('builtin-stirrer-v1','搅拌器',
+      '[{"name":"温度","unit":"°C","range_min":null,"range_max":null,"precision":0.1,"display_format":".1f"},
+        {"name":"转速","unit":"rpm","range_min":null,"range_max":null,"precision":1,"display_format":".0f"}]',
+      datetime('now'),datetime('now'));
+    INSERT OR IGNORE INTO instrument_types(id,name,measurements_json,created_at,updated_at)
+    VALUES('builtin-balance-v1','质量测量仪',
+      '[{"name":"质量","unit":"g","range_min":null,"range_max":null,"precision":0.001,"display_format":".3f"}]',
+      datetime('now'),datetime('now'));
+
+    UPDATE instruments
+       SET name=CASE WHEN name IN ('','仪器 A','称量仪器 A') THEN '搅拌器 A' ELSE name END,
+           type_id='builtin-stirrer-v1',
+           measurement_ranges=CASE
+             WHEN coalesce(measurement_ranges,'{}')='{}' THEN
+               '{"温度":{"unit":"°C","range":[null,null]},"转速":{"unit":"rpm","range":[null,null]}}'
+             ELSE measurement_ranges END
+     WHERE id='e9434a0a-3319-414a-b988-4cc6884edce4';
+
+    UPDATE instruments
+       SET type_id='builtin-balance-v1',
+           measurement_ranges=CASE
+             WHEN coalesce(measurement_ranges,'{}')='{}' THEN
+               '{"质量":{"unit":"g","range":[null,null]}}'
+             ELSE measurement_ranges END
+     WHERE id='eae17924-9fa7-4445-ac45-3987f5687be9';
+""",'down':None})
+
+
+MIGRATIONS.append({'version':12,'name':'allow_multiple_camera_users',
+    'description':'Keep camera personnel memberships in a composite-key table',
+    'up':"""
+    CREATE TABLE IF NOT EXISTS scene_visits(id TEXT PRIMARY KEY,camera TEXT,ended TEXT,document TEXT);
+    CREATE TABLE IF NOT EXISTS camera_users_v12(
+        camera_id TEXT NOT NULL,
+        user_id TEXT NOT NULL REFERENCES users(id),
+        PRIMARY KEY (camera_id,user_id));
+    INSERT OR IGNORE INTO camera_users_v12(camera_id,user_id)
+        SELECT camera_id,user_id FROM camera_users;
+    CREATE TABLE IF NOT EXISTS camera_active_users(
+        camera_id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id));
+    INSERT OR IGNORE INTO camera_active_users(camera_id,user_id)
+        SELECT camera_id,min(user_id) FROM camera_users GROUP BY camera_id HAVING count(*)=1;
+    DROP TABLE camera_users;
+    ALTER TABLE camera_users_v12 RENAME TO camera_users;
+    CREATE INDEX IF NOT EXISTS idx_camera_users_user ON camera_users(user_id);
+    CREATE TRIGGER IF NOT EXISTS camera_member_default_active
+    AFTER INSERT ON camera_users WHEN NOT EXISTS (
+        SELECT 1 FROM camera_active_users WHERE camera_id=NEW.camera_id)
+    BEGIN
+        INSERT INTO camera_active_users(camera_id,user_id) VALUES(NEW.camera_id,NEW.user_id);
+    END;
+""",'down':None})
+
+
+MIGRATIONS.append({'version':13,'name':'classify_devices_and_reserve_qr_identities',
+    'description':'Add explicit device categories and a durable QR identity registry',
+    'up':"""
+    CREATE TABLE IF NOT EXISTS qr_device_registry(
+        qr_hash TEXT PRIMARY KEY,
+        device_id TEXT NOT NULL,
+        first_seen_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        FOREIGN KEY(device_id) REFERENCES instruments(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_qr_device_registry_device ON qr_device_registry(device_id);
+    INSERT OR IGNORE INTO qr_device_registry(qr_hash,device_id,first_seen_at,last_seen_at)
+        SELECT json_extract(document,'$.qr_hash'), json_extract(document,'$.instrument.id'),
+               json_extract(document,'$.started_at'), json_extract(document,'$.started_at')
+          FROM bindings
+         WHERE json_extract(document,'$.qr_hash') IS NOT NULL
+           AND json_extract(document,'$.instrument.id') IS NOT NULL;
+""",'down':None})
+
+
+# Shared with the isolated, non-managed application bootstrap. No historical
+# binding/job documents are rewritten by this migration.
+SESSION_SCHEMA = """
+    DROP TRIGGER IF EXISTS camera_member_default_active;
+    CREATE TABLE IF NOT EXISTS camera_session_state(
+        camera_id TEXT PRIMARY KEY, revision INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS binding_change_requests(
+        request_id TEXT PRIMARY KEY, camera_id TEXT NOT NULL,
+        fingerprint TEXT NOT NULL, document TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS binding_session_audit(
+        id TEXT PRIMARY KEY, camera_id TEXT NOT NULL, occurred_at TEXT NOT NULL,
+        relation_type TEXT NOT NULL, previous_id TEXT NOT NULL, next_id TEXT NOT NULL,
+        document TEXT NOT NULL);
+    CREATE INDEX IF NOT EXISTS binding_session_audit_camera ON binding_session_audit(camera_id,occurred_at);
+    CREATE TRIGGER IF NOT EXISTS immutable_binding_session_audit_update
+    BEFORE UPDATE ON binding_session_audit
+    BEGIN SELECT RAISE(ABORT,'Session audit is immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS immutable_binding_session_audit_delete
+    BEFORE DELETE ON binding_session_audit
+    BEGIN SELECT RAISE(ABORT,'Session audit is immutable'); END;
+"""
+MIGRATIONS.append({'version':14,'name':'immutable_personnel_sessions',
+    'description':'Explicit active user selection, transactional sessions and retry receipts',
+    'up':SESSION_SCHEMA,'down':None})
 
 
 def get_migration_status(db):
@@ -399,6 +512,8 @@ def apply_migrations(db, dry_run=False):
         applied = {r[0] for r in conn.execute('SELECT version FROM schema_migrations')}
         if 9 not in applied:
             _compatible_schema(conn)
+        if 13 not in applied and 'device_category' not in _columns(conn, 'instruments'):
+            conn.execute("ALTER TABLE instruments ADD COLUMN device_category TEXT NOT NULL DEFAULT 'instrument'")
         for migration in MIGRATIONS:
             if migration['version'] in applied:
                 continue

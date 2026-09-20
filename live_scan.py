@@ -25,6 +25,7 @@ def frame_key(metadata):
 
 class StartScan(BaseModel):
     operator: str = Field(min_length=1, max_length=80)
+    wearer_id: str | None = Field(default=None, max_length=100)
 
 
 class LiveScanner:
@@ -57,19 +58,28 @@ class LiveScanner:
     def refresh_bindings(self):
         bindings = self.active_bindings()
         visits = [v for v in self.core['scene_visits']() if v['camera_id'] == self.camera().target]
+        if self.session is None:
+            return
         self.session.update(bindings=bindings, binding=bindings[0] if len(bindings) == 1 else None,
                             scene_visits=visits,
                             message=f'已关联 {len(bindings)} 台仪器、{len(visits)} 个场景；仅为新二维码建立关联')
 
-    def start(self, operator, *, owner='browser'):
+    def start(self, operator, *, owner='browser', wearer_id=None):
         if not operator.strip():
             raise HTTPException(422, '请先填写实验员姓名或编号')
         camera = self.camera()
+        if self.core.get('RUNTIME_ENABLED'):
+            from binding_operator import resolve_wearer
+            with self.core['db']() as conn:
+                wearer_id = resolve_wearer(conn,camera.target,operator.strip(),wearer_id)
+            if not wearer_id:
+                raise HTTPException(422, '请选择相机已登记的实际使用人员；同名人员需提供 wearer_id')
         with self.lock:
             if self.session and self.session['status'] in ACTIVE:
                 raise HTTPException(409, '已有连续扫码正在运行，请先停止')
             self.session = {'session_id': str(uuid.uuid4()), 'status': 'scanning',
                             'camera_id': camera.target, 'operator': operator.strip(), 'owner': owner,
+                            'wearer_id':wearer_id,
                             'started_at': self.core['now'](), 'frames_scanned': 0,
                             'message': '连续扫码中：对准仪器码即可绑定；场景码可单独识别',
                             'scan': None, 'binding': None}
@@ -173,6 +183,13 @@ class LiveScanner:
 
     def _accept(self, frame, metadata, decoded, matches):
         # Caller holds the same lock used by stop/reset: no late write after stop returns.
+        if self.core.get('RUNTIME_ENABLED'):
+            with self.core['db']() as conn:
+                active = conn.execute('SELECT user_id FROM camera_active_users WHERE camera_id=?',
+                                      (self.camera().target,)).fetchone()
+            if active and active[0] != self.session.get('wearer_id'):
+                self.session.update(status='stopped',message='实际使用人已交接，请刷新扫码会话')
+                return
         result = self.core['save_camera_scan'](frame, metadata, decoded=decoded,
                                              operator=self.session['operator'], scan_session_id=self.session['session_id'])
         self.session['scan'] = result
@@ -181,14 +198,16 @@ class LiveScanner:
         for scene in matches['scene_matches']:
             try:
                 visit = self.core['enter_scene'](self.core['SceneEntry'](
-                    scan_id=result['scan_id'], scene_id=scene['id'], operator=self.session['operator']), automatic=True)
+                    scan_id=result['scan_id'], scene_id=scene['id'], operator=self.session['operator'],
+                    wearer_id=self.session.get('wearer_id')), automatic=True)
                 self.session['scene_visit'] = visit
             except HTTPException as exc:
                 errors.append(str(exc.detail))
         for instrument in matches['matches']:
             try:
                 self.core['bind'](self.core['BindingRequest'](scan_id=result['scan_id'],
-                    instrument_id=instrument['id'], operator=self.session['operator']), automatic=True)
+                    instrument_id=instrument['id'], operator=self.session['operator'],
+                    wearer_id=self.session.get('wearer_id')), automatic=True)
             except HTTPException as exc:
                 if isinstance(exc.detail, dict):
                     detail = exc.detail
@@ -297,7 +316,8 @@ def install(core):
 
     @app.post('/api/camera/scan-sessions')
     def start(body: StartScan):
-        return scanner.start(body.operator)
+        from security import current
+        return scanner.start(body.operator, wearer_id=current().user_id if current() else body.wearer_id)
 
     @app.get('/api/camera/scan-sessions/{session_id}')
     def status(session_id: uuid.UUID):

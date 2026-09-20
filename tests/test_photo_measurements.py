@@ -165,7 +165,10 @@ def test_production_single_photo_has_draft_but_never_infers_time_or_context(setu
         'capture_times': {capture['capture_id']: '2026-09-14T10:00:00'}})
     assert bad.status_code == 422
     result = client.post(f"/api/photo-measurements/{reply['measurement_id']}/revisions", json=update)
-    assert result.status_code == 200 and not result.json()['blockers']
+    assert result.status_code == 200
+    # An audited time correction alone does not fabricate the missing, verified
+    # capture-time panel association. The raw job remains available for review.
+    assert '没有可定位的读数字段，请补拍清晰面板' in result.json()['blockers']
     assert result.json()['sources'][0]['captured_at'] is None
 
 
@@ -199,7 +202,15 @@ def test_confirmation_rejects_corrupt_original_and_direct_retry_reuses_job(setup
 
 
 def test_unknown_unit_is_not_guessed_from_metric_name(setup):
-    _, client, _, _ = setup
+    app, client, binding, _ = setup
+    # The registry supplies units for the default stirrer. Remove both the
+    # explicit type and ranges here so this test still exercises the
+    # unknown-unit contract rather than the typed-instrument path.
+    with app.db() as conn:
+        conn.execute('UPDATE instruments SET type_id=NULL,measurement_ranges=? WHERE id=?',
+                     ('{}', binding['instrument']['id']))
+    binding['instrument']['type_id'] = None
+    binding['instrument']['measurement_ranges'] = {}
     reply, _ = enqueue(setup, 1)
     complete(setup, 0, '51', None)
     draft = get_draft(client, reply['measurement_id'])
@@ -249,7 +260,7 @@ def test_manual_target_correction_cannot_claim_another_cameras_occupied_device(s
         'reason': '测试错误的人工归属', 'fields': [{'field_id': draft['fields'][0]['field_id'],
             'instrument_id': other['instrument']['id'], 'name': '质量', 'value': 51, 'unit': 'g'}]}).json()
     result = client.post(f'/api/photo-measurements/{mid}/confirm', json={'actor': 'Reader', 'revision': changed['revision']})
-    assert result.status_code == 409 and 'OtherUser' in result.text
+    assert result.status_code == 409 and '采集时有效绑定' in result.text
     assert not client.get('/api/experiment-records').json()['items']
 
 

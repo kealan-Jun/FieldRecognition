@@ -2,11 +2,13 @@
 Description=FieldRecognition ocr
 PartOf=field-recognition.target
 After=network-online.target
-StartLimitIntervalSec=60
-StartLimitBurst=5
+StartLimitIntervalSec=0
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
+WatchdogSec=120
+TimeoutStartSec=120
 WorkingDirectory=%h/Projects/FieldRecognition
 EnvironmentFile=-%h/Projects/FieldRecognition/Data/Runtime/ServiceEnvironment.env
 EnvironmentFile=%h/Projects/FieldRecognition/.env
@@ -16,7 +18,7 @@ Environment=PYTHONUNBUFFERED=1
 Environment=OMP_NUM_THREADS=2
 Environment=OPENBLAS_NUM_THREADS=2
 ExecStart=%h/Projects/FieldRecognition/.venv/bin/python -m ocr_worker --persistent
-Restart=on-failure
+Restart=always
 RestartSec=5
 TimeoutStopSec=25
 KillMode=control-group

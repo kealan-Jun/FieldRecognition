@@ -81,7 +81,7 @@ def test_decimal_ambiguity_is_retained_without_inventing_decimal():
     assert not r['human_verified']
 
 
-def test_registered_photo_qr_identifies_instrument_without_session_binding(app_client, monkeypatch):
+def test_registered_photo_qr_is_identity_evidence_but_does_not_authorize_unlocalized_reading(app_client, monkeypatch):
     app, client = app_client
     aid = 'e9434a0a-3319-414a-b988-4cc6884edce4'
     client.put('/api/instruments/'+aid, json={'name': '仪器 A', 'scene': '湿实验实验台'})
@@ -92,9 +92,10 @@ def test_registered_photo_qr_identifies_instrument_without_session_binding(app_c
     done = wait_for_job(client, response.json()['job_id'])
     assert done['instrument']['id'] == aid and done['binding_id'] is None
     assert done['instrument_identity_basis'] == 'decoded_photo_qr'
-    assert done['readings'][0]['instrument']['id'] == aid
-    assert done['readings'][0]['association_basis'] == 'same_image_qr'
+    assert done['readings'][0]['instrument'] is None
+    assert done['readings'][0]['association_basis'] == 'unlocalized'
     assert not client.get('/api/state').json()['bindings']
     assert client.get('/api/readouts').json()['items'][0]['target'] == '仪器 A'
     bench = next(g for g in client.get('/api/workbenches').json()['workbenches'] if g['name'] == '湿实验实验台')
-    assert next(i for i in bench['instruments'] if i['id'] == aid)['readings'][0]['text'] == '1.23 g'
+    assert not next(i for i in bench['instruments'] if i['id'] == aid)['readings']
+    assert bench['unassigned_readings'][0]['text'] == '1.23 g'

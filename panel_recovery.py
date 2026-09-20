@@ -42,15 +42,27 @@ def has_display_color(hsv, box):
     return float(np.mean(color & (saturation >= 30) & (value >= 35))) >= .06
 
 
-def detect(image, infer, *, imgsz=960, confidence=.25):
-    """At most four forwards; a recovery needs color and two aligned views."""
+def detect(image, infer, *, imgsz=960, confidence=.25, photo=False):
+    """Four live-video forwards; photo closeups allow eight additional forwards."""
     height,width = image.shape[:2]
     primary = infer(image, imgsz, confidence)
     accepted = [dict(b, localization_method='original') for b in primary['boxes']]
     recovery = {'version':VERSION, 'attempted':False, 'passes':1, 'recovered_count':0}
+    diagnostics = {'raw_candidate_count':len(primary['boxes']),
+        'raw_count_basis':'model_returned_boxes_after_model_threshold_and_nms',
+        'passes':[{'view':'original','candidate_count':len(primary['boxes'])}], 'excluded_candidates':[]}
+
+    def exclude(box, reason):
+        diagnostics['excluded_candidates'].append({k:box[k] for k in ('class_id','xyxy','confidence','view') if k in box} | {'reason':reason})
+
+    def output():
+        diagnostics['quality_filtered_count'] = len(accepted)
+        return {'boxes':accepted, 'speed_ms':speed, 'recovery':recovery, 'diagnostics':diagnostics}
+
+    speed = dict(primary.get('speed_ms', {}))
     # Existing full detections win over augmented duplicates, preserving crops.
     if sum(b['class_id']==0 for b in accepted) >= 2 and any(b['class_id']==1 for b in accepted):
-        return dict(primary, boxes=accepted, recovery=recovery)
+        return output()
     recovery['attempted'] = True
     dark = cv2.LUT(image, GAMMA_LUT)
     views = [('gamma_scale', dark, min(imgsz,800), None)]
@@ -59,27 +71,62 @@ def detect(image, infer, *, imgsz=960, confidence=.25):
         pixels = cv2.warpAffine(dark, matrix, (width,height), borderMode=cv2.BORDER_REPLICATE)
         views.append((f'gamma_tilt_{angle}', pixels, imgsz, matrix))
     candidates = []
-    speed = dict(primary.get('speed_ms', {}))
     for name,pixels,size,matrix in views:
         result = infer(pixels, size, max(.1,confidence*.4))
         recovery['passes'] += 1
+        diagnostics['raw_candidate_count'] += len(result['boxes'])
+        diagnostics['passes'].append({'view':name,'candidate_count':len(result['boxes'])})
         for key,value in result.get('speed_ms', {}).items():
             speed[key] = speed.get(key,0) + value
         for box in result['boxes']:
             mapped = source_box(box['xyxy'], matrix, width, height)
             if mapped[2]-mapped[0] >= 4 and mapped[3]-mapped[1] >= 4:
                 candidates.append(dict(box, xyxy=mapped, view=name))
+            else:
+                exclude(dict(box,xyxy=mapped,view=name), 'region_too_small')
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     for box in sorted(candidates, key=lambda b:b['confidence'], reverse=True):
         if box['confidence'] < confidence or len(accepted) >= 6:
+            exclude(box, 'below_recovery_confidence' if box['confidence'] < confidence else 'candidate_limit')
             continue
         if any(iou(box['xyxy'], b['xyxy']) >= .4 for b in accepted):
+            exclude(box, 'duplicate_region')
             continue
         supporting = sorted({b['view'] for b in candidates if b['class_id']==box['class_id']
                              and iou(box['xyxy'],b['xyxy']) >= .5})
         if len(supporting) < 2 or not has_display_color(hsv,box):
+            exclude(box, 'insufficient_supporting_views' if len(supporting) < 2 else 'display_color_mismatch')
             continue
         accepted.append({k:v for k,v in box.items() if k!='view'} |
                         {'localization_method':VERSION, 'supporting_views':supporting})
         recovery['recovered_count'] += 1
-    return {'boxes':accepted, 'speed_ms':speed, 'recovery':recovery}
+    if photo and sum(b['class_id']==0 for b in accepted) < 2:
+        # Close photographs can exceed the scale seen during training. Two
+        # padded views must agree; this never runs on the live video path.
+        closeups=[]
+        for scale in (.35,.45):
+            matrix=cv2.getRotationMatrix2D((width/2,height/2),0,scale)
+            pixels=cv2.warpAffine(image,matrix,(width,height),borderValue=(114,114,114))
+            result=detect(pixels,infer,imgsz=imgsz,confidence=confidence)
+            recovery['passes']+=result['recovery']['passes']
+            nested = result['diagnostics']
+            diagnostics['raw_candidate_count'] += nested['raw_candidate_count']
+            diagnostics['passes'].extend(dict(p,view=f"closeup_{scale}/{p['view']}") for p in nested['passes'])
+            diagnostics['excluded_candidates'].extend(dict(b,view=f"closeup_{scale}/{b.get('view','original')}",
+                coordinate_space='scaled_detector_input') for b in nested['excluded_candidates'])
+            for key,value in result.get('speed_ms',{}).items():speed[key]=speed.get(key,0)+value
+            for box in result['boxes']:
+                if box['class_id']==0:
+                    closeups.append(dict(box,xyxy=source_box(box['xyxy'],matrix,width,height),view=scale))
+        for box in sorted(closeups,key=lambda b:b['confidence'],reverse=True):
+            if len(accepted)>=6 or any(iou(box['xyxy'],b['xyxy'])>=.4 for b in accepted):
+                exclude(box, 'candidate_limit' if len(accepted)>=6 else 'duplicate_region')
+                continue
+            support={b['view'] for b in closeups if iou(box['xyxy'],b['xyxy'])>=.5}
+            if len(support)<2 or not has_display_color(hsv,box):
+                exclude(box, 'insufficient_supporting_views' if len(support)<2 else 'display_color_mismatch')
+                continue
+            accepted.append({k:v for k,v in box.items() if k!='view'} |
+                            {'localization_method':'photo_closeup_scale_v1','supporting_views':sorted(support)})
+            recovery['recovered_count']+=1
+    return output()

@@ -20,7 +20,7 @@ def extract_digits(image, region):
     return crop, transform
 
 
-def refine_digits(predict, image, initial, x=0, y=0, *, source_image=None, source_offset=(0,0)):
+def refine_digits(predict, image, initial, x=0, y=0, *, source_image=None, source_offset=(0,0), recover_small=False):
     """Use measured glyph geometry; never insert a decimal point or a unit."""
     candidates = []
     for line in initial.get('lines', []):
@@ -42,6 +42,20 @@ def refine_digits(predict, image, initial, x=0, y=0, *, source_image=None, sourc
     output = copy.deepcopy(initial)
     output['panel_ocr'] = copy.deepcopy(initial)
     if not candidates:
+        if recover_small and initial.get('status') == 'completed' and min(image.shape[:2]) < 160 and max(image.shape[:2]) < 480:
+            # One bounded retry on the already authorized LCD crop. No whole
+            # image OCR, super-resolution model, or inferred missing glyphs.
+            enlarged = cv2.resize(image, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+            attempt = predict(enlarged, 0, 0)
+            mapped = copy.deepcopy(attempt)
+            for line in mapped.get('lines', []):
+                if line.get('polygon') is not None:
+                    line['polygon'] = (np.asarray(line['polygon'])/2+[x,y]).tolist()
+            recovered = refine_digits(predict, image, mapped, x, y,
+                                      source_image=source_image, source_offset=source_offset)
+            recovered.update(panel_ocr=copy.deepcopy(initial), small_panel_ocr=attempt,
+                             small_panel_recovery={'method':'authorized_lcd_2x_v1','scale':2})
+            return recovered
         output.update(lines=[], digit_region={'status':'not_located','method':'dominant_numeric_line_v1'})
         return output
     _, selected, polygon, width, height = max(candidates, key=lambda item:item[0])

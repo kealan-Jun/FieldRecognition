@@ -93,6 +93,22 @@ class TaskQueue:
         with self.db.transaction('IMMEDIATE') as conn:
             return self._expire(conn,time.time())
 
+    def recover_interrupted(self):
+        """Resume only photos explicitly marked interrupted by a clean shutdown."""
+        with self.db.transaction('IMMEDIATE') as conn:
+            rows = conn.execute("""SELECT * FROM jobs WHERE status='interrupted'
+                AND lease_holder IS NULL AND json_extract(document,'$.resume_pending')=1
+                AND coalesce(json_extract(document,'$.request_trigger'),'')!='video_stream'""").fetchall()
+            for row in rows:
+                doc = json.loads(row['document'])
+                doc.update(status='queued', phase='restart_recovery', resume_pending=False,
+                           resumed_at=utc(), attempt_count=max(0,row['attempt_count']-1))
+                for key in ('lease_holder','lease_expires_at','finished_at'):
+                    doc.pop(key,None)
+                conn.execute("""UPDATE jobs SET status='queued',document=?,next_attempt_at=0,
+                    attempt_count=max(0,attempt_count-1) WHERE id=?""", (json.dumps(doc),row['id']))
+            return len(rows)
+
     def _owned(self, conn, job_id, token=None):
         token = token or self.claims.get(job_id)
         row = conn.execute("SELECT * FROM jobs WHERE id=? AND status='running' AND lease_holder=? AND lease_expires_at>?",
@@ -149,6 +165,23 @@ class TaskQueue:
                 (state,json.dumps(doc),row['attempt_count'],now+delay if again else 0,job_id))
             if refresh:refresh(conn)
         self.claims.pop(job_id,None)
+
+    def defer_task(self, job_id, *, document=None, delay=15):
+        """Dependency unavailability is a wait, not an exhausted recognition attempt."""
+        with self.db.transaction('IMMEDIATE') as conn:
+            row = self._owned(conn, job_id, document.get('lease_holder') if document else None)
+            doc = json.loads(row['document'])
+            if document:
+                doc.update(document)
+            doc.update(status='queued', phase='waiting_service', last_error='InferenceUnavailable',
+                       dependency_wait_count=doc.get('dependency_wait_count', 0)+1,
+                       dependency_last_wait_at=utc(), attempt_count=max(0, row['attempt_count']-1))
+            for key in ('finished_at','lease_holder','lease_expires_at'):
+                doc.pop(key, None)
+            conn.execute("""UPDATE jobs SET status='queued',document=?,next_attempt_at=?,
+                attempt_count=max(0,attempt_count-1),lease_holder=NULL,lease_expires_at=NULL WHERE id=?""",
+                (json.dumps(doc), time.time()+delay, job_id))
+        self.claims.pop(job_id, None)
 
     def cancel_task(self, job_id):
         with self.db.transaction('IMMEDIATE') as conn:

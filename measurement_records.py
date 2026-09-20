@@ -8,7 +8,58 @@ from zoneinfo import ZoneInfo
 
 UNITS = {'温度': {'°C'}, '转速': {'rpm'}, '质量': {'g', 'mg', 'kg'}}
 SCHEMA_VERSION = 'instrument-measurement/1'
-RULE_VERSION = 'instrument-measurement/3'
+RULE_VERSION = 'instrument-measurement/6'
+
+
+def binding_for_region(document, region):
+    """Recheck a region against this task's immutable capture-time authorization."""
+    if document.get('attribution_status') == 'needs_review':
+        return None
+    iid = (region.get('instrument') or {}).get('id')
+    if not iid or not region.get('binding_id') or region.get('association_issue'):
+        return None
+    if region.get('instrument_id', iid) != iid:
+        return None
+    snapshots = document.get('all_binding_snapshots', document.get('binding_snapshots', []))
+    matches = [b for b in snapshots if b.get('binding_id') == region['binding_id']
+               and (b.get('instrument') or {}).get('id') == iid]
+    if len(matches) != 1:
+        return None
+    binding = matches[0]
+    if binding.get('attribution_status') == 'needs_review':
+        return None
+    if binding.get('camera_id') and document.get('camera_id') and binding['camera_id'] != document['camera_id']:
+        return None
+    captured_at, _ = capture_clock(document)
+    if captured_at and binding.get('started_at'):
+        from binding_policy import contains
+        try:
+            if not contains(binding, captured_at):
+                return None
+        except (TypeError, ValueError, AttributeError):
+            return None
+    return binding
+
+
+def apply_fixed_decimal(name, line, instrument):
+    """Place a registered fixed decimal in a complete integer glyph string.
+
+    decimal_places alone remains a validation rule. An operator must also
+    confirm fixed_decimal_display; neither class nor model supplies this fact.
+    """
+    spec = ((instrument.get('measurement_ranges') or {}).get(name) or {})
+    places = spec.get('decimal_places')
+    raw = line.get('text', '').strip()
+    if (spec.get('fixed_decimal_display') is not True or type(places) is not int or not 1 <= places <= 8
+            or (line.get('value') is not None and str(line['value']) != raw) or line.get('quality_issue')
+            or not re.fullmatch(r'[+-]?(?:0|[1-9]\d*)\d{' + str(places) + '}', raw)):
+        return line
+    sign = raw[0] if raw[0] in '+-' else ''
+    digits = raw.lstrip('+-')
+    value = sign + digits[:-places] + '.' + digits[-places:]
+    return dict(line, value=value, normalization={'method':'registered_fixed_decimal_v2',
+        'raw_text':raw, 'decimal_places':places, 'fixed_decimal_display':True,
+        'instrument_id':instrument.get('id'), 'value':value})
 
 
 def capture_clock(document):
@@ -125,23 +176,54 @@ def field_issues(name, reading, instrument):
     return list(dict.fromkeys(issues))
 
 
+def select_field_reading(matches, name, instrument):
+    """Same-frame duplicate OCR candidates may differ in quality, not in value."""
+    if not matches:
+        return {}, None
+    if len(matches) == 1:
+        return matches[0], None
+    # Different windows cannot silently vote for one physical field.
+    if len({r.get('panel_id') for r in matches}) != 1:
+        return {}, 'multiple_field_regions'
+    signatures = set()
+    for reading in matches:
+        value, basis = measurement_value(name, reading, instrument)
+        if value['value'] is None or basis == 'unit_conflict':
+            return {}, 'readout_conflict'
+        signatures.add((Decimal(str(reading['value'])), value['unit']))
+    if len(signatures) != 1:
+        return {}, 'readout_conflict'
+    return max(matches, key=lambda r: ({'clear':2, 'medium':1}.get(r.get('clarity'), 0),
+                                      r.get('confidence') or 0)), None
+
+
 def display_fields(document):
     """Common derived field view for API, browser and archived results."""
     result = []
     for entry in build_records(document):
         iid = entry['instrument_id']
         for value in entry['record']['values']:
-            matches = [r for r in document.get('readings', []) if
-                       (r.get('instrument') or {}).get('id') == iid and r.get('measurement_name') == value['name']]
             regions = [r for r in document.get('panel_regions', []) if
-                       (r.get('instrument') or {}).get('id') == iid and r.get('measurement_name') == value['name']]
+                       (r.get('instrument') or {}).get('id') == iid and r.get('measurement_name') == value['name']
+                       and binding_for_region(document, r) is not None]
+            allowed = {(r['panel_id'],r.get('binding_id')) for r in regions}
+            matches = [r for r in document.get('readings', []) if
+                       (r.get('instrument') or {}).get('id') == iid and r.get('measurement_name') == value['name']
+                       and (r.get('panel_id'),r.get('binding_id')) in allowed]
             region = regions[0] if len(regions) == 1 else {}
-            reading = matches[0] if len(matches) == 1 else {}
+            reading, conflict = select_field_reading(matches, value['name'], region.get('instrument') or {})
             state = (region.get('display_state') or {}).get('text')
             issues = field_issues(value['name'], reading, region.get('instrument') or {})
+            if conflict:
+                issues.append(conflict)
+            unit_basis = entry['evidence']['unit_basis'].get(value['name'])
+            if value['value'] is not None and unit_basis == 'unknown':
+                issues.append('unit_unknown')
             result.append(value | {'instrument_id': iid, 'instrument_name': (region.get('instrument') or {}).get('name'),
                 'panel_id': region.get('panel_id'), 'panel_image_url': region.get('image_url'),
-                'raw_text': reading.get('text'), 'display_state': state, 'issues': issues,
+                'raw_text': reading.get('text') or ((region.get('display_state') or {}).get('raw_text') if state else None),
+                'display_value':reading.get('value'), 'unit_basis':unit_basis,
+                'display_state': state, 'issues': issues,
                 'status': 'display_state' if state else 'needs_correction' if issues else 'recognized' if value['value'] is not None else 'unreadable'})
     return result
 
@@ -150,7 +232,7 @@ def build_records(document):
     """The record follows the user's schema; provenance lives outside it."""
     groups = {}
     for region in document.get('panel_regions',[]):
-        if region.get('instrument') and region.get('binding_id'):
+        if binding_for_region(document, region) is not None:
             groups.setdefault(region['instrument']['id'],[]).append(region)
     results = []
     for iid, regions in groups.items():
@@ -164,12 +246,28 @@ def build_records(document):
         qr = next((q for q in document.get('qr_matches',[]) if q['id']==iid and q.get('qr_hash')),None)
         digest = qr['qr_hash'] if qr else binding.get('qr_hash')
         digest = digest if isinstance(digest,str) and re.fullmatch('[a-f0-9]{64}',digest) else None
-        candidates = [r for r in document.get('readings',[]) if (r.get('instrument') or {}).get('id')==iid]
-        values, unit_bases = [], {}
+        panel_ids = {r['panel_id'] for r in regions}
+        candidates = [r for r in document.get('readings',[]) if (r.get('instrument') or {}).get('id')==iid
+                      and r.get('panel_id') in panel_ids
+                      and r.get('binding_id', regions[0]['binding_id']) == regions[0]['binding_id']]
+        values, unit_bases, field_statuses = [], {}, {}
         for name in names:
             matches = [r for r in candidates if r.get('measurement_name')==name]
-            reading = matches[0] if len(matches)==1 and document.get('status')=='completed' else {}
+            reading, conflict = select_field_reading(matches, name, instrument)
+            if document.get('status') != 'completed':
+                reading = {}
             value, unit_bases[name] = measurement_value(name, reading, instrument)
+            displays = [r for r in regions if r.get('measurement_name') == name]
+            if (document.get('status') == 'completed' and len(displays) == 1
+                    and (displays[0].get('display_state') or {}).get('text') == 'OFF'):
+                value.update(value=None, display_state='OFF')
+            field_statuses[name] = ('display_state' if value.get('display_state') else
+                conflict if conflict else
+                'field_role_unconfirmed' if not displays and any(not r.get('measurement_name') for r in regions) else
+                'field_not_detected' if not displays else
+                'field_rule_conflict' if field_issues(name, reading, instrument) else
+                'unreadable' if value['value'] is None else
+                'unit_unknown' if unit_bases[name] == 'unknown' else 'recognized')
             values.append(value)
         record = {'wearer_id':string(binding.get('wearer_id')) or string((document.get('operator_registration') or {}).get('wearer_id')),
             'device_model':string(instrument.get('model')), 'device_no':string(instrument.get('device_no')),
@@ -182,6 +280,8 @@ def build_records(document):
             'qr_scan_id':document['capture_id'] if qr else binding.get('scan_id') if digest else None,
             'photo_time_basis':capture_clock(document)[1] if record['photo_time']['timestamp_ms'] is not None else None,
             'schema_version':SCHEMA_VERSION, 'rule_version':RULE_VERSION, 'unit_basis':unit_bases,
+            'field_statuses':field_statuses,
+            'field_completeness':'complete' if all(s in {'recognized','display_state'} for s in field_statuses.values()) else 'incomplete',
             'panel_ids':[r['panel_id'] for r in regions], 'candidate_readings':candidates,
             'human_verified':False,'value_meaning':'displayed_value_setpoint_or_actual_unknown'}})
     return results
