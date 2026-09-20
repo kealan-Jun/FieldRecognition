@@ -67,6 +67,9 @@ sudo systemctl enable --now field-recognition-ocr-recovery.timer
 原任务、原错误、原照片哈希及历史归属不改写；归属待确认状态随新版本保留。
 相同 request_id 重试复用新版本，不重复创建。网页失败任务提供同一入口。
 历史失败数可能仍包含原版本，应结合 `/versions` 的当前版本判断是否已恢复。
+启动前加载实际读数模块；运行中若仍遇到 ImportError/ModuleNotFoundError，任务持久化等待，
+不消耗照片重试次数。工作进程捕获的异常仅保存类型和代码位置，不保存可能包含凭证的异常消息。
+依赖修复后继续领取原任务；这不会将输入错误或读不清的图片自动标记为正确读数。
 
 设置 `FIELD_RECORD_MODE=production` 并受控重启后，新照片生成待确认草稿，
 人工确认后才产生正式实验记录。旧 test 记录和对旧任务的重新识别保持原模式。

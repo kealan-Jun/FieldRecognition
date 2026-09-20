@@ -24,8 +24,8 @@ def save(core, document):
         from photo_measurements import refresh
         callback=(lambda conn: refresh(core,conn,document['measurement_id'])) if document.get('measurement_id') else None
         if document['status']=='failed':
-            if document.get('error') == 'InferenceUnavailable':
-                core['task_queue'].defer_task(document['job_id'], document=document)
+            if document.get('error') in {'InferenceUnavailable', 'ImportError', 'ModuleNotFoundError'}:
+                core['task_queue'].defer_task(document['job_id'], document=document, error=document['error'])
                 return
             transient=document.get('error') in {'local_ocr_timeout','TimeoutError','OSError','ConnectionError','worker_unavailable'}
             core['task_queue'].fail_task(document['job_id'],document.get('error','ocr_failed'),retry=transient,document=document,refresh=callback)

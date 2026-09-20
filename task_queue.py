@@ -166,14 +166,14 @@ class TaskQueue:
             if refresh:refresh(conn)
         self.claims.pop(job_id,None)
 
-    def defer_task(self, job_id, *, document=None, delay=15):
+    def defer_task(self, job_id, *, document=None, delay=15, error='InferenceUnavailable'):
         """Dependency unavailability is a wait, not an exhausted recognition attempt."""
         with self.db.transaction('IMMEDIATE') as conn:
             row = self._owned(conn, job_id, document.get('lease_holder') if document else None)
             doc = json.loads(row['document'])
             if document:
                 doc.update(document)
-            doc.update(status='queued', phase='waiting_service', last_error='InferenceUnavailable',
+            doc.update(status='queued', phase='waiting_service', last_error=error,
                        dependency_wait_count=doc.get('dependency_wait_count', 0)+1,
                        dependency_last_wait_at=utc(), attempt_count=max(0, row['attempt_count']-1))
             for key in ('finished_at','lease_holder','lease_expires_at'):

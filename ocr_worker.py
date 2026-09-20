@@ -29,6 +29,18 @@ class OCRWorker:
             self.core['run_ocr'](task)
         except LeaseLost:
             pass  # Superseded attempts may not publish any terminal state.
+        except ImportError as exc:
+            # A broken runtime dependency must not consume the photo's retries.
+            # Preserve only traceback locations, never exception messages/locals
+            # which could include configuration credentials.
+            import traceback
+            task['runtime_error'] = {'type': type(exc).__name__, 'frames': [
+                {'file': os.path.basename(frame.filename), 'line': frame.lineno, 'function': frame.name}
+                for frame in traceback.extract_tb(exc.__traceback__)[-6:]]}
+            try:
+                self.queue.defer_task(task['job_id'], document=task, error=type(exc).__name__)
+            except LeaseLost:
+                pass
         except Exception as exc:
             try:self.queue.fail_task(task['job_id'],type(exc).__name__,document=task)
             except LeaseLost:pass

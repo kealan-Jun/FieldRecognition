@@ -96,6 +96,32 @@ def test_cold_import_failure_prevents_database_mutation(tmp_path, monkeypatch):
     assert path.read_bytes() == before
 
 
+def test_runtime_import_fault_does_not_exhaust_photos_and_recovers(tmp_path):
+    from ocr_worker import OCRWorker
+    path = old_database(tmp_path)
+    db = Database(path)
+    def missing_dependency(task):
+        raise ImportError('private configuration must not appear in a receipt')
+    worker = OCRWorker('test', None, core={'database': db, 'run_ocr': missing_dependency})
+    worker.queue.enqueue({'job_id': 'waiting-photo', 'camera_id': 'Camera', 'capture_id': 'immutable-source'})
+    for _ in range(6):
+        task = worker.queue.claim_task()
+        assert task['attempt_count'] == 1
+        worker._process_ocr_task(task)
+        with db.connection() as conn:
+            row = conn.execute("SELECT status,document,attempt_count FROM jobs WHERE id='waiting-photo'").fetchone()
+            assert row['status'] == 'queued' and row['attempt_count'] == 0
+            assert 'private configuration' not in row['document']
+            assert json.loads(row['document'])['last_error'] == 'ImportError'
+            conn.execute("UPDATE jobs SET next_attempt_at=0 WHERE id='waiting-photo'")
+    worker.core['run_ocr'] = lambda task: worker.queue.complete_task(task['job_id'], {'lines': []})
+    worker._process_ocr_task(worker.queue.claim_task())
+    with db.connection() as conn:
+        result = json.loads(conn.execute("SELECT document FROM jobs WHERE id='waiting-photo'").fetchone()[0])
+    assert result['status'] == 'completed' and result['dependency_wait_count'] == 6
+    assert result['capture_id'] == 'immutable-source'
+
+
 @pytest.mark.parametrize('break_prepare', [False, True])
 def test_deploy_stops_before_code_change_and_never_starts_after_failed_prepare(tmp_path, break_prepare):
     calls = []
