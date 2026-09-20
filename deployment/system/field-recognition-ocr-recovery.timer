@@ -1,0 +1,11 @@
+[Unit]
+Description=Check the FieldRecognition OCR API dependency every 30 seconds
+
+[Timer]
+OnBootSec=45s
+OnUnitInactiveSec=30s
+AccuracySec=1s
+Unit=field-recognition-ocr-recovery.service
+
+[Install]
+WantedBy=timers.target

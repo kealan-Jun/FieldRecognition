@@ -78,6 +78,10 @@ FieldRecognitionArchive/
 
 ## 运维与验证边界
 
+更新代码统一使用 [运行可靠性说明](RuntimeReliability.md) 中的 `scripts/upgrade_runtime.py`。
+先在独立 worktree 测试提交，部署时停止全部写入进程后才切换代码、演练迁移并备份。
+安装新的用户单元后，四个服务在启动时都等待 `field-recognition-prepare.service` 成功。
+
 - `/health/live` 检查 API 存活；`/health/ready` 检查数据库及必要工作进程心跳。相机画面在线与真实识别是否成功需查看状态及业务证据。
 - `/api/admin/status` 查看进程、OCR、队列和归档；`/metrics` 输出队列与待归档数量；默认可在本机直接查看；启用登录时要求管理员身份。
 - 升级后的本机服务重启不会主动解除仪器绑定。北京时间跨日、设备采集会话变化、显式交接或手动结束会结束当前关联；晚到照片保留拍摄时的历史归属。

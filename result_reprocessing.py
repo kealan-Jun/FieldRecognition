@@ -23,7 +23,9 @@ INPUT_FIELDS = ('binding_id','capture_id','crop','image_url','image_sha256','ins
     'instrument_association','source','frame_metadata','external_photo','request_trigger','video_observation',
     'all_binding_snapshots','binding_snapshots','binding_ids','instrument_candidates','workbench','workbenches',
     'ownership_conflicts','binding_time_basis','qr_matches','association_status','instrument_identity_basis',
-    'measurement_id','measurement_context','record_mode','record_scope','capture_association')
+    'measurement_id','measurement_context','record_mode','record_scope','capture_association',
+    'attribution_status','attribution_reason','binding_snapshot_version','binding_effective_at',
+    'allowed_instrument_ids','allowed_instrument_ids_basis','scene_snapshots','qr_scene_matches')
 
 
 def preferred_jobs(documents):
@@ -64,8 +66,8 @@ def install(core):
                 if retry['request_digest'] != digest:
                     raise HTTPException(409,'同一重识别请求编号不能更改目标或理由')
                 return json.loads(conn.execute('SELECT document FROM jobs WHERE id=?',(retry['job_id'],)).fetchone()[0])
-            if original['status'] != 'completed':
-                raise HTTPException(409,'仅已完成的结果可以创建识别新版本')
+            if original['status'] not in {'completed', 'failed'}:
+                raise HTTPException(409,'仅已完成或失败的任务可以创建识别新版本')
             root = original.get('recognition_root_job_id',str(job_id))
             last = conn.execute('SELECT revision,job_id FROM recognition_revisions WHERE root_job_id=? ORDER BY revision DESC LIMIT 1',(root,)).fetchone()
             replaced_job_id = str(job_id)

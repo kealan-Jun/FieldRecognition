@@ -30,6 +30,7 @@ from activity import recent_activity, readout_page
 from readout_timing import update_timing
 from panel_detector import PanelDetector
 from photo_measurements import MeasurementContext, configured_mode, attach as attach_measurement, check_retry
+from panel_readout import run as run_panel_readout
 
 BASE = Path(__file__).parent
 OCR_DEVICE = configured_device()
@@ -808,8 +809,7 @@ def predict_panel(panel, x=0, y=0):
 
 
 def run_ocr(document):
-    from panel_readout import run
-    run(globals(), document)
+    run_panel_readout(globals(), document)
 
 
 def current_panel_bindings(camera_id):

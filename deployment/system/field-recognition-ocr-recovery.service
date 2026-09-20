@@ -1,0 +1,13 @@
+[Unit]
+Description=Retry the FieldRecognition OCR API dependency after mount recovery
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -I /usr/local/lib/field-recognition/recover_ocr_api.py
+TimeoutStartSec=35
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=strict
+PrivateTmp=true
+UMask=0077

@@ -1,7 +1,8 @@
 [Unit]
 Description=FieldRecognition cameras
 PartOf=field-recognition.target
-After=network-online.target
+Requires=field-recognition-prepare.service
+After=network-online.target field-recognition-prepare.service
 StartLimitIntervalSec=0
 
 [Service]

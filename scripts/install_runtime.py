@@ -1,5 +1,6 @@
 """Install local user units after database and camera registration preparation."""
 import os
+import argparse
 from pathlib import Path
 import shutil
 import shlex
@@ -11,6 +12,9 @@ from database import Database,get_migration_status
 
 root=Path(__file__).resolve().parents[1]
 def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--no-start',action='store_true',help='Install units without activating writers')
+    args=parser.parse_args()
     data=Path(os.environ.get('FIELD_DEMO_DATA',root/'Data'))
     db=Database(os.environ.get('FIELD_DATABASE_PATH',data/'Demo.sqlite3'))
     if get_migration_status(db)['pending']:raise SystemExit('Run prepare_runtime.py first')
@@ -33,9 +37,10 @@ def main():
         content=source.read_text().replace('%h/Projects/FieldRecognition',str(root))
         content=content.replace(str(root/'Data/Runtime/ServiceEnvironment.env'),str(environment.resolve()))
         (units/source.name).write_text(content)
-    subprocess.run(['systemctl','--user','disable','--now','field-recognition-demo.service'],check=True)
+    if not args.no_start:
+        subprocess.run(['systemctl','--user','disable','--now','field-recognition-demo.service'],check=True)
     subprocess.run(['systemctl','--user','daemon-reload'],check=True)
-    subprocess.run(['systemctl','--user','enable','--now','field-recognition.target'],check=True)
-    print('Managed local services installed and enabled')
+    subprocess.run(['systemctl','--user','enable',*([] if args.no_start else ['--now']),'field-recognition.target'],check=True)
+    print('Managed local units installed'+('' if args.no_start else ' and started'))
 
 if __name__=='__main__':main()

@@ -1,0 +1,18 @@
+[Unit]
+Description=Validate and migrate FieldRecognition before writers start
+PartOf=field-recognition.target
+Before=field-recognition-api.service field-recognition-ocr.service field-recognition-cameras.service field-recognition-archive.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=%h/Projects/FieldRecognition
+EnvironmentFile=-%h/Projects/FieldRecognition/Data/Runtime/ServiceEnvironment.env
+EnvironmentFile=%h/Projects/FieldRecognition/.env
+ExecStart=%h/Projects/FieldRecognition/.venv/bin/python -m runtime_prepare
+TimeoutStartSec=180
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=field-recognition.target

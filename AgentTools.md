@@ -181,7 +181,7 @@ NAS 以日期与相机分目录，同一明确连拍、重试和确认合并为�
 }
 ```
 
-`POST /api/jobs/{job_id}/reprocess` 接受 `request_id`（UUID）、`actor`、`reason`。只对已完成的原任务创建新识别版本；同一请求重传返回同一任务，理由或目标改变返回 409。新版本沿用原图、采集时间和拍摄时的绑定快照，使用当前识别代码及当前登记的字段规则快照。返回新 `job_id`、原 `capture_id`、原 `measurement_id`（若有）、`recognition_root_job_id`、`recognition_revision`、`supersedes_job_id`。`GET /api/jobs/{job_id}/versions` 查看所有版本和当前完成版本。旧任务 URL 仍返回旧结果。
+`POST /api/jobs/{job_id}/reprocess` 接受 `request_id`（UUID）、`actor`、`reason`。对已完成或失败的原任务创建新识别版本；同一请求重传返回同一任务，理由或目标改变返回 409。新版本沿用原图、采集时间、拍摄时的绑定快照及归属待确认状态，使用当前识别代码及当前登记的字段规则快照。返回新 `job_id`、原 `capture_id`、原 `measurement_id`（若有）、`recognition_root_job_id`、`recognition_revision`、`supersedes_job_id`。`GET /api/jobs/{job_id}/versions` 查看所有版本和当前完成版本。旧任务 URL 仍返回旧结果，包括原失败回执。
 
 已确认测量重识别后进入同一测量的修订草稿。原正式记录不可改写；再次确认生成新的 `record_id` 并关联 `supersedes_record_id`，旧记录 URL 继续读回原值。正式记录列表每个测量显示当前版本，NAS 同一测量目录汇总全部版本。工作台及操作记录提供“重新识别”入口，需填写操作人和原因。
 

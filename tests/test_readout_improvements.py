@@ -217,3 +217,23 @@ def test_failed_revision_preserves_completed_result_and_can_be_replaced(setup):
     assert get_draft(client,reply['measurement_id'])['job_ids']==[replacement['job_id']]
     complete(setup,2,'72')
     assert client.get('/api/jobs/'+old['job_id']+'/versions').json()['current_job_id']==replacement['job_id']
+
+
+def test_failed_original_gets_new_version_without_losing_failure_or_attribution(setup):
+    app,client,_,queued=setup
+    reply,_=enqueue(setup,1)
+    failed=copy.deepcopy(queued[0])
+    failed.update(status='failed',error='ImportError',finished_at=app.now(),
+                  attribution_status='needs_review',attribution_reason='capture_time_unverified',
+                  allowed_instrument_ids=[],binding_snapshot_version='binding-snapshot/2')
+    save(vars(app),failed)
+    original=client.get('/api/jobs/'+failed['job_id']).json()
+    new,body=reprocess(client,failed['job_id'])
+    assert new['recognition_revision']==2 and new['job_id']!=failed['job_id']
+    assert new['attribution_status']=='needs_review'
+    assert new['attribution_reason']=='capture_time_unverified'
+    assert new['allowed_instrument_ids']==[]
+    assert new['binding_snapshot_version']=='binding-snapshot/2'
+    assert 'error' not in new and 'finished_at' not in new
+    assert client.get('/api/jobs/'+failed['job_id']).json()==original
+    assert client.post('/api/jobs/'+failed['job_id']+'/reprocess',json=body).json()['job_id']==new['job_id']

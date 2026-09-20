@@ -308,7 +308,7 @@ function readoutIssue(job){
 // Match complete number + optional unit, consistent with the server's readout rule.
 const completeReadout=/^\s*[+-]?(?:\d+(?:[.,]\d+)?|[.,]\d+)(?:[eE][+-]?\d+)?\s*(?:%|°?[CF]|℃|℉|[μµu]?g|kg|mg|ml|mL|L|rpm|r\/min|[mkM]?[AVW]|[kM]?Hz|Pa|kPa|MPa|bar|mm|cm|m|s|min|h|pH|ppm)?\s*$/i;
 function reprocessControl(job){
-  if(job.status!=='completed')return '';
+  if(!['completed','failed'].includes(job.status))return '';
   return `<details><summary>重新识别 · 版本 ${esc(job.recognition_revision||1)}</summary><form data-reprocess-job="${esc(job.job_id)}"><label>操作人<input name="actor" required maxlength="100" value="${esc(state?.automation?.operator||'')}"></label><label>重识别原因<input name="reason" required maxlength="1000" placeholder="例如：数字区域规则已更新"></label><button type="submit">创建识别新版本</button><p class="caption">保留原照片、归属和旧结果。正式记录的修订需再次确认。</p></form><a href="/api/jobs/${esc(job.job_id)}/versions" target="_blank" rel="noopener">查看版本记录 ↗</a></details>`;
 }
 document.addEventListener('submit',async event=>{
