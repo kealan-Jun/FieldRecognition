@@ -16,7 +16,7 @@
     paused: '自动扫码已暂停',
     waiting_operator: '等待实验员登记',
     waiting_config: '等待相机配置',
-    waiting_camera: '等待相机上线',
+    waiting_camera: '等待相机新画面',
     scanning: '后台自动扫码中',
     bound: '已绑定，等待产出',
     manual_scan: '正在手动扫码',

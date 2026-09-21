@@ -252,7 +252,9 @@ $('#shutter').onclick=busy($('#shutter'),async()=>{const v=$('#webcam'),c=docume
 function waitingBindingText(){
   if(state?.automation?.enabled){
     return state.automation.status==='waiting_camera'
-      ?'等待相机恢复，恢复后将自动扫码绑定，无需手动确认。'
+      ?(state.camera?.service_status?.online===false
+        ?'等待采集服务恢复，恢复后重新扫码绑定，无需手动确认。'
+        :'等待新鲜画面，清晰二维码入镜后自动绑定，无需手动确认。')
       :'等待仪器二维码。识别后自动绑定，无需确认。';
   }
   if(historicalScan)return '当前未绑定。这里展示历史识别照片；开启自动运行后，使用新的相机画面绑定。';
@@ -374,7 +376,7 @@ function renderPhotoWatch(){
 function renderAutomation(){
   const automatic=state.automation;
   if(!automatic)return;
-  const labels={starting:'正在启动',paused:'自动扫码已暂停',waiting_operator:'等待实验员登记',waiting_config:'等待相机配置',waiting_camera:'等待相机上线',scanning:'后台自动扫码中',bound:'已绑定 · 等待语音照片',manual_scan:'正在手动扫码',retrying:'正在恢复连接'};
+  const labels={starting:'正在启动',paused:'自动扫码已暂停',waiting_operator:'等待实验员登记',waiting_config:'等待相机配置',waiting_camera:'等待相机新画面',scanning:'后台自动扫码中',bound:'已绑定 · 等待语音照片',manual_scan:'正在手动扫码',retrying:'正在恢复连接'};
   $('#automationState').textContent=labels[automatic.status]||automatic.status;
   $('#automationDetail').textContent=automatic.message;
   $('#operatorSummary').textContent=automatic.operator?`实验员 · ${automatic.operator}`:'请先登记实验员';if(!automatic.operator)$('#operatorSettings').open=true;$('#operatorRegistration').textContent=automatic.registered_at?`已登记：${automatic.operator} · ${stamp(automatic.registered_at)}。更换人员后保存即可交接；原使用时段与历史读数保留。`:automatic.operator?`当前相机已分配实验员：${automatic.operator}。设置仅对当前相机生效。`:'首次使用请登记姓名或编号，保存后本机持续运行，关闭网页也有效。';
