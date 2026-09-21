@@ -2,6 +2,8 @@
 (function () {
   const statusLabels = {
     streaming: '主码流在线',
+    waiting_frame: '画面暂未更新，等待新画面',
+    service_unavailable: '采集服务中断，等待恢复',
     discovering: '正在发现相机',
     reconnecting: '接收端连接失败',
     camera_offline: '相机离线',
@@ -25,7 +27,7 @@
   function overviewStatus(camera) {
     const status = camera?.status || 'unknown';
     const online = camera?.service_status?.online;
-    if (online === false) return '设备服务离线';
+    if (online === false) return '采集服务中断，等待恢复';
     return statusLabels[status] || (status === 'unknown' ? '状态未知' : status);
   }
 

@@ -166,13 +166,15 @@ def test_delayed_status_cannot_restore_failed_session_or_end_a_fresh_binding(liv
     assert not app.current_readout_binding(old)
 
 
-def test_stalled_frames_release_binding_even_if_receiver_claims_online(live, monkeypatch):
+@pytest.mark.parametrize('frame_age,ended', [(2, False), (7, False), (9, True)])
+def test_frame_jitter_waits_but_sustained_stall_releases_binding(live, monkeypatch, frame_age, ended):
     import urllib.request
     app, client, _ = live
     old = own(client, 'InstrumentA', 'TestCamera', '甲')
     receiver = ReceiverCamera('http://unused.invalid', 'TestCamera')
     receiver.on_service_status = app.live_scanner.observe_service
-    receiver.latest = (np.zeros((2, 2, 3), np.uint8), {}, time.monotonic() - 2)
+    receiver.info['status'] = 'streaming'
+    receiver.latest = (np.zeros((2, 2, 3), np.uint8), {}, time.monotonic() - frame_age)
 
     class Opener:
         def open(self, *args, **kwargs):
@@ -182,6 +184,40 @@ def test_stalled_frames_release_binding_even_if_receiver_claims_online(live, mon
 
     monkeypatch.setattr(urllib.request, 'build_opener', lambda *a: Opener())
     receiver._status_loop()
-    ended = next(b for b in client.get('/api/state').json()['bindings'] if b['binding_id'] == old['binding_id'])
-    assert ended['ended_at'] and ended['end_reason'] == 'camera_frames_stale'
+    saved = next(b for b in client.get('/api/state').json()['bindings'] if b['binding_id'] == old['binding_id'])
+    with pytest.raises(ValueError):
+        receiver.frame()  # Jitter never makes an old frame eligible for scanning.
+    if ended:
+        assert saved['ended_at'] and saved['end_reason'] == 'camera_frames_stale'
+        assert receiver.latest is None
+        assert receiver.snapshot()['status'] == 'service_unavailable'
+    else:
+        assert not saved['ended_at']
+        assert receiver.latest is not None
+        assert receiver.snapshot()['status'] == 'waiting_frame'
+
+
+def test_missing_first_frame_times_out_and_heartbeat_cannot_restore_binding(live, monkeypatch):
+    app, client, _ = live
+    old = own(client, 'InstrumentA', 'TestCamera', '甲')
+    receiver = ReceiverCamera('http://unused.invalid', 'TestCamera')
+    receiver.on_service_status = app.live_scanner.observe_service
+    tick = time.monotonic()
+    monkeypatch.setattr('receiver.time.monotonic', lambda: tick)
+    receiver.frames_expected_since = tick - 9
+    online = {'online': True, 'media_session_id': 1}
+    receiver._observe_receiver_service(online)
+    assert receiver.info['service_status']['online'] is False
+    failed_cutoff = receiver.invalid_before
+    tick += 2
+    receiver._observe_receiver_service(online)
+    assert receiver.info['service_status']['online'] is False
+    # A new frame proves acquisition has resumed. The recovery checkpoint
+    # still discards that frame so subsequent scans use post-recovery images.
+    receiver.latest = (np.zeros((2, 2, 3), np.uint8), {}, tick - .1)
+    receiver._observe_receiver_service(online)
+    assert receiver.info['service_status']['online'] is True
+    assert receiver.invalid_before > failed_cutoff
     assert receiver.latest is None
+    saved = next(b for b in client.get('/api/state').json()['bindings'] if b['binding_id'] == old['binding_id'])
+    assert saved['ended_at'] and saved['end_reason'] == 'camera_frames_stale'

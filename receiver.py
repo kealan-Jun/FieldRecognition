@@ -15,6 +15,10 @@ from fractions import Fraction
 import av
 
 BASE = struct.Struct('<4sHHIIIIQQ')
+# Frame freshness limits what may be scanned. A service stall is a separate,
+# sustained failure, using the same interval as the stream read timeout.
+FRAME_MAX_AGE_SECONDS = 1
+SERVICE_STALL_SECONDS = 8
 
 
 def read_exact(stream, count):
@@ -75,6 +79,7 @@ class ReceiverCamera:
         self.on_service_status = None
         self.service_lock = threading.RLock()
         self.invalid_before = 0.0
+        self.frames_expected_since = time.monotonic()
         self.info = {'configured': True, 'id': target, 'mode': 'gwhp_main', 'status': 'not_started',
                      'decoder': 'PyAV CPU / single-camera', 'receiver': self.receiver,
                      'reconnect_count': 0, 'sequence_gaps': 0, 'decode_errors': 0,
@@ -140,12 +145,7 @@ class ReceiverCamera:
                         observation['device_boot_id'] = boot
                     if not observation['online']:
                         observation['failure_reason'] = 'camera_service_offline'
-                    else:
-                        with self.lock:
-                            stale = self.latest is not None and time.monotonic() - self.latest[2] > 1
-                        if stale:
-                            observation.update(online=False, failure_reason='camera_frames_stale')
-                    self._observe_service(observation)
+                    self._observe_receiver_service(observation)
                 else:
                     self._observe_service({'online': False, 'failure_reason': 'camera_not_found'}, available=False)
             except Exception:
@@ -153,6 +153,23 @@ class ReceiverCamera:
                 # claiming that the physical device was powered off.
                 self._observe_service({'online': False, 'failure_reason': 'receiver_status_unavailable'}, available=False)
             self.stop.wait(1)
+
+    def _observe_receiver_service(self, observation):
+        with self.service_lock:
+            with self.lock:
+                frame_at = self.latest[2] if self.latest else self.frames_expected_since
+                age = time.monotonic() - frame_at
+                previous = self.info.get('service_status') or {}
+                fresh = self.latest is not None and age <= FRAME_MAX_AGE_SECONDS
+                if observation['online']:
+                    if previous.get('online') is False and not fresh:
+                        # A healthy heartbeat alone cannot restore failed RGB
+                        # acquisition. Wait for an actual newly decoded frame.
+                        observation = observation | {'online': False,
+                            'failure_reason': previous.get('failure_reason', 'camera_frames_stale')}
+                    elif age > SERVICE_STALL_SECONDS:
+                        observation = observation | {'online': False, 'failure_reason': 'camera_frames_stale'}
+            self._apply_service(observation, available=True)
 
     def close(self):
         self.stop.set()
@@ -165,6 +182,11 @@ class ReceiverCamera:
             data = dict(self.info)
             if self.latest:
                 data['frame_age_ms'] = round((time.monotonic()-self.latest[2])*1000)
+            if data.get('service_status', {}).get('online') is False:
+                data['status'] = 'service_unavailable'
+            elif data['status'] == 'streaming' and (not self.latest or
+                    data['frame_age_ms'] > FRAME_MAX_AGE_SECONDS * 1000):
+                data['status'] = 'waiting_frame'
             data['encoded_queue_depth'] = self.packets.qsize()
             return data
 
@@ -172,7 +194,7 @@ class ReceiverCamera:
         with self.lock:
             if self.info.get('service_status', {}).get('online') is False:
                 raise ValueError('设备采集服务已离线，等待重新启动')
-            if not self.latest or time.monotonic()-self.latest[2] > 1:
+            if not self.latest or time.monotonic()-self.latest[2] > FRAME_MAX_AGE_SECONDS:
                 raise ValueError('尚未取得一秒内的新鲜主码流画面，请检查接收端和设备在线状态')
             image, metadata, received = self.latest
             return image.copy(), dict(metadata) | {'frame_age_ms': round((time.monotonic()-received)*1000)}
@@ -203,7 +225,7 @@ class ReceiverCamera:
                 camera = matches[0]
                 query = urllib.parse.urlencode({'sender_id': camera['sender_id'], 'camera_id': camera['camera_id'],
                                                 'quality': 'main', 'metadata': 'global'})
-                self.response = opener.open(self.receiver+'/api/preview/rgb-h264-frames?'+query, timeout=8)
+                self.response = opener.open(self.receiver+'/api/preview/rgb-h264-frames?'+query, timeout=SERVICE_STALL_SECONDS)
                 if self.response.headers.get('X-GWV3-Rgb-Stream') != 'main':
                     raise ValueError('Receiver did not return main stream')
                 generation += 1
@@ -287,7 +309,7 @@ class ReceiverCamera:
                     if match is None:
                         continue
                     source, received = match
-                    if time.monotonic()-received > 1:
+                    if time.monotonic()-received > FRAME_MAX_AGE_SECONDS:
                         continue
                     if (frame.width, frame.height) != (source.width, source.height):
                         raise ValueError('Decoded frame dimensions differ from GWHP header')
@@ -308,6 +330,7 @@ class ReceiverCamera:
                             continue
                         record['decoded_frame_id'] = self.info['decoded_frames'] + 1
                         self.latest = (pixels, record, received)
+                        self.frames_expected_since = received
                         self.info.update(status='streaming', last_sequence=source.sequence,
                                          clock_sync_valid=source.sync_valid, width=frame.width, height=frame.height,
                                          receive_to_decode_ms=record['receive_to_decode_ms'])
