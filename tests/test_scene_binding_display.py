@@ -69,6 +69,7 @@ def test_browser_scene_status_is_scoped_to_receipts_and_instrument_conflicts_are
     const hostile = view.scenesMarkup([{...scene,operator:'<script>bad</script>',image_url:'javascript:bad'}]);
     process.stdout.write(JSON.stringify({scoped,html,pending,hostile,
       unrelated:view.pendingInstruments(data,'C',now),
+      yesterday:view.pendingInstruments(data,'A',Date.parse('2026-09-21T00:00:00+08:00')),
       registrationOnly:view.current({scenes:[scene.scene]},'A',now),
       expired:view.current(data,'A',Date.parse('2026-09-21T00:00:00+08:00')),
       afterHandoff:view.pendingInstruments({...data,bindings:[{...data.bindings[0],camera_id:'A'}]},'A',now)}));
@@ -79,6 +80,6 @@ def test_browser_scene_status_is_scoped_to_receipts_and_instrument_conflicts_are
     assert '场景已绑定' in result['html'] and '原实验员' in result['html']
     assert '/api/images/scan-a' in result['html'] and '绑定时间' in result['html']
     assert '仪器未绑定' in result['pending'] and '乙 · B' in result['pending'] and '交接' in result['pending']
-    assert result['afterHandoff'] == result['unrelated'] == ''
+    assert result['afterHandoff'] == result['unrelated'] == result['yesterday'] == ''
     assert result['registrationOnly']['scenes'] == result['expired']['scenes'] == []
     assert '<script>' not in result['hostile'] and 'javascript:' not in result['hostile']

@@ -31,6 +31,10 @@
   function pendingInstruments(data, cameraId, now = Date.now()) {
     const scan = data?.automation?.session?.scan || data?.last_camera_scan;
     if (!scan || scan.camera_id !== cameraId) return '';
+    // Daily authorization requires a scan from the current Beijing date.
+    const scanTime = Date.parse(scan.received_at);
+    const beijingDay = time => Math.floor((time + 8 * 3600000) / 86400000);
+    if (!Number.isFinite(scanTime) || beijingDay(scanTime) !== beijingDay(now)) return '';
     const bindings = (data.bindings || []).filter(item => active(item, now));
     return (scan.matches || []).filter(match => !bindings.some(item =>
       item.camera_id === cameraId && item.instrument?.id === match.id)).map(match => {
