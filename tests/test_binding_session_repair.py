@@ -239,6 +239,7 @@ def test_background_scanner_refreshes_same_name_member_id(app_client,monkeypatch
         return scanner.session
     scanner.start=start
     scanner.refresh_bindings=lambda:None
+    scanner.observe_service=lambda observation:None
     camera=SimpleNamespace(target='BackgroundCamera',snapshot=lambda:{'service_status_available':True,
         'service_status':{'online':True}})
     core=dict(vars(app),RUNTIME_ENABLED=True,live_scanner=scanner,receiver_camera=camera)

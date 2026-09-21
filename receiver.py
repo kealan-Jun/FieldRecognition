@@ -9,6 +9,7 @@ import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from fractions import Fraction
 
 import av
@@ -72,6 +73,8 @@ class ReceiverCamera:
         self.response = None
         self.started = False
         self.on_service_status = None
+        self.service_lock = threading.RLock()
+        self.invalid_before = 0.0
         self.info = {'configured': True, 'id': target, 'mode': 'gwhp_main', 'status': 'not_started',
                      'decoder': 'PyAV CPU / single-camera', 'receiver': self.receiver,
                      'reconnect_count': 0, 'sequence_gaps': 0, 'decode_errors': 0,
@@ -88,6 +91,27 @@ class ReceiverCamera:
         self.decoder.start()
         self.monitor = threading.Thread(target=self._status_loop, name='gwhp-status', daemon=True)
         self.monitor.start()
+
+    def _observe_service(self, observation, *, available=True):
+        with self.service_lock:
+            self._apply_service(observation, available=available)
+
+    def _apply_service(self, observation, *, available):
+        observation = observation | {'observed_at': datetime.now(timezone.utc).isoformat()}
+        with self.lock:
+            previous = self.info.get('service_status') or {}
+            changed = any(previous.get(key) not in (None, 0) and observation.get(key) not in (None, 0)
+                          and previous[key] != observation[key] for key in ('media_session_id', 'device_boot_id'))
+            if not observation['online'] or previous.get('online') is False or changed:
+                self.invalid_before = time.monotonic()
+                self.latest = None
+                self.info['service_status_available'] = False
+            self.info['service_status'] = observation
+        # Do not hold the frame lock while the scanner invalidates its database session.
+        if self.on_service_status:
+            self.on_service_status(observation)
+        with self.lock:
+            self.info['service_status_available'] = available
 
     def _status_loop(self):
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -107,24 +131,27 @@ class ReceiverCamera:
                     if not all(isinstance(camera.get(k), bool) for k in ('status_live', 'media_live')):
                         raise ValueError('Receiver service liveness is unavailable')
                     # This is the receiver's RGB ingress session, not its recording session.
-                    observation = {'online': bool(camera.get('status_live') or camera.get('media_live')),
+                    observation = {'online': bool(camera.get('status_live') and camera.get('media_live')),
                                    'media_session_id': camera.get('rgb_ingress_session_id')}
                     # Optional explicit device-origin boot identity. Never substitute
                     # recording/ingress session counters or Receiver process IDs.
                     boot = camera.get('device_boot_id')
                     if isinstance(boot, str) and 0 < len(boot.strip()) <= 128:
                         observation['device_boot_id'] = boot
-                    if self.on_service_status:
-                        self.on_service_status(observation)
-                    with self.lock:
-                        self.info.update(service_status=observation, service_status_available=True)
+                    if not observation['online']:
+                        observation['failure_reason'] = 'camera_service_offline'
+                    else:
+                        with self.lock:
+                            stale = self.latest is not None and time.monotonic() - self.latest[2] > 1
+                        if stale:
+                            observation.update(online=False, failure_reason='camera_frames_stale')
+                    self._observe_service(observation)
                 else:
-                    with self.lock:
-                        self.info['service_status_available'] = False
+                    self._observe_service({'online': False, 'failure_reason': 'camera_not_found'}, available=False)
             except Exception:
-                # Receiver/API failure is unknown, not proof the device service stopped.
-                with self.lock:
-                    self.info['service_status_available'] = False
+                # An unavailable acquisition service ends authorization without
+                # claiming that the physical device was powered off.
+                self._observe_service({'online': False, 'failure_reason': 'receiver_status_unavailable'}, available=False)
             self.stop.wait(1)
 
     def close(self):
@@ -216,6 +243,7 @@ class ReceiverCamera:
                     self.info.update(status='reconnecting', error_type=type(exc).__name__,
                                      message='接收端暂不可用，自动重试；不会显示旧帧为实时画面')
                     self.info['reconnect_count'] += 1
+                self._observe_service({'online': False, 'failure_reason': 'camera_stream_error'}, available=False)
                 self.stop.wait([.5, 1, 2, 5][min(attempt, 3)])
                 attempt += 1
             finally:
@@ -230,7 +258,7 @@ class ReceiverCamera:
                 generation, packet, received, camera = self.packets.get(timeout=.5)
             except queue.Empty:
                 continue
-            if time.monotonic() - received > .25:
+            if time.monotonic() - received > .25 or received <= self.invalid_before:
                 # Never turn the burst allowance into a delayed playback queue.
                 decoder, context_key, metadata = None, None, {}
                 with self.lock:
@@ -276,6 +304,8 @@ class ReceiverCamera:
                               'decoder': 'PyAV CPU'}
                     record['receive_to_decode_ms'] = round((time.monotonic()-received)*1000, 1)
                     with self.lock:
+                        if received <= self.invalid_before:
+                            continue
                         record['decoded_frame_id'] = self.info['decoded_frames'] + 1
                         self.latest = (pixels, record, received)
                         self.info.update(status='streaming', last_sequence=source.sequence,
@@ -287,3 +317,4 @@ class ReceiverCamera:
                 context_key = None
                 with self.lock:
                     self.info['decode_errors'] += 1
+                self._observe_service({'online': False, 'failure_reason': 'camera_decode_error'}, available=False)

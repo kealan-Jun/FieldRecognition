@@ -128,3 +128,5 @@ systemctl --user start field-recognition-archive.service
 旧版包含处理回执的 `Result.json` 是生成视图，升级后移至 `Evidence.json`，规范读数单独输出。原始照片、数据库任务和 `.System/Receipts` 不改写。未生成规范读数的旧 Result HTTP 地址映射到 Evidence，NAS 实体目录不会再出现冒充结果的空回执。
 
 新增绑定、场景和识别事件先发布到上述固定目录；历史索引重建不作为这些业务文件可见的前提。重建期间有新回执时，归档进程先处理新记录，再继续索引。`archive.readable_at` 与 `readability_basis=archive_writer_event_files_published` 表示对应事件文件已发布，`navigation_pending` 单独表示索引仍待更新。场景关联的 `Binding.json` 在有效期内显示 `status=active`，结束后显示 `ended`，原场景、人员、时间和扫码证据保留在 `binding`、`sources` 与 `receipt_versions`。
+
+设备离线、采集服务异常或会话变化时，原目录的 `Binding.json` 更新为 `ended`，`binding.end_reason` 记录检测到的原因；开始记录与结束记录均保存在 `receipt_versions`。北京时间跨日的结束原因仍为 `daily_qr_expired`。新相机扫码后产生独立绑定目录，原相机的原图与历史记录继续保留。

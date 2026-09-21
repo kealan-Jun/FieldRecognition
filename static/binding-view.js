@@ -37,13 +37,15 @@
     if (!Number.isFinite(scanTime) || beijingDay(scanTime) !== beijingDay(now)) return '';
     const bindings = (data.bindings || []).filter(item => active(item, now));
     return (scan.matches || []).filter(match => !bindings.some(item =>
-      item.camera_id === cameraId && item.instrument?.id === match.id)).map(match => {
+      item.camera_id === cameraId && item.instrument?.id === match.id) && !(data.bindings || []).some(item =>
+      item.camera_id === cameraId && item.instrument?.id === match.id && item.ended_at &&
+      Date.parse(item.ended_at) >= scanTime)).map(match => {
       const occupied = bindings.find(item => item.camera_id !== cameraId && item.instrument?.id === match.id);
       const reason = occupied
-        ? `当前由 ${occupied.operator || '未记录人员'} · ${occupied.camera_id} 使用，需完成交接。`
+        ? `当前由 ${occupied.operator || '未记录人员'} · ${occupied.camera_id} 使用；该相机关机、采集服务异常或北京时间跨日后自动解除，再扫码即可绑定。`
         : '当前尚未绑定，请重新对准仪器码并查看自动运行提示。';
       return `<div class="bound-item"><b>仪器未绑定 · ${esc(match.name || match.id)}</b>
-        <small>最近解码 · ${esc(stamp(scan.received_at))}（北京时间）</small><small>${esc(reason)}</small>${occupied ? '<a href="/photo-measurements#handoff">办理仪器交接 ↗</a>' : ''}</div>`;
+        <small>最近解码 · ${esc(stamp(scan.received_at))}（北京时间）</small><small>${esc(reason)}</small></div>`;
     }).join('');
   }
 

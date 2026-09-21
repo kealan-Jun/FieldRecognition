@@ -211,6 +211,7 @@ class LiveScanner:
             except Exception as exc:
                 with self.lock:
                     if self._running(session_id):
+                        self.observe_service({'online': False, 'failure_reason': 'qr_scanner_error'})
                         self.session.update(status='failed', message=f'连续扫码失败（{type(exc).__name__}），请重新开始')
                 return
 
@@ -252,47 +253,16 @@ class LiveScanner:
         self.refresh_bindings()
 
     def observe_service(self, observation):
-        """Transport reconnects preserve ownership; only a proven device reboot ends it."""
-        camera = self.camera()
+        """Offline, failed and replaced acquisition sessions release their instruments."""
+        from binding_policy import observe_camera_service
         with self.lock:
-            timestamp = self.core['now']()
             with self.core['db']() as conn:
                 conn.execute('BEGIN IMMEDIATE')
-                row = conn.execute('SELECT document FROM camera_service_state WHERE camera=?', (camera.target,)).fetchone()
-                previous = json.loads(row['document']) if row else None
-                old_id = previous.get('media_session_id') if previous else None
-                new_id = observation.get('media_session_id')
-                changed = old_id not in (None, 0) and new_id not in (None, 0) and old_id != new_id
-                def boot_id(value):
-                    return value if isinstance(value, str) and 0 < len(value.strip()) <= 128 else None
-                old_boot = boot_id((previous or {}).get('device_boot_id'))
-                new_boot = boot_id(observation.get('device_boot_id'))
-                # Ingress IDs belong to Receiver and may reset on reconnect/restart.
-                # Missing liveness/boot evidence never proves that the device rebooted.
-                rebooted = old_boot is not None and new_boot is not None and old_boot != new_boot
-                if rebooted:
-                    reason = 'device_boot_changed'
-                    for table in ('bindings', 'scene_visits'):
-                        for record in conn.execute(f'SELECT * FROM {table} WHERE camera=? AND ended IS NULL', (camera.target,)).fetchall():
-                            doc = json.loads(record['document']) | {'ended_at': timestamp, 'end_reason': reason,
-                                                                   'service_observation': observation}
-                            conn.execute(f'UPDATE {table} SET ended=?,document=? WHERE id=?', (timestamp, json.dumps(doc), record['id']))
-                    conn.execute('INSERT OR REPLACE INTO camera_resets VALUES(?,?)', (camera.target, timestamp))
-                    if self.session and self.session['status'] in ACTIVE | {'bound'}:
-                        self.session.update(status='stopped', binding=None,
-                                            message='已确认设备启动标识变化，请重新扫码绑定')
-                # Preserve a known session marker through an offline status with a zero marker.
-                stored = observation | {'media_session_id': new_id or old_id}
-                if new_boot or old_boot:
-                    stored['device_boot_id'] = new_boot or old_boot
-                if changed:
-                    stored['last_transport_change'] = {'observed_at': timestamp, 'previous_id': old_id,
-                        'current_id': new_id, 'binding_action': 'ended_device_reboot' if rebooted else 'preserved'}
-                elif (previous or {}).get('last_transport_change'):
-                    stored['last_transport_change'] = previous['last_transport_change']
-                if not observation['online']:
-                    stored['offline_since'] = (previous or {}).get('offline_since') or timestamp
-                conn.execute('INSERT OR REPLACE INTO camera_service_state VALUES(?,?)', (camera.target, json.dumps(stored)))
+                reason = observe_camera_service(conn, self.camera().target, observation, self.core['now']())
+            if reason and self.session:
+                self.session.update(status='stopped', binding=None, bindings=[], scene_visits=[],
+                                    binding_errors=[], message='设备采集会话已结束，恢复后请重新扫码绑定')
+            return reason
 
     def close(self):
         self.shutdown.set()

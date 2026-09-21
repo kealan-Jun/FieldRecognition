@@ -99,11 +99,11 @@ def test_encoded_buffer_is_bounded():
                    'rgb_ingress_session_id': 1, 'device_boot_id': 'device-boot-a'}]},
      [{'online': True, 'media_session_id': 1, 'device_boot_id': 'device-boot-a'}]),
     ({'receiver_admin_stale': True, 'cameras': [{'camera_key': 'sender_cam01',
-                                               'status_live': False, 'media_live': False}]}, []),
-    ({'cameras': [{'camera_key': 'sender_cam01', 'media_live': False}]}, []),
-    ({'cameras': []}, []),
+                                               'status_live': False, 'media_live': False}]}, [{'online':False,'failure_reason':'receiver_status_unavailable'}]),
+    ({'cameras': [{'camera_key': 'sender_cam01', 'media_live': False}]}, [{'online':False,'failure_reason':'receiver_status_unavailable'}]),
+    ({'cameras': []}, [{'online':False,'failure_reason':'camera_not_found'}]),
 ])
-def test_service_monitor_uses_ingress_identity_and_ignores_unknown_status(monkeypatch, document, expected):
+def test_service_monitor_reports_session_identity_and_unavailable_status(monkeypatch, document, expected):
     import urllib.request
     camera = ReceiverCamera('http://unused.invalid', 'sender_cam01')
     observations = []
@@ -116,5 +116,6 @@ def test_service_monitor_uses_ingress_identity_and_ignores_unknown_status(monkey
 
     monkeypatch.setattr(urllib.request, 'build_opener', lambda *a: Opener())
     camera._status_loop()
+    assert all(o.pop('observed_at') for o in observations)
     assert observations == expected
-    assert camera.snapshot()['service_status_available'] == bool(expected)
+    assert camera.snapshot()['service_status_available'] == expected[0]['online']

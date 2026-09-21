@@ -148,6 +148,13 @@ class AutomaticRunner:
             if sweep(self.core):
                 self._stop_scan('已跨日，请重新扫码建立今天的绑定')
                 self.failed_session, self.retry_at = None, 0
+            camera = self.core['receiver_camera']
+            info = camera.snapshot() if camera else {}
+            if camera and 'service_status_available' in info:
+                observation = info.get('service_status') if (info['service_status_available'] or
+                    (info.get('service_status') or {}).get('observed_at')) else {
+                    'online': False, 'failure_reason': 'receiver_status_unavailable'}
+                self.scanner.observe_service(observation or {'online': False})
             settings = self.settings()
             if not settings['enabled']:
                 self._stop_scan('自动扫码未开启')
@@ -162,7 +169,6 @@ class AutomaticRunner:
             if camera is None:
                 self.state = {'status': 'waiting_config', 'message': '等待配置挂脖相机接收端'}
                 return
-            info = camera.snapshot()
             # Never authorize unattended binding from a persisted or unavailable status.
             if not info.get('service_status_available') or not info.get('service_status', {}).get('online'):
                 self._stop_scan('等待相机采集服务状态恢复')

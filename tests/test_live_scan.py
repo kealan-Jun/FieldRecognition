@@ -187,36 +187,28 @@ def test_service_session_lifetime_survives_app_recreation_then_invalidates_evide
     client.put('/api/instruments/'+other_id, json={'name': '另一仪器', 'scene': '湿实验实验台'})
     other_bound = client.post('/api/bindings', json=args | {'scan_id': other['scan_id'], 'instrument_id': other_id}).json()
     recreated.observe_service({'online': False, 'media_session_id': 13})
-    preserved=next(b for b in client.get('/api/state').json()['bindings'] if b['binding_id']==bound['binding_id'])
-    assert not preserved['ended_at']
-    assert not app.current_readout_binding(preserved)  # Suspended, not unbound.
+    ended = next(b for b in client.get('/api/state').json()['bindings'] if b['binding_id'] == bound['binding_id'])
+    assert ended['ended_at'] and ended['end_reason'] == 'camera_service_offline'
+    assert not app.current_readout_binding(ended)
     recreated.observe_service({'online': True, 'media_session_id': 13})
-    assert app.current_readout_binding(preserved)
-    assert client.post('/api/bindings',json=args).json()['binding_id']==bound['binding_id']
-    recreated.observe_service({'online': False, 'media_session_id': 0})
-    recreated=LiveScanner(vars(app))  # Persists across a local service restart.
-    recreated.observe_service({'online': True, 'media_session_id': 13})
-    assert app.current_readout_binding(preserved)
-    # Receiver may reset its transport counter, even when the camera stays on.
-    recreated.observe_service({'online': True, 'media_session_id': 1})
-    assert app.current_readout_binding(preserved)
-    assert client.post('/api/bindings', json=args).json()['binding_id'] == bound['binding_id']
-    with app.db() as conn:
-        state = json.loads(conn.execute('SELECT document FROM camera_service_state WHERE camera=?', (camera.target,)).fetchone()[0])
-        assert state['last_transport_change']['binding_action'] == 'preserved'
-        assert not conn.execute('SELECT 1 FROM camera_resets WHERE camera=?', (camera.target,)).fetchone()
-    recreated.observe_service({'online': True, 'media_session_id': 14, 'device_boot_id': 'boot-b'})
-    bindings = client.get('/api/state').json()['bindings']
-    assert next(b for b in bindings if b['binding_id'] == bound['binding_id'])['ended_at']
-    assert not next(b for b in bindings if b['binding_id'] == other_bound['binding_id'])['ended_at']
     assert client.post('/api/bindings', json=args).status_code == 409
-    assert client.post('/api/ocr', json={'binding_id': bound['binding_id'], 'capture_id': picture['capture_id']}).status_code == 409
-    register(client, aid)
+    assert not app.current_readout_binding(ended)
     fresh = scan(client)
     new = client.post('/api/bindings', json=args | {'scan_id': fresh['scan_id']}).json()
     assert new['binding_id'] != bound['binding_id']
+    # A changed acquisition session also releases ownership without a boot ID.
+    recreated.observe_service({'online': True, 'media_session_id': 1})
+    assert not app.current_readout_binding(new)
+    assert client.post('/api/bindings', json=args | {'scan_id': fresh['scan_id']}).status_code == 409
+    with app.db() as conn:
+        state = json.loads(conn.execute('SELECT document FROM camera_service_state WHERE camera=?', (camera.target,)).fetchone()[0])
+        assert state['last_transport_change']['binding_action'] == 'ended_service_session'
+    bindings = client.get('/api/state').json()['bindings']
+    assert not next(b for b in bindings if b['binding_id'] == other_bound['binding_id'])['ended_at']
+    fresh = scan(client)
+    new = client.post('/api/bindings', json=args | {'scan_id': fresh['scan_id']}).json()
     # A confirmed device reboot is detected even when the ingress counter stays the same.
-    recreated.observe_service({'online': True, 'media_session_id': 14, 'device_boot_id': 'boot-c'})
+    recreated.observe_service({'online': True, 'media_session_id': 1, 'device_boot_id': 'boot-c'})
     assert client.post('/api/bindings', json=args | {'scan_id': fresh['scan_id']}).status_code == 409
 
 

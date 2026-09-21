@@ -128,7 +128,7 @@ def test_mixed_frame_enters_shared_scene_while_occupied_instrument_remains_exclu
     before_refresh = scanner.session['message']
     scanner.refresh_bindings()
     assert scanner.session['message'] == before_refresh
-    assert '交接' in scanner.session['message'] and 'CameraA' in scanner.session['message']
+    assert '自动解除' in scanner.session['message'] and 'CameraA' in scanner.session['message']
     assert scanner.session['bindings'] == []
     assert len(active_visits(app)) == 2
     with app.db() as conn:

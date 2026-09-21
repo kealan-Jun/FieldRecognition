@@ -38,9 +38,10 @@ def check_available(conn, instrument_id, camera_id, *, qr_hash=None, handoff_id=
     for row in conn.execute("SELECT document FROM bindings WHERE ended IS NULL AND json_extract(document,'$.instrument.id')=?", (instrument_id,)):
         active = json.loads(row[0])
         if active['camera_id'] != camera_id:
-            raise HTTPException(409, {'code': 'instrument_in_use', 'message': '仪器正在被另一位实验员使用，必须明确交接',
+            raise HTTPException(409, {'code': 'instrument_in_use', 'message': '仪器仍被另一台相机占用；该相机关机、采集服务异常或北京时间跨日后自动解除，再扫码即可绑定',
                 'binding_id': active['binding_id'], 'camera_id': active['camera_id'], 'operator': active['operator'],
-                'instrument_id': instrument_id, 'started_at': active['started_at'], 'handoff_required': True})
+                'instrument_id': instrument_id, 'started_at': active['started_at'], 'handoff_required': False,
+                'release_policy': 'camera-service-session/1'})
     if qr_hash:
         for row in conn.execute("SELECT document FROM bindings WHERE ended IS NULL AND json_extract(document,'$.qr_hash')=?", (qr_hash,)):
             active = json.loads(row[0])
@@ -48,7 +49,7 @@ def check_available(conn, instrument_id, camera_id, *, qr_hash=None, handoff_id=
                 raise HTTPException(409, {'code': 'qr_in_use', 'message': '该二维码已绑定到另一台设备，不能重复绑定',
                     'binding_id': active['binding_id'], 'camera_id': active['camera_id'],
                     'device_id': active['instrument']['id'], 'qr_hash': qr_hash,
-                    'handoff_required': True})
+                    'handoff_required': False, 'release_policy': 'camera-service-session/1'})
     for row in conn.execute("SELECT document FROM binding_handoffs WHERE instrument_id=? AND status='released'", (instrument_id,)):
         transfer = json.loads(row[0])
         if transfer['handoff_id'] != handoff_id:

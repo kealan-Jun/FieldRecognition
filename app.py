@@ -127,6 +127,7 @@ async def lifespan(application):
         readout_pool.shutdown(wait=False,cancel_futures=True)
         return
     if receiver_camera:
+        live_scanner.observe_service({'online': False, 'failure_reason': 'capture_service_restarted'})
         receiver_camera.start()
     with db() as conn:
         has_binding = conn.execute('SELECT 1 FROM bindings WHERE ended IS NULL LIMIT 1').fetchone()
@@ -142,6 +143,8 @@ async def lifespan(application):
     video_ocr.start()
     yield
     stopping.set()
+    if receiver_camera:
+        live_scanner.observe_service({'online': False, 'failure_reason': 'capture_service_stopped'})
     video_ocr.close()
     automatic_runner.close()
     saved_photo_watcher.close()
@@ -246,7 +249,7 @@ def validate_capture_epoch(conn, scan):
     if service and not json.loads(service['document'])['online']:
         raise HTTPException(409, '设备采集服务已离线，重新启动后再扫码绑定')
     reset = conn.execute('SELECT confirmed_at FROM camera_resets WHERE camera=?', (scan['camera_id'],)).fetchone()
-    if reset and scan['received_at'] <= reset['confirmed_at']:
+    if reset and moment(observed) <= moment(reset['confirmed_at']):
         raise HTTPException(409, '这是设备采集服务上一次会话的照片，请重新扫码')
 
 

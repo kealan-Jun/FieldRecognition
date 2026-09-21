@@ -6,11 +6,11 @@
 </style></head><body>
 <header><div><h1>拍照测量</h1><span id="policy" class="muted">正在读取运行模式</span></div><a href="/#workspace">返回工作台</a></header>
 <main><div><section class="card"><strong>最近测量</strong><p class="muted">一次连拍对应一份测量草稿。</p><button id="reload">刷新列表</button><div id="list"></div></section></div>
-<div><p id="notice" role="status"></p><details class="card" id="handoff"><summary>设备占用与交接</summary><p>扫码不会接管正在使用的仪器。原使用人确认交出后，指定接收人再确认接收。</p><label>正在使用的仪器<select id="handoffBinding"></select></label><label>接收相机的扫码凭证<select id="handoffScan"></select></label><label>接收人<input id="handoffRecipient" maxlength="80"></label><button id="requestHandoff">申请交接</button><label>本次确认操作人<input id="handoffActor" maxlength="80"></label><div id="handoffs"></div></details><div id="empty" class="card">选择一份测量，查看照片、字段与识别依据。测试模式的结果不会写入生产实验记录。</div>
+<div><p id="notice" role="status"></p><div id="empty" class="card">选择一份测量，查看照片、字段与识别依据。测试模式的结果不会写入生产实验记录。</div>
 <section id="editor" hidden><div class="card"><h2 id="title"></h2><p id="meta" class="muted"></p><div id="sources" class="photos"></div></div>
 <div class="card"><h2>字段与依据</h2><div id="issues" class="issues"></div><div id="fields" class="fields"></div>
 <form id="revisionForm"><label>实验上下文引用<input id="context" maxlength="2000" placeholder="实验记录或步骤的引用"></label><div id="times"></div>
 <label>校正原因<textarea id="reason" maxlength="1000" rows="2" placeholder="选择需校正的字段，填写依据；原始识别值会保留"></textarea></label>
 <div class="actions"><label>操作人<input id="actor" required maxlength="100" autocomplete="name"></label><button id="save" type="submit">保存校正</button><button id="confirm" type="button" class="primary">确认并提交实验记录</button><button id="reject" type="button">放弃本次草稿</button></div></form>
 <details><summary>原始识别与修订回执</summary><pre id="receipt"></pre></details></div></section></div></main>
-<script src="/static/auth-session.js?v=direct-access-1"></script><script src="/static/photo-measurements.js?v=binding-retry-20260921"></script></body></html>
+<script src="/static/auth-session.js?v=direct-access-1"></script><script src="/static/photo-measurements.js?v=automatic-release-20260921"></script></body></html>

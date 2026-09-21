@@ -127,7 +127,7 @@ def test_device_restart_rearms_and_local_restart_preserves_pause(automatic):
     app.live_scanner.observe_service(info['service_status'])
     runner.step()
     assert runner.snapshot()['status'] == 'waiting_camera'
-    assert client.get('/api/state').json()['bindings'][0]['ended_at'] is None
+    assert client.get('/api/state').json()['bindings'][0]['ended_at'] is not None
     info['service_status'] = {'online': True, 'media_session_id': 32, 'device_boot_id': 'boot-b'}
     app.live_scanner.observe_service(info['service_status'])
     runner.step()
@@ -148,7 +148,7 @@ def test_device_restart_rearms_and_local_restart_preserves_pause(automatic):
     assert runner.snapshot()['session']['status'] in {'scanning', 'waiting_camera'}
 
 
-def test_status_unknown_blocks_binding_and_does_not_end_existing_binding(automatic):
+def test_status_unknown_releases_bindings_and_recovery_requires_fresh_scan(automatic):
     app, client, camera, runner, info = automatic
     info['service_status_available'] = False
     enable(client)
@@ -161,10 +161,12 @@ def test_status_unknown_blocks_binding_and_does_not_end_existing_binding(automat
     info['service_status_available'] = False
     runner.step()
     bindings = client.get('/api/state').json()['bindings']
-    assert next(b for b in bindings if b['binding_id'] == binding_id)['ended_at'] is None
+    assert next(b for b in bindings if b['binding_id'] == binding_id)['ended_at'] is not None
     info['service_status_available'] = True
     runner.step()
-    assert runner.snapshot()['binding_ids'][0] == binding_id
+    assert runner.snapshot()['binding_ids'] == []
+    camera.publish(label(app, 'InstrumentA'))
+    assert wait(runner, lambda s: bool(s.get('binding_ids')))['binding_ids'][0] != binding_id
 
 
 def test_multi_code_binds_independently_and_keeps_scanning(automatic):
@@ -186,13 +188,14 @@ def test_multi_code_binds_independently_and_keeps_scanning(automatic):
         assert conn.execute('SELECT COUNT(*) FROM bindings').fetchone()[0] == 2
         assert conn.execute('SELECT COUNT(*) FROM scans').fetchone()[0] == 1
     app.live_scanner.observe_service({'online': False, 'media_session_id': 31})
-    assert len([b for b in client.get('/api/state').json()['bindings'] if not b['ended_at']])==2
-    app.live_scanner.observe_service({'online': True, 'media_session_id': 31})
-    assert len([b for b in client.get('/api/state').json()['bindings'] if not b['ended_at']])==2
-    assert len(client.get('/api/state').json()['scene_visits'])==1
-    app.live_scanner.observe_service({'online': True, 'media_session_id': 32, 'device_boot_id': 'boot-b'})
     assert not [b for b in client.get('/api/state').json()['bindings'] if not b['ended_at']]
     assert not client.get('/api/state').json()['scene_visits']
+    app.live_scanner.observe_service({'online': True, 'media_session_id': 31})
+    runner.step()
+    assert not runner.snapshot()['binding_ids']
+    camera.publish(pixels)
+    rebound = wait(runner, lambda s: len(s.get('binding_ids', [])) == 2 and len(s['session']['scene_visits']) == 1)
+    assert set(rebound['binding_ids']).isdisjoint(result['binding_ids'])
 
 
 def test_pause_during_decode_prevents_late_binding(automatic, monkeypatch):
