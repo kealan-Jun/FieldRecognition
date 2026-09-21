@@ -7,6 +7,15 @@
 - Verify the project's Git root, branch, SHA, remotes, and working-tree status before Git changes. No remote repository is configured by default; do not invent a publishing destination.
 - Preserve unrelated work and stage named paths only.
 
+## Uninterrupted operation (user requirement, 2026-09-21)
+
+- Normal iteration must not interrupt ongoing use. Develop and test in an isolated worktree with temporary test data; completing a change does not authorize a disruptive deployment.
+- Do not stop or restart the live API, camera/scanner, OCR or archive services to deploy an iteration. Do not modify their loaded source, dependencies, configuration or served assets in place. Do not use direct Git checkout/pull, install scripts or systemctl to bypass the upgrade guard.
+- Inspect the tested revision with `scripts/upgrade_runtime.py --revision <SHA>`. The upgrade entry point must never stop services automatically. While services run, only its narrow allowlist of documentation, tests and the standalone upgrade tool may advance without a restart.
+- Runtime changes remain staged until an uninterrupted replacement mechanism is implemented and verified. The current shared source deployment has no verified rolling or blue/green upgrade path. Do not claim zero downtime, lossless scan capture or continued bindings based only on process health or tests.
+- A genuinely offline deployment is distinct from an iteration during normal use. Do not create an outage to satisfy the tool's offline precondition. Any future user-authorized service interruption must identify its effect on active bindings and ongoing scans before execution.
+- Capture service identity and health before and after deployment. Existing QR evidence, timestamps, binding history and queued OCR/archive records must be preserved. Device/service failures and Beijing midnight still follow the user's automatic release policy; never restore expired bindings to conceal an upgrade outage.
+
 ## Data and evidence
 
 - Preserve existing QR identities, source photos, timestamps, bindings, database records, and historical receipts.

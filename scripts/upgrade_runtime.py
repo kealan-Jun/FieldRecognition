@@ -1,8 +1,9 @@
-"""Stop writers before advancing code, rehearse migrations, then start and verify.
+"""Inspect upgrades without interrupting live FieldRecognition services.
 
-Run --apply --revision <tested-local-commit>. The default only inspects.
-Failed preparation keeps writers stopped and preserves the database backup;
-it never rolls a database back over newly created business records.
+Live updates are restricted to documentation, tests and this standalone tool.
+Runtime changes require services to be already stopped; this tool never stops
+them. Use --revision to inspect a tested commit, then --apply to apply it.
+Failed offline preparation never starts writers or rolls back business data.
 """
 import argparse
 from datetime import datetime, timezone
@@ -16,6 +17,8 @@ import time
 import urllib.request
 
 WRITERS = ['field-recognition-' + name + '.service' for name in ('api', 'ocr', 'cameras', 'archive')]
+DEPLOYMENT_UNITS = ['field-recognition.target', 'field-recognition-prepare.service',
+                    'field-recognition-demo.service', *WRITERS]
 
 
 def command(root, args, **kwargs):
@@ -36,10 +39,17 @@ def database_environment(root):
     return env
 
 
-def apply(root, revision=None, *, run=command):
+def non_runtime_path(path):
+    # Fail closed: static assets, dependencies, configuration, units and all
+    # imported Python remain runtime changes, even when no process restart was
+    # explicitly requested. Never edit them underneath running processes.
+    return (path in {'AGENTS.md', 'README.md', 'AgentTools.md', 'scripts/upgrade_runtime.py'}
+            or (path.startswith('docs/') and path.endswith('.md'))
+            or path.startswith('tests/'))
+
+
+def plan(root, revision=None, *, run=command):
     root = Path(root).resolve()
-    env = database_environment(root)
-    python = str(root / '.venv/bin/python')
     status = run(root, ['git', 'status', '--porcelain'], capture_output=True).stdout
     if status.strip():
         raise RuntimeError('Commit reviewed source changes before deployment')
@@ -47,24 +57,48 @@ def apply(root, revision=None, *, run=command):
     if revision:
         revision = run(root, ['git', 'rev-parse', '--verify', revision + '^{commit}'], capture_output=True).stdout.strip()
         run(root, ['git', 'merge-base', '--is-ancestor', before, revision])
-    run(root, ['systemctl', '--user', 'stop', 'field-recognition.target', *WRITERS])
-    load = run(root, ['systemctl', '--user', 'show', 'field-recognition-prepare.service',
-                      '-p', 'LoadState', '--value'], capture_output=True).stdout.strip()
-    if load != 'not-found':
-        run(root, ['systemctl', '--user', 'stop', 'field-recognition-prepare.service'])
-    for unit in WRITERS:
-        pid = run(root, ['systemctl', '--user', 'show', unit, '-p', 'MainPID', '--value'],
-                  capture_output=True).stdout.strip()
-        if pid != '0':
-            raise RuntimeError('Writer has not stopped: ' + unit)
-    if revision:
-        run(root, ['git', 'merge', '--ff-only', revision])
+    after = revision or before
+    changed = run(root, ['git', 'diff', '--name-only', '--no-renames', '-z', before, after],
+                  capture_output=True).stdout.split('\0')
+    changed = [path for path in changed if path]
+    runtime = [path for path in changed if not non_runtime_path(path)]
+    return {'before': before, 'after': after, 'changed_paths': changed, 'runtime_paths': runtime,
+            'mode': 'offline_required' if runtime else 'non_runtime' if changed else 'unchanged'}
+
+
+def ensure_offline(root, *, run=command):
+    for unit in DEPLOYMENT_UNITS:
+        response = run(root, ['systemctl', '--user', 'show', unit, '-p', 'LoadState',
+                             '-p', 'ActiveState', '-p', 'MainPID', '-p', 'ControlPID'],
+                       capture_output=True, timeout=10)
+        values = dict(line.split('=', 1) for line in response.stdout.splitlines() if '=' in line)
+        idle = values.get('ActiveState') in {'inactive', 'failed'}
+        known = values.get('LoadState') in {'loaded', 'not-found'}
+        pids = ('MainPID', 'ControlPID') if unit.endswith('.service') and values.get('LoadState') != 'not-found' else ()
+        if not known or not idle or any(values.get(key) != '0' for key in pids):
+            raise RuntimeError('Live runtime upgrade blocked: ' + unit +
+                '. No service was stopped and no code was changed. Keep the tested revision staged; '
+                'the current deployment does not support uninterrupted runtime replacement.')
+
+
+def apply(root, revision=None, *, run=command):
+    root = Path(root).resolve()
+    report = plan(root, revision, run=run)
+    if report['mode'] == 'unchanged':
+        return report
+    if report['runtime_paths']:
+        ensure_offline(root, run=run)
+    run(root, ['git', 'merge', '--ff-only', report['after']])
+    if report['mode'] == 'non_runtime':
+        return report
+    env = database_environment(root)
+    python = str(root / '.venv/bin/python')
     # Subprocesses import the newly selected version, never this launcher's old modules.
     run(root, [python, '-m', 'runtime_prepare'], env=env)
     run(root, [python, 'scripts/install_runtime.py', '--no-start'], env=env)
     run(root, ['systemctl', '--user', 'reset-failed', *WRITERS, 'field-recognition-prepare.service'])
     run(root, ['systemctl', '--user', 'start', 'field-recognition.target'])
-    return {'before': before, 'after': revision or before}
+    return report | {'mode': 'offline_applied'}
 
 
 def verify(url, timeout=60):
@@ -91,6 +125,9 @@ def main():
     args = parser.parse_args()
     root = args.project_root.resolve()
     if not args.apply:
+        if args.revision:
+            print(json.dumps(plan(root, args.revision), ensure_ascii=False, indent=2))
+            return
         command(root, [str(root / '.venv/bin/python'), '-m', 'runtime_prepare', '--check'],
                 env=database_environment(root))
         return

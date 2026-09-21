@@ -10,7 +10,7 @@ import pytest
 from database import Database, apply_migrations
 import runtime_prepare
 from scripts.recover_ocr_api import recover, UNIT
-from scripts.upgrade_runtime import apply
+from scripts.upgrade_runtime import DEPLOYMENT_UNITS, apply, non_runtime_path, plan
 
 
 def test_mount_dependency_failure_is_retried_until_service_runs():
@@ -123,17 +123,17 @@ def test_runtime_import_fault_does_not_exhaust_photos_and_recovers(tmp_path):
 
 
 @pytest.mark.parametrize('break_prepare', [False, True])
-def test_deploy_stops_before_code_change_and_never_starts_after_failed_prepare(tmp_path, break_prepare):
+def test_offline_deploy_checks_before_code_change_and_never_starts_after_failed_prepare(tmp_path, break_prepare):
     calls = []
     def run(root, args, **kwargs):
         calls.append(args)
         out = ''
         if args[:2] == ['git', 'rev-parse']:
             out = 'b' * 40 if '--verify' in args else 'a' * 40
-        if 'MainPID' in args:
-            out = '0'
-        if 'LoadState' in args:
-            out = 'not-found'
+        if args[:2] == ['git', 'diff']:
+            out = 'app.py\0'
+        if args[:3] == ['systemctl', '--user', 'show']:
+            out = 'LoadState=loaded\nActiveState=inactive\nMainPID=0\nControlPID=0\n'
         if args[-2:] == ['-m', 'runtime_prepare'] and break_prepare:
             raise subprocess.CalledProcessError(1, args)
         return SimpleNamespace(stdout=out, returncode=0)
@@ -143,8 +143,82 @@ def test_deploy_stops_before_code_change_and_never_starts_after_failed_prepare(t
         assert not any(args[:3] == ['systemctl','--user','start'] for args in calls)
     else:
         assert apply(tmp_path, 'tested-commit', run=run)['after'] == 'b' * 40
-        stop = next(i for i,a in enumerate(calls) if a[:3] == ['systemctl','--user','stop'])
+        checked = max(i for i,a in enumerate(calls) if a[:3] == ['systemctl','--user','show'])
         merge = next(i for i,a in enumerate(calls) if a[:2] == ['git','merge'])
         prepare = next(i for i,a in enumerate(calls) if a[-2:] == ['-m','runtime_prepare'])
         start = next(i for i,a in enumerate(calls) if a[:3] == ['systemctl','--user','start'])
-        assert stop < merge < prepare < start
+        assert checked < merge < prepare < start
+    assert not any(args[:3] == ['systemctl','--user','stop'] for args in calls)
+
+
+def revision_runner(paths, state='LoadState=loaded\nActiveState=active\nMainPID=42\nControlPID=0\n'):
+    calls = []
+    def run(root, args, **kwargs):
+        calls.append(args)
+        out = ''
+        if args[:2] == ['git', 'rev-parse']:
+            out = 'b' * 40 if '--verify' in args else 'a' * 40
+        if args[:2] == ['git', 'diff']:
+            out = '\0'.join(paths) + ('\0' if paths else '')
+        if args[:3] == ['systemctl', '--user', 'show']:
+            out = state
+        return SimpleNamespace(stdout=out, returncode=0)
+    return run, calls
+
+
+@pytest.mark.parametrize('state', [
+    'LoadState=loaded\nActiveState=active\nMainPID=42\nControlPID=0\n',
+    'LoadState=loaded\nActiveState=activating\nMainPID=0\nControlPID=0\n',
+    'LoadState=loaded\nActiveState=deactivating\nMainPID=0\nControlPID=42\n',
+    '',  # Inability to inspect the service must never become permission to deploy.
+])
+def test_live_upgrade_rejected_before_code_or_service_changes(tmp_path, state):
+    run, calls = revision_runner(['README.md', 'receiver.py'], state)
+    with pytest.raises(RuntimeError, match='Live runtime upgrade blocked'):
+        apply(tmp_path, 'tested-commit', run=run)
+    assert not any(args[:2] == ['git', 'merge'] for args in calls)
+    assert not any(args[:2] == ['systemctl', '--user'] and args[2] != 'show' for args in calls)
+    assert not any('runtime_prepare' in args or 'scripts/install_runtime.py' in args for args in calls)
+
+
+@pytest.mark.parametrize('busy_unit', DEPLOYMENT_UNITS[1:])
+def test_idle_target_does_not_hide_a_remaining_service_process(tmp_path, busy_unit):
+    idle = 'LoadState=loaded\nActiveState=inactive\nMainPID=0\nControlPID=0\n'
+    base, calls = revision_runner(['app.py'], idle)
+    def run(root, args, **kwargs):
+        result = base(root, args, **kwargs)
+        if args[:4] == ['systemctl', '--user', 'show', busy_unit]:
+            result.stdout = idle.replace('MainPID=0', 'MainPID=42')
+        return result
+    with pytest.raises(RuntimeError, match='Live runtime upgrade blocked'):
+        apply(tmp_path, 'tested-commit', run=run)
+    assert not any(args[:2] == ['git', 'merge'] for args in calls)
+    assert not any(args[:2] == ['systemctl', '--user'] and args[2] != 'show' for args in calls)
+
+
+@pytest.mark.parametrize('path', [
+    'app.py', 'receiver.py', 'static/app.js', 'static/index.html', '.env',
+    'Requirements.lock.txt', 'deployment/field-recognition-api.service',
+    'scripts/install_runtime.py', 'docs/assets/overview.svg', 'runtime_prepare.py',
+])
+def test_live_allowlist_excludes_runtime_and_served_assets(path):
+    assert not non_runtime_path(path)
+
+
+def test_non_runtime_revision_updates_without_service_or_database_calls(tmp_path):
+    run, calls = revision_runner(['AGENTS.md', 'README.md', 'AgentTools.md',
+        'docs/RuntimeReliability.md', 'tests/test_runtime_reliability.py', 'scripts/upgrade_runtime.py'])
+    report = apply(tmp_path, 'tested-commit', run=run)
+    assert report['mode'] == 'non_runtime' and not report['runtime_paths']
+    assert all(args[0] == 'git' for args in calls)
+    assert calls[-1] == ['git', 'merge', '--ff-only', 'b' * 40]
+
+
+def test_inspection_and_unchanged_revision_never_restart_services(tmp_path):
+    run, calls = revision_runner(['receiver.py'])
+    report = plan(tmp_path, 'tested-commit', run=run)
+    assert report['mode'] == 'offline_required' and report['runtime_paths'] == ['receiver.py']
+    assert all(args[0] == 'git' and args[1] != 'merge' for args in calls)
+    run, calls = revision_runner([])
+    assert apply(tmp_path, run=run)['mode'] == 'unchanged'
+    assert all(args[0] == 'git' and args[1] != 'merge' for args in calls)
