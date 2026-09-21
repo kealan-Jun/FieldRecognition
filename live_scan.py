@@ -62,7 +62,10 @@ class LiveScanner:
             return
         self.session.update(bindings=bindings, binding=bindings[0] if len(bindings) == 1 else None,
                             scene_visits=visits,
-                            message=f'已关联 {len(bindings)} 台仪器、{len(visits)} 个场景；仅为新二维码建立关联')
+                            message=f'已绑定 {len(bindings)} 台仪器、{len(visits)} 个场景；持续扫描新二维码')
+        errors = self.session.get('binding_errors', [])
+        if errors:
+            self.session['message'] += ' · 最近扫码提示：' + '；'.join(dict.fromkeys(errors))
 
     def start(self, operator, *, owner='browser', wearer_id=None):
         if not operator.strip():
@@ -215,10 +218,8 @@ class LiveScanner:
                         (f"：{detail['operator']} · {detail['camera_id']} · 开始于 {detail['started_at']}" if detail.get('operator') else ''))
                 else:
                     errors.append(str(exc.detail))
-        self.refresh_bindings()
         self.session.update(status='scanning', binding_errors=errors)
-        if errors:
-            self.session['message'] += ' · ' + '；'.join(dict.fromkeys(errors))
+        self.refresh_bindings()
 
     def observe_service(self, observation):
         """Transport reconnects preserve ownership; only a proven device reboot ends it."""

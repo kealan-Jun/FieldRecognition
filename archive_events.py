@@ -15,6 +15,38 @@ from measurement_records import build_records, capture_clock, measurement_value,
 
 KINDS = {'Bindings': '二维码与绑定', 'VideoReadings': '视频面板读数',
          'VoicePhotoReadings': '语音照片读数', 'PhotoReadings': '上传照片读数'}
+RELATIONS = {'scene_visits': '场景绑定', 'bindings': '仪器绑定',
+             'binding_handoffs': '仪器交接', 'scans': '二维码解码'}
+STATUSES = {'source_retained': '原始材料已留存', 'active': '已绑定', 'ended': '已结束', 'completed': '已识别',
+            'failed': '识别失败', 'skipped': '未执行读数识别', 'unassigned': '读数未归属', 'unreadable': '未读出结构化读数',
+            'queued': '等待识别', 'running': '识别中', 'collecting': '连拍处理中',
+            'draft': '待确认', 'confirmed': '已确认', 'rejected': '已驳回', 'cancelled': '已取消', 'interrupted': '已中断',
+            'matched': '二维码已解码', 'requested': '等待交出', 'released': '等待接收', 'expired': '已过期'}
+
+
+def binding_page(content, directory, day):
+    """Render the saved relation, without manufacturing a relation from a scan."""
+    doc = content['binding']
+    kind = RELATIONS[content['entity']]
+    esc = lambda value: html.escape(str(value if value is not None else '未记录'), quote=True)
+    local = lambda value: aware(value).strftime('%Y-%m-%d %H:%M:%S') if aware(value) else '未记录'
+    link = lambda target: esc(posixpath.relpath(target, directory))
+    target = (doc.get('scene') or {}).get('name') if content['entity'] == 'scene_visits' else (doc.get('instrument') or {}).get('name')
+    body = '<p><a href="' + link('Readme.html') + '">归档首页</a> · <a href="' + link(day + '/DailyReport/DailyReport.html') + '">当日报告</a> · <a href="Binding.json">完整绑定 JSON</a></p>'
+    body += '<p>状态来自最新归档凭证，时间均为北京时间；当前授权还需核对有效期与工作台状态。</p><article><dl>'
+    fields = [('记录类型', kind), ('状态', STATUSES.get(content['status'], content['status'])),
+              ('场景 / 仪器', target), ('相机', content['camera_id']), ('实验员', doc.get('operator')),
+              ('人员编号', doc.get('wearer_id')), ('场景编号', (doc.get('scene') or {}).get('id')),
+              ('仪器编号', (doc.get('instrument') or {}).get('id')),
+              ('绑定编号', doc.get('visit_id') or doc.get('binding_id')),
+              ('绑定时间', local(doc.get('started_at'))), ('有效至', local(doc.get('valid_until'))),
+              ('结束时间', local(doc.get('ended_at'))), ('结束原因', doc.get('end_reason')),
+              ('扫码编号', doc.get('scan_id'))]
+    body += ''.join('<dt>' + label + '</dt><dd>' + esc(value) + '</dd>' for label, value in fields)
+    body += '</dl></article><h2>扫码凭证</h2>'
+    for photo in content['photos'].values():
+        body += '<p><a href="' + link(photo['path']) + '">打开原始凭证图片</a></p>'
+    return page(kind + (' · ' + target if target else ''), body)
 
 
 def processing_outcome(job):
@@ -263,7 +295,7 @@ def make_views(bundles, paths, receipts):
             'event_at': bundle['event_at'], 'time_basis': bundle['time_basis'], 'folder_time_basis': bundle['folder_time_basis'],
             'camera_id': bundle['camera_id'], 'operator': doc.get('operator') or next((s['operator'] for s in sources if s['operator']), None),
             'category': bundle['kind'], 'record_scope': (group or doc).get('record_scope', 'evidence' if bundle['kind'] == 'Bindings' else 'legacy_test_only'),
-            'status': (group or doc).get('status') or ('ended' if doc.get('ended_at') else 'active' if doc.get('binding_id') else 'source_retained'),
+            'status': (group or doc).get('status') or ('ended' if doc.get('ended_at') else 'active' if doc.get('binding_id') or doc.get('visit_id') else 'source_retained'),
             'sources': sources, 'photos': photos, 'receipt_versions': history}
         if observations:
             people = {(b.get('operator'),b.get('wearer_id')) for observation in observations
@@ -277,6 +309,8 @@ def make_views(bundles, paths, receipts):
                               'readability_basis': latest_member['readability_basis']}
         if bundle['kind'] == 'Bindings':
             content['binding'] = doc
+            content['entity'] = latest_member['entity']
+            views[directory + '/Readme.html'] = binding_page(content, directory, bundle['day'])
         else:
             measurement_files = []
             for entry in sorted(records, key=lambda r: r['instrument_id']):
@@ -345,7 +379,8 @@ def make_views(bundles, paths, receipts):
         for entity, ident in bundle['entity_keys']:
             old = 'Records/' + ''.join(w.title() for w in entity.split('_')) + '/' + token(ident)
             paths.alias(old + '/Record.json', file)
-            paths.alias(old + '/Readme.html', bundle['day'] + '/DailyReport/DailyReport.html' if bundle['kind'] != 'SourceMaterials' else 'Readme.html')
+            paths.alias(old + '/Readme.html', directory + '/Readme.html' if bundle['kind'] == 'Bindings' else
+                        bundle['day'] + '/DailyReport/DailyReport.html' if bundle['kind'] != 'SourceMaterials' else 'Readme.html')
         if bundle['kind'] != 'SourceMaterials':
             target = (doc.get('instrument') or {}).get('name') or (doc.get('scene') or {}).get('name') or '、'.join(
                 dict.fromkeys(r['instrument'].get('name') or r['instrument']['id'] for j in bundle['jobs'] for r in j['doc'].get('panel_regions', []) if r.get('instrument')))
@@ -353,14 +388,23 @@ def make_views(bundles, paths, receipts):
             days.setdefault(bundle['day'], []).append({'event_id': bundle['key'], 'event_at': bundle['event_at'],
                 'category': bundle['kind'], 'target': target or '归属待确认', 'operator': content['operator'],
                 'status': content['status'], 'result': file,
+                'binding_type': RELATIONS.get(content.get('entity')), 'camera_id': bundle['camera_id'],
+                'detail_page': directory + '/Readme.html' if bundle['kind'] == 'Bindings' else None,
+                'valid_until': doc.get('valid_until') if bundle['kind'] == 'Bindings' else None,
                 'measurement_files': [{k: m[k] for k in ('instrument_id', 'instrument_name', 'result')} for m in content.get('measurement_files', [])],
                 'photo': next((v['path'] for v in photos.values() if 'original' in v['kind']), next((v['path'] for v in photos.values()), None))})
     esc = lambda x: html.escape(str(x if x is not None else '未记录'), quote=True)
-    statuses = {'source_retained': '原始材料已留存', 'active': '已绑定', 'ended': '已结束', 'completed': '已识别',
-                'failed': '识别失败', 'skipped': '未执行读数识别', 'unassigned': '读数未归属', 'unreadable': '未读出结构化读数',
-                'queued': '等待识别', 'running': '识别中', 'collecting': '连拍处理中',
-                'draft': '待确认', 'confirmed': '已确认', 'rejected': '已驳回', 'cancelled': '已取消', 'interrupted': '已中断'}
+    statuses = STATUSES
     intro = '<p>按日期与相机打开当日报告，再从事件打开结果和照片。一个测量目录对应一次拍照或一次明确的连拍。</p>'
+    scenes = sorted((entry for entries in days.values() for entry in entries if entry['binding_type'] == '场景绑定'),
+                    key=lambda entry: entry['event_at'] or '', reverse=True)
+    scene_table = '<table><tr><th>场景 / 相机</th><th>实验员 / 归档状态</th><th>绑定时间（北京时间）</th><th>凭证</th></tr>'
+    for entry in scenes:
+        started = aware(entry['event_at'])
+        scene_table += '<tr><td>' + esc(entry['target']) + '<br>' + esc(entry['camera_id']) + '</td><td>' + esc(entry['operator']) + '<br>' + esc(statuses.get(entry['status'], entry['status'])) + '</td><td>' + esc(started.strftime('%Y-%m-%d %H:%M:%S') if started else None) + '</td><td><a href="' + esc(entry['detail_page']) + '">场景绑定详情</a></td></tr>'
+    scene_table += '</table>'
+    views['SceneBindings.html'] = page('场景绑定记录', '<p><a href="Readme.html">归档首页</a></p><p>每台相机的场景绑定独立留存；已结束记录保留原实验员、时间和扫码凭证。有效期见详情。</p>' + scene_table)
+    intro += '<article><h2>场景绑定记录</h2><p><a href="SceneBindings.html">查看全部场景绑定（' + str(len(scenes)) + ' 条）</a> · 按相机查看场景、实验员、起止时间与扫码凭证。</p></article>'
     intro += '<article><ul><li><b>Bindings</b>：Binding.json 记录二维码、人员、仪器或场景、开始/结束和交接。</li><li><b>VideoReadings / VoicePhotoReadings / PhotoReadings</b>：一次视频观测、语音照片或明确连拍共用一个事件目录。</li><li><b>Result.json、Result02.json…</b>：每台仪器独立一个文件，直接保存 wearer_id、device_model、device_no、qr_hash、photo_time、values 六字段。搅拌器为温度和转速，天平为质量；未知值为 null。文件与仪器的对应关系在 Evidence.json 中，后续增加仪器不会改变已有对应关系。</li><li><b>Evidence.json</b>：来源照片、拍摄时间依据、绑定快照、原始 OCR、模型与规则版本、处理状态和确认记录。measurement_files 指向各台仪器的结果，不重复保存结果正文。</li><li><b>Photos / Regions</b>：原图、处理图及面板/数字裁剪；按哈希共用，同一字节只保留一份。</li><li><b>DailyReport</b>：当日事件索引，直接打开每台仪器的读数或追溯文件。</li></ul><p>未绑定且跳过识别时只留 Evidence.json 和照片，不生成伪造的 Result.json。未知仪器不能默认当作 A 或 B；已明确仪器但数字看不清时，其固定字段的 value 为 null。所有图片和结果路径相对于归档根目录；正式写入状态以 Evidence.json 的 record_scope 和 decision 为准。</p></article>'
     intro += '<article><h2>日期与相机</h2><ul>'
     for day, entries in sorted(days.items(), reverse=True):
@@ -372,7 +416,7 @@ def make_views(bundles, paths, receipts):
         for entry in entries:
             moment = aware(entry['event_at'])
             link = lambda target: esc(posixpath.relpath(target, base))
-            body += '<tr><td>' + esc(moment.strftime('%H:%M:%S.%f')[:-3] if moment else '拍摄时间未知') + '</td><td>' + esc(KINDS[entry['category']]) + '<br>' + esc(entry['target']) + '</td><td>' + esc(entry['operator']) + '<br>' + esc(statuses.get(entry['status'], entry['status'])) + '</td><td><a href="' + link(entry['result']) + '">' + ('绑定记录' if entry['category'] == 'Bindings' else '追溯与状态') + '</a>'
+            body += '<tr><td>' + esc(moment.strftime('%H:%M:%S.%f')[:-3] if moment else '拍摄时间未知') + '</td><td>' + esc(entry['binding_type'] or KINDS[entry['category']]) + '<br>' + esc(entry['target']) + '</td><td>' + esc(entry['operator']) + '<br>' + esc(statuses.get(entry['status'], entry['status'])) + '</td><td><a href="' + link(entry['detail_page'] or entry['result']) + '">' + ('绑定详情' if entry['category'] == 'Bindings' else '追溯与状态') + '</a>'
             for measurement in entry.get('measurement_files', []):
                 body += ' · <a href="' + link(measurement['result']) + '">' + esc(measurement['instrument_name'] or measurement['instrument_id']) + ' 读数</a>'
             if entry['photo']:

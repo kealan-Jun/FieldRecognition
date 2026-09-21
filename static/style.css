@@ -92,7 +92,7 @@ footer{display:flex;justify-content:space-between;padding:22px 0;color:#93a4a8;f
   .workspace-screen .capture-tools{flex:none;margin-top:8px;padding-top:4px}
   .workspace-screen .capture-tools[open]{position:absolute;bottom:12px;left:16px;right:16px;z-index:3;max-height:calc(100% - 60px);overflow:auto;background:white;border:1px solid var(--line);padding:12px;border-radius:8px;box-shadow:0 8px 30px #153b4220}
   .workspace-screen .right-column{min-height:0;grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr);gap:14px}
-  .workspace-screen .identity-card{max-height:220px}
+  .workspace-screen .identity-card{max-height:min(52dvh,440px)}
   .workspace-screen .right-column>.card{min-height:0;padding:16px;overflow:auto}
   .workspace-screen .right-column .card-title{margin-bottom:10px}
   .workspace-screen .binding{padding:9px 11px;font-size:12px;line-height:1.7}

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>现场识别 · 设备绑定与面板读数</title>
-<link rel="icon" href="/static/BrandLogo.png"><link rel="stylesheet" href="/static/style.css?v=multicamera-20260920">
+<link rel="icon" href="/static/BrandLogo.png"><link rel="stylesheet" href="/static/style.css?v=scene-binding-20260921">
 </head>
 <body>
 <aside>
@@ -22,7 +22,7 @@
 <header><div><span class="eyebrow">FIELD RECOGNITION</span><h1 id="pageTitle">多相机工作台</h1></div><div class="header-status"><label class="camera-picker">查看相机<select id="cameraSelect" aria-label="选择要查看详情的相机"><option value="">正在读取相机列表…</option></select></label><span class="pill" id="cameraState">设备连接待配置</span><button class="quiet" id="refresh">刷新状态</button></div></header>
 <div id="message" role="status" aria-live="polite" hidden></div>
 <section id="cameras" class="page-view">
-  <div class="camera-overview-intro"><p>拿起任意一台已登记相机，对准仪器码即可自动绑定。各相机同时运行，画面、绑定和产出分别显示，无需切换。</p><p class="caption">同一仪器码在有效绑定期间只能由一台相机占用；关闭网页后后台继续运行。</p><p id="cameraOverviewStatus" class="caption" role="status">正在读取全部相机…</p></div>
+  <div class="camera-overview-intro"><p>拿起任意一台已登记相机，对准场景码或仪器码即可自动绑定。各相机同时运行，分别显示场景绑定、仪器绑定和产出。</p><p class="caption">多台相机可绑定同一场景；同一仪器在有效绑定期间仍需交接。关闭网页后后台继续运行。</p><p id="cameraOverviewStatus" class="caption" role="status">正在读取全部相机…</p></div>
   <div id="cameraCards" class="camera-grid"></div>
 </section>
 <div id="workspace" class="page-view">
@@ -69,5 +69,5 @@
 <p id="archiveStatus" class="caption" role="status">正在检查 NAS 留存</p><p class="caption"><a href="/api/archive/files/00_归档导航.html" target="_blank" rel="noopener">打开 NAS 中文归档 ↗</a> · <a href="/api/archive/files/Readme.html" target="_blank" rel="noopener">完整历史版本 ↗</a> · <span id="integrityStatus">正在读取巡检状态</span></p><div id="historyRows" class="empty-text">正在读取记录</div></section>
 <footer>FieldRecognition <span>现场设备识别与面板读数</span></footer>
 </main>
-<script src="/static/auth-session.js?v=direct-access-1"></script><script src="/static/readout-view.js?v=20260916-1"></script><script src="/static/app.js?v=multicamera-20260920"></script><script src="/static/cameras.js?v=multicamera-20260920"></script>
+<script src="/static/auth-session.js?v=direct-access-1"></script><script src="/static/readout-view.js?v=20260916-1"></script><script src="/static/binding-view.js?v=scene-binding-20260921"></script><script src="/static/app.js?v=scene-binding-20260921"></script><script src="/static/cameras.js?v=scene-binding-20260921"></script>
 </body></html>

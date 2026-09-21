@@ -55,7 +55,9 @@
     return `<article class="card camera-card" data-camera-card="${id}">
       <div class="card-title"><div><h2>${esc(camera.display_name || camera.camera_id)}</h2><span class="small">${id}</span></div><span class="pill camera-connection" data-field="connection"></span></div>
       <img class="camera-card-preview" data-field="preview" src="/api/camera/preview.mjpg?camera_id=${encodeURIComponent(camera.camera_id)}" alt="${esc(camera.display_name || camera.camera_id)}实时画面" loading="lazy">
-      <section class="camera-result"><h3>当前使用</h3><div data-field="operator" class="caption">正在读取</div><div data-field="bindings" class="bound-list"><p class="caption">正在读取绑定</p></div>
+      <section class="camera-result"><h3>当前使用</h3><div data-field="operator" class="caption">正在读取</div>
+        <h3>场景绑定</h3><div data-field="scenes" class="bound-list"><p class="caption">正在读取场景绑定</p></div>
+        <h3>仪器绑定</h3><div data-field="bindings" class="bound-list"><p class="caption">正在读取仪器绑定</p></div>
         <h3>自动运行</h3><div data-field="automation" class="caption">正在读取</div>
         <h3>最近产出</h3><div data-field="output" class="camera-output"><p class="caption">正在读取 OCR 和照片结果</p></div>
       </section>
@@ -88,6 +90,7 @@
     preview.title = error ? '正在等待相机状态恢复' : overviewStatus(cameraState);
     if (error) {
       card.querySelector('[data-field="operator"]').textContent = '相机状态暂不可用，后台仍会继续重试';
+      card.querySelector('[data-field="scenes"]').innerHTML = '<p class="caption">等待相机服务恢复后读取场景绑定</p>';
       card.querySelector('[data-field="bindings"]').innerHTML = '<p class="caption">等待相机服务恢复后读取绑定</p>';
       card.querySelector('[data-field="automation"]').textContent = '等待后台服务恢复';
       card.querySelector('[data-field="output"]').innerHTML = '<p class="caption">暂时无法读取产出，历史数据保留</p>';
@@ -95,8 +98,10 @@
     }
     const automation = data.automation || {};
     card.querySelector('[data-field="operator"]').textContent = automation.operator ? `实验员 · ${automation.operator}` : '尚未登记实验员';
-    const bindings = (data.bindings || []).filter(binding => !binding.ended_at && binding.camera_id === camera.camera_id);
-    card.querySelector('[data-field="bindings"]').innerHTML = bindings.length ? bindings.map(binding => `<div class="bound-item"><b>${esc(binding.instrument?.name || '未命名设备')}</b><small>${esc(binding.instrument?.device_category || 'instrument')} · ${esc(binding.instrument?.scene || '未分类场景')}</small><small>开始 ${esc(stamp(binding.started_at))}</small></div>`).join('') : '<p class="caption">等待二维码，当前没有有效设备绑定</p>';
+    const {scenes, instruments: bindings} = BindingView.current(data, camera.camera_id);
+    card.querySelector('[data-field="scenes"]').innerHTML = BindingView.scenesMarkup(scenes);
+    const pending = BindingView.pendingInstruments(data, camera.camera_id);
+    card.querySelector('[data-field="bindings"]').innerHTML = (bindings.length ? bindings.map(binding => `<div class="bound-item"><b>仪器已绑定 · ${esc(binding.instrument?.name || '未命名设备')}</b><small>${esc(binding.instrument?.device_category || 'instrument')} · ${esc(binding.instrument?.scene || '未分类场景')}</small><small>开始 ${esc(stamp(binding.started_at))}</small></div>`).join('') : pending ? '' : `<p class="caption">${scenes.length ? '场景绑定已完成；尚未绑定仪器，可继续扫描仪器码。' : '尚未绑定仪器，可扫描仪器二维码。'}</p>`) + pending;
     const autoStatus = automationLabels[automation.status] || automation.status || '等待后台状态';
     const autoMessage = automation.message || automation.error_type || '';
     card.querySelector('[data-field="automation"]').innerHTML = `<strong>${esc(autoStatus)}</strong>${autoMessage ? `<small>${esc(autoMessage)}</small>` : ''}`;
@@ -138,7 +143,7 @@
       }
       renderCards(cameras);
       const status = document.querySelector('#cameraOverviewStatus');
-      if (status) status.textContent = cameras.length ? `已连接 ${cameras.length} 台已登记相机；每台相机独立运行和留存。` : '尚未发现已登记相机，请检查相机注册和后台服务。';
+      if (status) status.textContent = cameras.length ? `共 ${cameras.length} 台已登记相机；每台相机独立运行和留存。` : '尚未发现已登记相机，请检查相机注册和后台服务。';
       await Promise.all(cameras.map(camera => fetchState(camera, requestId)));
     } catch (error) {
       const status = document.querySelector('#cameraOverviewStatus');

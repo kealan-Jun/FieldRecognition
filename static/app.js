@@ -219,8 +219,8 @@ function renderQrEvidence(){
   const hits=[...(scan?.matches||[]),...(scan?.scene_matches||[])];
   const figure=$('#qrEvidence');figure.hidden=!hits.length;
   if(!hits.length)return;
-  const receipt=state?.bindings?.find(item=>item.scan_id===scan.scan_id);
-  const label=receipt?(receipt.ended_at?'历史绑定凭证':'绑定成功帧'):historicalScan?'历史识别 · 未绑定':'识别命中帧';
+  const receipt=[...(state?.bindings||[]),...(state?.scene_visits||[])].find(item=>item.scan_id===scan.scan_id&&item.camera_id===scan.camera_id);
+  const label=receipt?(receipt.ended_at?'历史绑定凭证':receipt.visit_id?'场景绑定成功帧':'仪器绑定成功帧'):historicalScan?'历史解码凭证':'识别命中帧';
   $('#qrEvidenceTitle').textContent=hits.map(item=>item.name).join('、')+' · '+label;
   $('#qrEvidenceTime').textContent='收到画面：'+stamp(scan.received_at)+' · '+scan.camera_id;
   $('#qrEvidenceLink').href=scan.image_url;$('#qrEvidenceImage').src=scan.image_url;
@@ -259,13 +259,14 @@ function waitingBindingText(){
   return '当前未绑定。登记实验员并开启自动运行后，仪器码入镜即可绑定。';
 }
 function currentCamera(){return previewLive?state?.camera.id:scan?.camera_id||state?.camera.id;}
-function selectBindings(camera){activeBindings=(state?.bindings||[]).filter(b=>!b.ended_at&&b.camera_id===camera);activeBinding=activeBindings.length===1?activeBindings[0]:null;}
+function selectBindings(camera){activeBindings=BindingView.current(state,camera).instruments;activeBinding=activeBindings.length===1?activeBindings[0]:null;}
 function renderBinding(){
   selectBindings(currentCamera());
-  const visits=(state?.scene_visits||[]).filter(v=>v.camera_id===currentCamera());
-  $('#sceneInfo').innerHTML=visits.map(v=>`<div>场景 · ${esc(v.scene.name)} <a href="${esc(v.image_url)}" target="_blank" rel="noopener">扫码凭证 ↗</a></div>`).join('');
-  $('#sceneInfo').hidden=!visits.length;
-  $('#bindingInfo').innerHTML=activeBindings.length?activeBindings.map(b=>`<div class="bound-item"><b>${esc(b.instrument.name)}</b><small>${esc(b.instrument.device_category||'instrument')}${b.instrument.device_type?` · ${esc(b.instrument.device_type)}`:''} · ${esc(b.operator)} · ${esc(stamp(b.started_at))}${b.valid_until?' · 当天有效':''}</small><a href="${esc(b.image_url)}" target="_blank" rel="noopener">绑定命中帧 ↗</a></div>`).join(''):visits.length?'场景已关联，继续扫描仪器码。':waitingBindingText();
+  const visits=BindingView.current(state,currentCamera()).scenes;
+  $('#sceneInfo').innerHTML=BindingView.scenesMarkup(visits);
+  $('#sceneInfo').hidden=false;
+  const pending=BindingView.pendingInstruments(state,currentCamera());
+  $('#bindingInfo').innerHTML=(activeBindings.length?activeBindings.map(b=>`<div class="bound-item"><b>仪器已绑定 · ${esc(b.instrument.name)}</b><small>${esc(b.instrument.device_category||'instrument')}${b.instrument.device_type?` · ${esc(b.instrument.device_type)}`:''} · ${esc(b.operator)} · ${esc(stamp(b.started_at))}${b.valid_until?' · 当天有效':''}</small><a href="${esc(b.image_url)}" target="_blank" rel="noopener">绑定命中帧 ↗</a></div>`).join(''):pending?'':visits.length?'场景绑定已完成；尚未绑定仪器，可继续扫描仪器码。':waitingBindingText())+pending;
   $('#scanResults').hidden=historicalScan||Boolean(state?.automation?.enabled);
   $('#scanBadge').textContent=`${activeBindings.length} 台仪器 · ${visits.length} 个场景`;
   if(scan)renderQrEvidence();updateButtons();
