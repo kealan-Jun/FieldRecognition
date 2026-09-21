@@ -8,6 +8,45 @@ from archive_paths import ArchivePaths, checked, empty_directories
 from archive_progress import advance
 
 
+def publish_events(archive, rows):
+    """Deliver changed business files before scanning historical NAS content."""
+    pending = {row['seq'] for row in rows if row['published_at'] and not row['readable_at']}
+    if not pending:
+        return
+    root = archive._root()
+    paths = ArchivePaths(root)
+    bundles, _ = prepare(rows, paths)
+    selected = [b for b in bundles if any(v['sequence'] in pending for v in b['history'])]
+    receipts = {}
+    for bundle in selected:
+        for version in bundle['history']:
+            seq = version['sequence']
+            if seq in receipts:
+                continue
+            path = checked(root, paths.name(version['receipt']))
+            raw = path.read_bytes()
+            if hashlib.sha256(raw).hexdigest() != path.stem.split('-', 1)[-1]:
+                raise ValueError('Cannot publish corrupt receipt')
+            receipt = json.loads(raw)
+            row = next(r for r in rows if r['seq'] == seq)
+            if (receipt['sequence'], receipt['entity'], receipt['entity_id'], receipt['document']) != (
+                    seq, row['entity'], row['entity_id'], json.loads(row['document'])):
+                raise ValueError('Cannot publish mismatched receipt')
+            receipts[seq] = receipt
+    # Existing physical photo locations remain stable across partial/full passes.
+    views = make_views(selected, paths, receipts, preserve_asset_locations=True)
+    views = {name: raw for name, raw in views.items()
+             if name != 'Readme.html' and '/DailyReport/' not in name}
+    paths.retire_views(views, partial=True)
+    delivered = pending & {v['sequence'] for b in selected for v in b['history']}
+    if delivered:
+        timestamp = archive.core['now']()
+        with archive.core['db']() as conn:
+            conn.executemany("UPDATE archive_outbox SET readable_at=?,readability_basis=? WHERE seq=? AND readable_at IS NULL",
+                             [(timestamp, 'archive_writer_event_files_published', seq) for seq in delivered])
+    advance('business_files_published', len(selected), len(selected))
+
+
 def retire_legacy(root, paths):
     # Recognize the old generated schema before removing a redundant view.
     for path in (root / 'Records').glob('**/Record.json'):
@@ -65,6 +104,7 @@ def rebuild(archive, rows):
             paths.move(relative, '.System/' + relative)
     receipts = {}
     cache = getattr(archive, 'receipt_cache', {})
+    archive.receipt_cache = cache
     for number, row in enumerate(rows, 1):
         path = checked(root, paths.name(row['receipt_path']))
         receipt = cache.get(path.name)

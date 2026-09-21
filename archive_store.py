@@ -270,7 +270,8 @@ class ArchiveStore:
                      if doc.get(key)), fallback)
 
     def write_index(self):
-        from archive_migration import rebuild
+        from archive_migration import publish_events, rebuild
+        from archive_progress import checkpoint
         with self.lock:
             self.status.update(status='indexing')
         with self.core['db']() as conn:
@@ -282,7 +283,25 @@ class ArchiveStore:
             return None
         try:
             started = time.monotonic()
-            result = rebuild(self, rows)
+            publish_events(self, rows)
+            with self.core['db']() as conn:
+                rows = conn.execute('SELECT * FROM archive_outbox WHERE archived_at IS NOT NULL ORDER BY seq DESC').fetchall()
+
+            class NewReceipts(Exception):
+                pass
+
+            def yield_to_receipts():
+                with self.core['db']() as conn:
+                    waiting = conn.execute('SELECT 1 FROM archive_outbox WHERE archived_at IS NULL AND retry_after<=? LIMIT 1',
+                                           (time.time(),)).fetchone()
+                if self.stop.is_set() or waiting:
+                    raise NewReceipts()
+
+            try:
+                with checkpoint(yield_to_receipts):
+                    result = rebuild(self, rows)
+            except NewReceipts:
+                return None
             with self.lock:
                 self.status['last_view_rebuild'] = {'duration_ms': round((time.monotonic()-started)*1000, 2),
                     'clock_basis': 'process_monotonic', 'scope': 'whole_archive_derived_views', **result}
@@ -344,14 +363,16 @@ class ArchiveStore:
             readable_at = self.core['now']()
             placeholders = ','.join('?' for _ in published_sequences)
             with self.core['db']() as conn:
-                conn.execute(f"""UPDATE archive_outbox SET readable_at=?,readability_basis=?
+                updated = conn.execute(f"""UPDATE archive_outbox SET readable_at=?,readability_basis=?
                                  WHERE seq IN ({placeholders}) AND published_at IS NOT NULL
                                    AND readable_at IS NULL""",
-                             (readable_at, 'archive_writer_derived_views_published', *published_sequences))
+                             (readable_at, 'archive_writer_derived_views_published', *published_sequences)).rowcount
                 # Force a second derived-view pass so Evidence.json and the
                 # index expose the readability confirmation just established.
-                conn.execute("INSERT OR REPLACE INTO archive_meta VALUES('index_version','readability_metadata_pending')")
-            self.write_index()
+                if updated:
+                    conn.execute("INSERT OR REPLACE INTO archive_meta VALUES('index_version','readability_metadata_pending')")
+            if updated:
+                self.write_index()
         with self.core['db']() as conn:
             failed = conn.execute('SELECT last_error FROM archive_outbox WHERE archived_at IS NULL AND last_error IS NOT NULL LIMIT 1').fetchone()
         with self.lock:

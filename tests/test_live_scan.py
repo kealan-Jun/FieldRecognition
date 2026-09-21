@@ -278,3 +278,72 @@ def test_expired_overlay_is_removed_even_without_a_new_raw_frame(monkeypatch):
     assert recognition_part(reader, camera, raw_token)[0] is None
     camera.offline = True
     assert b'annotated-jpeg' not in recognition_part(reader, camera, raw_token)[0]
+
+
+def test_sequential_codes_append_bindings_and_retry_after_registration(live):
+    app, client, camera = live
+    aid = 'e9434a0a-3319-414a-b988-4cc6884edce4'
+    bid = 'eae17924-9fa7-4445-ac45-3987f5687be9'
+    camera.publish(label(app, 'InstrumentA'))
+    sid = start(client)
+    rejected = wait_for(client, sid, lambda r: bool(r.get('binding_errors')))
+    camera.publish(label(app, 'InstrumentA'))
+    same = wait_for(client, sid, lambda r: r['frames_scanned'] > rejected['frames_scanned'])
+    assert same['scan']['scan_id'] == rejected['scan']['scan_id']
+    client.put('/api/instruments/' + aid, json={'name': 'A', 'scene': '湿实验实验台'})
+    camera.publish(label(app, 'InstrumentA'))
+    first = wait_for(client, sid, lambda r: len(r.get('bindings', [])) == 1)
+    assert first['scan']['scan_id'] != rejected['scan']['scan_id']
+    assert not first['binding_errors']
+    client.put('/api/instruments/' + bid, json={'name': 'B', 'scene': '湿实验实验台'})
+    camera.publish(label(app, 'InstrumentB'))
+    both = wait_for(client, sid, lambda r: len(r.get('bindings', [])) == 2)
+    assert {b['instrument']['id'] for b in both['bindings']} == {aid, bid}
+    camera.publish(label(app, 'InstrumentB'))
+    wait_for(client, sid, lambda r: r['frames_scanned'] > both['frames_scanned'])
+    with app.db() as conn:
+        assert conn.execute('SELECT count(*) FROM bindings').fetchone()[0] == 2
+
+
+def test_same_code_retries_after_release_but_preserves_handoff_reservation(live):
+    import uuid
+    from test_instrument_ownership import own
+    app, client, camera = live
+    old = own(client, 'InstrumentA', 'OtherCamera', '甲')
+    camera.publish(label(app, 'InstrumentA'))
+    sid = start(client)
+    rejected = wait_for(client, sid, lambda r: bool(r.get('binding_errors')))
+    pending = client.post('/api/handoffs', json={'request_id': str(uuid.uuid4()),
+        'binding_id': old['binding_id'], 'recipient_scan_id': rejected['scan']['scan_id'],
+        'recipient_operator': '测试员'}).json()
+    hid = pending['handoff_id']
+    released = client.post(f'/api/handoffs/{hid}/release', json={
+        'actor': '甲', 'camera_id': 'OtherCamera', 'revision': pending['revision']}).json()
+    camera.publish(label(app, 'InstrumentA'))
+    reserved = wait_for(client, sid, lambda r: r['scan']['scan_id'] != rejected['scan']['scan_id'])
+    assert not reserved['bindings']
+    assert '等待指定接收人确认' in reserved['message']
+    result = client.post(f'/api/handoffs/{hid}/accept', json={
+        'actor': '测试员', 'camera_id': camera.target, 'revision': released['revision']})
+    assert result.status_code == 200
+    camera.publish(label(app, 'InstrumentA'))
+    accepted = wait_for(client, sid, lambda r: len(r.get('bindings', [])) == 1)
+    assert not accepted['binding_errors']
+    assert accepted['binding']['handoff_id'] == hid
+
+
+def test_same_code_retries_on_fresh_frame_after_previous_binding_ends(live):
+    from test_instrument_ownership import own
+    app, client, camera = live
+    old = own(client, 'InstrumentA', 'OtherCamera', '甲')
+    camera.publish(label(app, 'InstrumentA'))
+    sid = start(client)
+    rejected = wait_for(client, sid, lambda r: bool(r.get('binding_errors')))
+    response = client.post('/api/camera/relations/end', json={'camera_id': 'OtherCamera'})
+    assert response.status_code == 200
+    # Ending the relation cannot turn a previously decoded frame into a new scan.
+    assert client.get('/api/camera/scan-sessions/' + sid).json()['scan']['scan_id'] == rejected['scan']['scan_id']
+    camera.publish(label(app, 'InstrumentA'))
+    accepted = wait_for(client, sid, lambda r: bool(r.get('bindings')))
+    assert accepted['binding']['binding_id'] != old['binding_id']
+    assert not accepted['binding_errors']

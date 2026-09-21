@@ -228,7 +228,7 @@ def test_archive_status_separates_receipt_publication_and_readability(archive):
                            (capture['scan_id'],)).fetchone()
         status = receipt_status(conn, 'scans', capture['scan_id'])
     assert row['archived_at'] and row['published_at'] and row['readable_at']
-    assert row['readability_basis'] == 'archive_writer_derived_views_published'
+    assert row['readability_basis'] == 'archive_writer_event_files_published'
     assert status['published_at'] == row['published_at'] and status['readable_at'] == row['readable_at']
     index = json.loads((root / '.System/Index.json').read_text())
     item = next(item for item in index['items'] if item['entity'] == 'scans' and item['entity_id'] == capture['scan_id'])
@@ -254,3 +254,58 @@ def test_readability_retries_after_interrupted_views_without_fabricating_legacy_
         assert receipt_status(conn, 'scans', fresh['scan_id'])['readable_at']
         legacy = receipt_status(conn, 'scans', old['scan_id'])
         assert legacy['published_at'] is None and legacy['readable_at'] is None
+
+
+def test_new_binding_is_readable_even_when_historical_index_fails(archive, monkeypatch):
+    import archive_migration
+    app, client, root = archive
+    scan(client, camera='PreviousCamera')
+    app.archive_store.step(100)
+    old_files = {p: p.read_bytes() for p in root.glob('*/Bindings/*/Binding.json')}
+    decoded = scan(client, 'Scene01', camera='NewCamera')
+    visit = client.post('/api/scene/enter', json={'scan_id': decoded['scan_id'],
+        'scene_id': decoded['scene_matches'][0]['id'], 'operator': '甲'}).json()
+
+    def fail(*args):
+        raise OSError('historical index unavailable')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(archive_migration, 'rebuild', fail)
+        with pytest.raises(OSError):
+            app.archive_store.step(100)
+    paths = list(root.glob('*_NewCamera/Bindings/*/Binding.json'))
+    assert len(paths) == 1
+    result = json.loads(paths[0].read_text())
+    assert result['binding'] == visit and result['status'] == 'active'
+    assert all(p.read_bytes() == raw for p, raw in old_files.items())
+    assert app.archive_store.snapshot()['navigation_pending']
+    with app.db() as conn:
+        assert receipt_status(conn, 'scene_visits', visit['visit_id'])['readable_at']
+    app.archive_store.step(100)
+    assert not app.archive_store.snapshot()['navigation_pending']
+    assert len(list(root.glob('*_NewCamera/Bindings/*/Binding.json'))) == 1
+
+
+def test_index_yields_to_new_receipts_and_resumes(archive, monkeypatch):
+    import archive_migration
+    import archive_progress
+    app, client, root = archive
+    scan(client)
+    clock = archive_progress.time.monotonic
+    queued = []
+
+    def receive_during_index(*args):
+        queued.append(scan(client, 'Scene01', camera='SecondCamera'))
+        with monkeypatch.context() as patch:
+            patch.setattr(archive_progress.time, 'monotonic', lambda: clock() + 2)
+            archive_progress.advance('checking_receipts')
+        raise AssertionError('maintenance should yield')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(archive_migration, 'rebuild', receive_during_index)
+        app.archive_store.step(100)
+    assert queued and app.archive_store.snapshot()['pending_receipts'] == 1
+    assert list(root.glob('*_TestCamera/Bindings/*/Binding.json'))
+    app.archive_store.step(100)
+    assert app.archive_store.snapshot()['pending_receipts'] == 0
+    assert list(root.glob('*_SecondCamera/Bindings/*/Binding.json'))

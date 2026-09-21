@@ -26,25 +26,18 @@ def test_shared_scene_receipts_reach_nas_with_details_and_independent_end(archiv
                  for p in root.glob('.System/Receipts/**/*.json')}
     for path in files:
         doc = json.loads(path.read_text())
-        assert doc['entity'] == 'scene_visits' and doc['status'] == 'active'
+        assert doc['event_id'].startswith('scene_visits:') and doc['status'] == 'active'
         saved = next(v for v in visits if v['visit_id'] == doc['binding']['visit_id'])
         assert doc['binding'] == saved
-        html = path.with_name('Readme.html').read_text()
-        assert '场景绑定' in html and '已绑定' in html
-        for key in ['camera_id', 'operator', 'visit_id', 'scan_id']:
-            assert saved[key] in html
-        assert saved['scene']['id'] in html and saved['scene']['name'] in html
-        assert '绑定时间' in html and '有效至' in html and '扫码凭证' in html
         assert doc['sources'][0]['scene_matches'][0]['id'] == saved['scene']['id']
         for image in doc['photos'].values():
             assert hashlib.sha256((root / image['path']).read_bytes()).hexdigest() == image['sha256']
-        old = f"/api/archive/files/Records/SceneVisits/{saved['visit_id']}/Readme.html"
-        assert client.get(old).text == html
-    assert 'SceneBindings.html' in (root / 'Readme.html').read_text()
-    index = (root / 'SceneBindings.html').read_text()
-    assert all(v['camera_id'] in index and v['operator'] in index for v in visits)
-    for path in [root / 'Readme.html', root / 'SceneBindings.html', *root.glob('*/Bindings/*/Readme.html'),
-                 *root.glob('*/DailyReport/DailyReport.html')]:
+        old = f"/api/archive/files/Records/SceneVisits/{saved['visit_id']}/Record.json"
+        assert client.get(old).json() == doc
+    assert not (root / 'SceneBindings.html').exists()
+    assert not list(root.glob('*/Bindings/*/Readme.html'))
+    for path in root.glob('*/DailyReport/DailyReport.html'):
+        assert '已绑定' in path.read_text()
         for link in re.findall(r'(?:href|src)="([^"]+)"', path.read_text()):
             destination = (path.parent / unquote(link)).resolve()
             destination.relative_to(root.resolve())

@@ -12,12 +12,16 @@ from archive_progress import advance
 LEDGER = '.System/MigrationMap.json'
 
 
-def checked(root, relative):
+def validate_name(relative):
     if not isinstance(relative, str) or not relative or '\\' in relative:
         raise ValueError('Invalid archive path')
     parts = PurePosixPath(relative)
     if parts.is_absolute() or '..' in parts.parts or relative.startswith('/'):
         raise ValueError('Invalid archive path')
+
+
+def checked(root, relative):
+    validate_name(relative)
     path = (root / relative).resolve()
     path.relative_to(root.resolve())
     advance()
@@ -127,7 +131,8 @@ class ArchivePaths:
         return self.data['assets'][digest]
 
     def directory(self, key, proposed):
-        checked(self.root, proposed)
+        # Allocation is in-memory; every filesystem operation still uses checked().
+        validate_name(proposed)
         # Value/owner edits never rename a measurement already delivered.
         return self.data['events'].setdefault(key, proposed)
 
@@ -141,13 +146,15 @@ class ArchivePaths:
         checked(self.root, slots[instrument])
         return slots[instrument]
 
-    def retire_views(self, views):
+    def retire_views(self, views, *, partial=False):
         """Remove only byte-verified generated views, never handwritten files."""
         from archive_store import replace_view
         previous = self.data.get('views', {})
         for relative, digest in previous.items():
+            if partial or relative in views:
+                continue
             path = checked(self.root, relative)
-            if relative not in views and path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == digest:
+            if path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == digest:
                 path.unlink()
         # Result files precede Evidence manifests. This is a publication order,
         # not an atomic multi-file transaction; readers must verify manifest hashes.
@@ -158,7 +165,7 @@ class ArchivePaths:
                 continue
             if not path.is_file() or path.read_bytes() != raw:
                 replace_view(path, raw)
-        self.data['views'] = {p: hashlib.sha256(raw).hexdigest() for p, raw in views.items()}
+        self.data['views'] = (previous if partial else {}) | {p: hashlib.sha256(raw).hexdigest() for p, raw in views.items()}
         self.save()
 
 

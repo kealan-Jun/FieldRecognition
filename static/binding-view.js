@@ -39,7 +39,7 @@
         ? `当前由 ${occupied.operator || '未记录人员'} · ${occupied.camera_id} 使用，需完成交接。`
         : '当前尚未绑定，请重新对准仪器码并查看自动运行提示。';
       return `<div class="bound-item"><b>仪器未绑定 · ${esc(match.name || match.id)}</b>
-        <small>最近解码 · ${esc(stamp(scan.received_at))}（北京时间）</small><small>${esc(reason)}</small></div>`;
+        <small>最近解码 · ${esc(stamp(scan.received_at))}（北京时间）</small><small>${esc(reason)}</small>${occupied ? '<a href="/photo-measurements#handoff">办理仪器交接 ↗</a>' : ''}</div>`;
     }).join('');
   }
 

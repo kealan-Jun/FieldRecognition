@@ -55,11 +55,41 @@ class LiveScanner:
         bindings = self.active_bindings()
         return bindings[0] if bindings else None
 
+    def binding_dependencies(self, instruments, scenes):
+        """Retry a rejected code when its registration or occupancy changes."""
+        from binding_policy import moment
+        ids = {item['id'] for item in instruments}
+        hashes = {item.get('qr_hash') for item in instruments} - {None}
+        with self.core['db']() as conn:
+            occupied = [json.loads(row[0]) for row in conn.execute(
+                'SELECT document FROM bindings WHERE ended IS NULL')]
+            transfers = [json.loads(row[0]) for row in conn.execute(
+                "SELECT document FROM binding_handoffs WHERE status IN ('requested','released')")]
+        timestamp = moment(self.core['now']())
+        state = {
+            'identities': [{k: v for k, v in item.items() if k != 'polygon'}
+                           for item in instruments + scenes],
+            'occupied': sorted(b['binding_id'] for b in occupied
+                               if b['instrument']['id'] in ids or b.get('qr_hash') in hashes),
+            'transfers': sorted((t['handoff_id'], t['status'], t['revision']) for t in transfers
+                                if t['instrument_id'] in ids and
+                                (not t.get('expires_at') or moment(t['expires_at']) > timestamp)),
+            'scenes': sorted(v['visit_id'] for v in self.core['scene_visits']()
+                             if v['camera_id'] == self.camera().target),
+        }
+        return json.dumps(state, sort_keys=True)
+
     def refresh_bindings(self):
         bindings = self.active_bindings()
         visits = [v for v in self.core['scene_visits']() if v['camera_id'] == self.camera().target]
         if self.session is None:
             return
+        scan = self.session.get('scan') or {}
+        instrument_ids = {b['instrument']['id'] for b in bindings}
+        scene_ids = {v['scene']['id'] for v in visits}
+        if (scan and all(m['id'] in instrument_ids for m in scan.get('matches', []))
+                and all(m['id'] in scene_ids for m in scan.get('scene_matches', []))):
+            self.session['binding_errors'] = []
         self.session.update(bindings=bindings, binding=bindings[0] if len(bindings) == 1 else None,
                             scene_visits=visits,
                             message=f'已绑定 {len(bindings)} 台仪器、{len(visits)} 个场景；持续扫描新二维码')
@@ -173,7 +203,7 @@ class LiveScanner:
                         last_match = None
                         self.refresh_bindings()
                         continue
-                    key = (observed_day, tuple(m['id'] for m in new_instruments), tuple(m['id'] for m in new_scenes))
+                    key = (observed_day, self.binding_dependencies(new_instruments, new_scenes))
                     if key == last_match:
                         continue
                     last_match = key

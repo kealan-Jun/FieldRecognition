@@ -35,3 +35,5 @@ async function loadHandoffs(state){
 }
 for(const id of ['#handoffBinding','#handoffScan','#handoffRecipient'])$(id).oninput=()=>{handoffRequestId=null;};
 $('#requestHandoff').onclick=()=>run(async()=>{const recipient_operator=$('#handoffRecipient').value.trim();if(!recipient_operator)throw Error('请填写接收人');handoffRequestId ||= crypto.randomUUID();await api('/api/handoffs',{request_id:handoffRequestId,binding_id:$('#handoffBinding').value,recipient_scan_id:$('#handoffScan').value,recipient_operator});await load();notice('申请已保存，现有使用关系保持有效，等待原使用人交出。');});
+
+if (location.hash === '#handoff') document.querySelector('#handoff').open = true;

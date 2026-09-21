@@ -6,17 +6,13 @@
 
 打开根目录 `Readme.html`，选择日期和相机进入 `DailyReport/DailyReport.html`。HTML 使用相对链接，直接用浏览器打开即可；也可访问 `http://127.0.0.1:8188/api/archive/files/Readme.html`。
 
-场景绑定可从首页的“场景绑定记录”进入 `SceneBindings.html`。每台相机独立列出场景、实验员、绑定时间和归档状态；点击详情查看场景编号、有效期、结束原因与扫码凭证。已结束的历史绑定仍保留，不能视为今天的有效授权。工作台的多相机卡片和相机详情也单独展示场景绑定，仪器占用仍遵守交接规则。
-
 ```text
 FieldRecognitionArchive/
 ├── Readme.html
-├── SceneBindings.html                 # 全部相机的场景绑定记录
 ├── 2026-09-14_lubancat-52d2ef0c_cam01/
 │   ├── Bindings/
 │   │   └── 13-26-19.000_<绑定或扫码ID>/
 │   │       ├── Binding.json
-│   │       ├── Readme.html             # 场景 / 仪器绑定详情与扫码凭证
 │   │       └── Photos/Original<图片摘要>.png
 │   ├── VideoReadings/
 │   │   └── 13-27-02.120_<采集ID>/
@@ -52,7 +48,7 @@ FieldRecognitionArchive/
 
 | 想查的内容 | 目录与文件 | 文件内容 |
 |---|---|---|
-| 谁在什么时间绑定 A、B 或实验台 | `Bindings/<事件>/Readme.html`、`Binding.json` | 详情页展示身份、起止时间、有效期与扫码图片入口；JSON 的 `entity` 区分场景、仪器、交接和扫码，`binding` 保留原文，`sources` 给出二维码来源，`receipt_versions` 给出不可覆盖历史。场景的 `visit_id` 同样代表已建立关系，未结束时状态为 `active`；仅扫码命中不标记为绑定成功。 |
+| 谁在什么时间绑定 A、B 或实验台 | `Bindings/<事件>/Binding.json` | `binding` 保留原绑定、场景、扫码或交接文档，含人员、仪器 ID、起止时间和状态；`sources` 给出二维码来源，`receipt_versions` 给出不可覆盖历史。扫码命中与绑定成功分别保留其含义。 |
 | 视频哪一刻读到哪台设备的数 | `VideoReadings/<采集>/Result.json` | 每台仪器一个六字段结果文件；`Evidence.json` 的 `observations` 保留 OCR 原文、区域、模型和时间，`sources.video_observation` 保留视频时间依据。 |
 | 某张语音照片识别了什么 | `VoicePhotoReadings/<测量>/Result.json` | 同目录 `Evidence.json` 的 `sources.external_photo` 保留原 NAS 文件路径、源采集编号、拍摄和写入时间；读数与相应照片哈希、区域逐项关联。 |
 | 上传照片的结果 | `PhotoReadings/<测量>/Result.json` | 同上；来源明确区别于语音拍照和视频。 |
@@ -130,3 +126,5 @@ systemctl --user start field-recognition-archive.service
 未绑定且未执行 OCR 的照片只保留 `Evidence.json`、`Photos/` 及已有区域文件，不伪造空仪器测量。追溯状态为 `skipped`，`skip_reasons` 说明原因；`processing_status=completed` 只代表任务结束。已定位并归属到仪器、但部分字段看不清时仍输出该仪器的固定字段，未知值为 null。
 
 旧版包含处理回执的 `Result.json` 是生成视图，升级后移至 `Evidence.json`，规范读数单独输出。原始照片、数据库任务和 `.System/Receipts` 不改写。未生成规范读数的旧 Result HTTP 地址映射到 Evidence，NAS 实体目录不会再出现冒充结果的空回执。
+
+新增绑定、场景和识别事件先发布到上述固定目录；历史索引重建不作为这些业务文件可见的前提。重建期间有新回执时，归档进程先处理新记录，再继续索引。`archive.readable_at` 与 `readability_basis=archive_writer_event_files_published` 表示对应事件文件已发布，`navigation_pending` 单独表示索引仍待更新。场景关联的 `Binding.json` 在有效期内显示 `status=active`，结束后显示 `ended`，原场景、人员、时间和扫码证据保留在 `binding`、`sources` 与 `receipt_versions`。
