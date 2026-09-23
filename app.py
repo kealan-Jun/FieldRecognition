@@ -1103,6 +1103,8 @@ install_tools(app, globals())
 
 from security import install as install_security
 install_security(globals(), AUTH_ENABLED)
+from evidence_timeline import install as install_evidence_timeline
+install_evidence_timeline(globals())
 from production_routes import install as install_production_routes
 install_production_routes(globals())
 

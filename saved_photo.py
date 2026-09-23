@@ -24,6 +24,7 @@ class PhotoResult(BaseModel):
     image_base64: str = Field(min_length=1, max_length=16 * 1024 * 1024)
     sha256: str | None = Field(default=None, pattern=r'^[a-fA-F0-9]{64}$')
     timestamp_basis: str = Field(default='agent_photo_receipt', max_length=100)
+    batch_basis: str | None = Field(default=None, max_length=100)
     source_written_at: AwareDatetime | None = None
 
 
@@ -88,9 +89,13 @@ def load_saved_bundle(image_path, *, expected_camera, max_bytes):
     configured = os.environ.get('FIELD_SAVED_PHOTO_ROOT')
     if not configured:
         raise HTTPException(409, '尚未配置已有照片目录；可由 Agent 传入 photo 原图与回执')
+    batch_mode = os.environ.get('FIELD_VOICE_PHOTO_BATCH_MODE', 'receipt_only')
+    if batch_mode not in {'receipt_only', 'directory_triplet'}:
+        raise HTTPException(503, '语音三连拍目录协议配置无效')
     try:
         loaded = call({'action': 'read', 'root': configured, 'path': image_path, 'camera': expected_camera,
-            'max_bytes': max_bytes, 'require_receipt': os.environ.get('FIELD_PHOTO_RECEIPT_REQUIRED', '0') == '1'})
+            'max_bytes': max_bytes, 'require_receipt': os.environ.get('FIELD_PHOTO_RECEIPT_REQUIRED', '0') == '1',
+            'batch_mode': batch_mode, 'zone': os.environ.get('FIELD_SAVED_PHOTO_TIMEZONE', 'Asia/Shanghai')})
     except SourceError as exc:
         raise HTTPException(exc.status, str(exc)) from None
     camera, day, moment, filename = Path(loaded['relative']).parts
@@ -119,10 +124,12 @@ def load_saved_bundle(image_path, *, expected_camera, max_bytes):
             raise HTTPException(409, '连拍照片哈希或拍摄时间与回执不符')
         capture_id, captured, context = entry.capture_id, entry.captured_at, receipt.measurement
         evidence = receipt.model_dump(mode='json')
-        basis = 'nas_photo_receipt'
+        basis = ('nas_filename_local_time_not_hardware_verified' if loaded.get('receipt_basis') == 'configured_directory_triplet'
+                 else 'nas_photo_receipt')
     photo = PhotoResult(capture_id=capture_id, camera_id=camera, captured_at=captured,
         source_ref=loaded['path'], image_base64=loaded['image_base64'], sha256=digest,
-        source_written_at=datetime.fromtimestamp(loaded['mtime'], timezone.utc), timestamp_basis=basis)
+        source_written_at=datetime.fromtimestamp(loaded['mtime'], timezone.utc), timestamp_basis=basis,
+        batch_basis='configured_directory_triplet' if loaded.get('receipt_basis') == 'configured_directory_triplet' else None)
     return photo, context, evidence
 
 

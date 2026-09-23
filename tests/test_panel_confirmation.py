@@ -50,3 +50,18 @@ def test_new_binding_scope_absent_panel_or_large_motion_cannot_reuse_votes():
             observe(v,1,[]);assert not observe(v,2,[region()])
         else:
             assert not observe(v,1,[region(box=[200,200,300,240])])
+
+
+def test_periodic_frame_still_requires_fresh_distinct_consensus_and_same_binding():
+    voter = PanelConfirmation()
+    first, second = region(), region()
+    observe(voter, 0, [first]); observe(voter, 1, [second])
+    voter.mark_saved([second], .5)
+    assert not voter.periodic_due(second, 30.4, 30)
+    after_gap = region()
+    observe(voter, 61, [after_gap], now=30.5)
+    assert not voter.periodic_due(after_gap, 30.5, 30)
+    fresh = region(); observe(voter, 62, [fresh], now=31)
+    assert voter.periodic_due(fresh, 31, 30)
+    new_binding = region(); observe(voter, 63, [new_binding], scope='another-binding', now=31.5)
+    assert not voter.periodic_due(new_binding, 31.5, 30)

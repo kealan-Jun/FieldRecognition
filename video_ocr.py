@@ -36,6 +36,11 @@ class VideoOcr:
         self.no_digits_since = None
         self.epoch = None
         self.confirmation = PanelConfirmation()
+        # Repeated stable readings also need a fresh frame for later time lookup.
+        # Invalid settings fail at startup instead of silently disabling evidence.
+        self.periodic_seconds = float(os.environ.get('FIELD_VIDEO_EVIDENCE_INTERVAL_SECONDS', '30'))
+        if not 2 <= self.periodic_seconds <= 3600:
+            raise ValueError('FIELD_VIDEO_EVIDENCE_INTERVAL_SECONDS must be 2–3600')
         self.preview_cache = None
         self.state = {'status': 'starting', 'frames_inferred': 0, 'evidence_saved': 0,
                       'latest_lines': [], 'last_error': None, 'background_frames_skipped': 0}
@@ -49,6 +54,7 @@ class VideoOcr:
         with self.lock:
             return copy.deepcopy(self.state) | {'enabled': self.enabled(), 'sample_interval_seconds': self.interval,
                 'target_fps': 1 / self.interval, 'saves_every_frame': False, 'stable_samples': 2,
+                'periodic_evidence_seconds': self.periodic_seconds,
                 'confirmation_rule':'2_of_3_distinct_frames','confirmation_window_seconds':1.6,
                 'min_evidence_interval_seconds': 2, 'unreadable_evidence_interval_seconds': 30,
                 'empty_background_saved': False, 'unreadable_requires_visible_instrument_qr': not self.core['panel_detector'].enabled(),
@@ -228,14 +234,17 @@ class VideoOcr:
             self.no_digits_since = None
         changed_panels = [r for r in panels if self.confirmation.changed(r) and self.confirmation.can_save(r,current)] if localized else []
         change = bool(changed_panels) if localized else bool(lines) and self.stable_count >= 2 and signature != self.last_saved_signature
+        periodic_panels = [r for r in panels if self.confirmation.periodic_due(r, current, self.periodic_seconds)] if localized else []
+        periodic = bool(periodic_panels) if localized else bool(lines) and self.stable_count >= 2 and current - self.last_saved >= self.periodic_seconds
         unreadable = (self.no_digits_since is not None and current - self.no_digits_since >= no_digits_seconds()
                       and current - self.last_saved >= 30 and self.stable_count >= 2
                       and signature != self.last_saved_signature)
-        if not (change and (localized or current - self.last_saved >= 2)) and not unreadable:
+        if not (change and (localized or current - self.last_saved >= 2)) and not periodic and not unreadable:
             return
-        if localized and change:
+        evidence_panels = {r['panel_id']: r for r in changed_panels + periodic_panels}
+        if localized and (change or periodic):
             local = copy.deepcopy(local)
-            selected = {r['panel_id'] for r in changed_panels}
+            selected = set(evidence_panels)
             local['panel_regions'] = [r for r in local['panel_regions'] if r['panel_id'] in selected]
             local['lines'] = [l for l in lines if l.get('panel_id') in selected]
             for region in local['panel_regions']:
@@ -255,9 +264,10 @@ class VideoOcr:
             elapsed = current - self.no_digits_since if self.no_digits_since is not None else 0
             from measurement_records import video_clock
             capture.update(received_at=observed, video_observation={**video_clock(metadata), 'observed_at': observed,
-                'evidence_reason': 'reading_changed' if change else 'unreadable_timeout',
-                'stable_samples': min(r['temporal_confirmation']['votes'] for r in changed_panels) if changed_panels else self.stable_count,
-                'confirmation_rule': '2_of_3_distinct_frames' if localized and change else None,
+                'evidence_reason': 'reading_changed' if change else 'reading_periodic' if periodic else 'unreadable_timeout',
+                'periodic_evidence_seconds': self.periodic_seconds,
+                'stable_samples': min(r['temporal_confirmation']['votes'] for r in evidence_panels.values()) if evidence_panels else self.stable_count,
+                'confirmation_rule': '2_of_3_distinct_frames' if localized and (change or periodic) else None,
                 'no_digits_elapsed_seconds': elapsed,
                 'sample_interval_seconds': self.interval})
             with self.core['db']() as conn:

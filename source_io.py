@@ -1,5 +1,6 @@
 """Bounded, read-only NAS I/O. Child processes never import the application/GPU."""
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ import sys
 import threading
 from datetime import datetime
 from zoneinfo import ZoneInfo
+import time
 
 _LOCK = threading.Lock()
 _ORPHANS = []
@@ -92,6 +94,7 @@ def read(request):
     raw, info = read_stable(path, request['max_bytes'])
     receipt = path.parent / 'PhotoReceipt.json'
     metadata = None
+    receipt_basis = 'nas_photo_receipt'
     if receipt.exists():
         if receipt.is_symlink():
             raise SourceError('连拍回执不能为符号链接', 422)
@@ -100,11 +103,46 @@ def read(request):
             metadata = json.loads(content)
         except (ValueError, UnicodeError):
             raise SourceError('连拍回执格式无效', 422) from None
+    elif request.get('batch_mode') == 'directory_triplet':
+        # Explicit deployment contract: ONE capture directory contains EXACTLY
+        # three photos. Opt-in only; never apply a same-second heuristic by default.
+        metadata = directory_triplet(request, path, relative)
+        receipt_basis = 'configured_directory_triplet'
     elif request.get('require_receipt'):
         raise SourceError('等待连拍回执 PhotoReceipt.json', 503)
     return {'relative': relative.as_posix(), 'path': str(path), 'mtime': info.st_mtime,
         'signature': f'{info.st_size}:{info.st_mtime_ns}', 'image_base64': base64.b64encode(raw).decode(),
-        'receipt': metadata}
+        'receipt': metadata, 'receipt_basis': receipt_basis if metadata else None}
+
+
+def directory_triplet(request, path, relative):
+    def members():
+        return sorted(p for p in path.parent.iterdir() if p.suffix.lower() in {'.jpg', '.jpeg', '.png'})
+    paths = members()
+    if len(paths) < 3:
+        raise SourceError('语音三连拍尚未收齐，保留队列等待', 503)
+    if len(paths) != 3:
+        raise SourceError('目录超过三张照片，不能确定一次拍照边界', 409)
+    photos, signatures = [], []
+    for member in paths:
+        safe, rel = safe_path(request['root'], member)
+        match = re.fullmatch(r'(\d{8})_(\d{6})(?:_\d+)?\.(?:jpg|jpeg|png)', safe.name, re.I)
+        if not match:
+            raise SourceError('三连拍文件名不符合已配置的目录协议', 422)
+        captured = datetime.strptime(match[1]+match[2], '%Y%m%d%H%M%S').replace(tzinfo=ZoneInfo(request['zone']))
+        if rel.parts[:3] != relative.parts[:3] or rel.parts[1:3] != (captured.strftime('%Y-%m-%d'), captured.strftime('%H-%M-%S')):
+            raise SourceError('三连拍目录与采集时间不一致', 409)
+        raw, info = read_stable(safe, request['max_bytes'])
+        if time.time() - info.st_mtime < .5:
+            raise SourceError('语音三连拍仍在写入', 503)
+        signatures.append((info.st_size, info.st_mtime_ns))
+        photos.append({'filename': safe.name, 'capture_id': rel.as_posix(),
+                       'captured_at': captured.isoformat(), 'sha256': hashlib.sha256(raw).hexdigest()})
+    if paths != members() or signatures != [(p.stat().st_size, p.stat().st_mtime_ns) for p in paths]:
+        raise SourceError('语音三连拍目录发生变化，等待稳定', 503)
+    batch = hashlib.sha256(('directory-triplet/1:' + relative.parent.as_posix()).encode()).hexdigest()
+    return {'schema_version': 'field-photo-receipt/1', 'camera_id': request['camera'],
+            'measurement': {'burst_id': 'directory-triplet-' + batch, 'expected_photos': 3}, 'photos': photos}
 
 
 def discover(request):

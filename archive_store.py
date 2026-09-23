@@ -98,7 +98,7 @@ class ArchiveStore:
         self.status = {'status': 'disabled', 'last_error': None, 'last_archived_at': None}
         base = Path(__file__).parent
         self.index_version = '3:' + hashlib.sha256(b''.join((base / p).read_bytes()
-            for p in ('archive_catalog.py', 'archive_events.py', 'archive_paths.py', 'archive_migration.py',
+            for p in ('archive_catalog.py', 'archive_events.py', 'evidence_timeline.py', 'archive_paths.py', 'archive_migration.py',
                       'measurement_records.py', 'static/archive.html', 'static/archive.js'))).hexdigest()[:16]
         with core['db']() as conn:
             conn.executescript('''

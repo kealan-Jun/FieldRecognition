@@ -69,6 +69,11 @@ class PanelConfirmation:
     def can_save(self,region,now):
         return now-self.saved.get(self.key(region),{}).get('time',-1000)>=2
 
+    def periodic_due(self, region, now, interval):
+        previous = self.saved.get(self.key(region))
+        return bool(previous and region.get('temporal_confirmation', {}).get('status') == 'confirmed'
+                    and now - previous['time'] >= interval)
+
     def mark_saved(self,regions,now=0):
         for region in regions:
             if region.get('temporal_confirmation',{}).get('status')=='confirmed':

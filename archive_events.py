@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 from archive_browse import page, token
 from archive_readable import raw_json
 from measurement_records import build_records, capture_clock, measurement_value, RULE_VERSION
+from evidence_timeline import acquisition
 
 KINDS = {'Bindings': '二维码与绑定', 'VideoReadings': '视频面板读数',
          'VoicePhotoReadings': '语音照片读数', 'PhotoReadings': '上传照片读数'}
@@ -273,6 +274,9 @@ def make_views(bundles, paths, receipts, *, preserve_asset_locations=False):
                       for b in observation.get('all_binding_snapshots') or observation.get('binding_snapshots') or []}
             if len(people) > 1:
                 content.update(operator=None, personnel_attribution='multiple_sessions_see_observations')
+        if bundle['kind'] in {'VideoReadings', 'VoicePhotoReadings'}:
+            content['acquisition'] = [acquisition(row['doc'], group) | {'job_id': row['doc']['job_id'],
+                'capture_id': row['doc'].get('capture_id')} for row in bundle['jobs']]
         latest_member = max(bundle['members'], key=lambda r: r['seq'])
         content['archive'] = {'queued_at': latest_member['recorded_at'],
                               'published_at': latest_member['published_at'],
@@ -356,6 +360,7 @@ def make_views(bundles, paths, receipts, *, preserve_asset_locations=False):
             days.setdefault(bundle['day'], []).append({'event_id': bundle['key'], 'event_at': bundle['event_at'],
                 'category': bundle['kind'], 'target': target or '归属待确认', 'operator': content['operator'],
                 'status': content['status'], 'result': file,
+                'acquisition': content.get('acquisition', []),
                 'measurement_files': [{k: m[k] for k in ('instrument_id', 'instrument_name', 'result')} for m in content.get('measurement_files', [])],
                 'photo': next((v['path'] for v in photos.values() if 'original' in v['kind']), next((v['path'] for v in photos.values()), None))})
     esc = lambda x: html.escape(str(x if x is not None else '未记录'), quote=True)
@@ -368,9 +373,10 @@ def make_views(bundles, paths, receipts, *, preserve_asset_locations=False):
     intro += '<article><h2>日期与相机</h2><ul>'
     for day, entries in sorted(days.items(), reverse=True):
         base = day + '/DailyReport'
-        entries.sort(key=lambda e: e['event_at'] or '', reverse=True)
+        entries.sort(key=lambda e: aware(e['event_at']).timestamp() if aware(e['event_at']) else float('-inf'), reverse=True)
         views[base + '/DailyReport.json'] = raw_json({'schema': 'field-recognition-day/1', 'timezone': 'Asia/Shanghai', 'events': entries})
         body = '<p><a href="../../Readme.html">归档首页</a> · <a href="DailyReport.json">当日索引 JSON</a></p>'
+        body += '<p>两条采集线：视频自动留证、语音三连拍。按采集时间排列；语音缺少批次回执时保留逐张证据，不能确认属于同一连拍。时间来源见追溯文件，不将接收或处理时间当作拍摄时间。</p>'
         body += '<p>点击结果查看结构化读数、来源与历史回执；原图可直接在浏览器打开。</p><table><tr><th>北京时间</th><th>事件 / 对象</th><th>人员 / 状态</th><th>结果与照片</th></tr>'
         for entry in entries:
             moment = aware(entry['event_at'])

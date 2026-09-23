@@ -83,6 +83,7 @@ def attach(core, conn, job, context):
     job.update(record_mode=mode, record_scope='test_only', recognition_versions=versions())
     if job.get('request_trigger') == 'video_stream':
         # The production photo workflow does not promote video observations.
+        job['record_scope'] = 'field_observation' if mode == 'production' else 'test_only'
         return
     if mode == 'test' and context is None:
         return

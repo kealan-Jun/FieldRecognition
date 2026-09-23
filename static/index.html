@@ -14,6 +14,7 @@
     <a class="nav" href="#workspace">▣ 相机详情</a>
     <a class="nav" href="#registry">▤ 仪器登记</a>
     <a class="nav" href="#history">◷ 操作记录</a>
+    <a class="nav" href="/trace">◷ 按时间追溯</a>
     <a class="nav" href="/photo-measurements">▤ 拍照测量草稿</a>
   </nav>
   <div class="aside-note"><span class="dot"></span> 本地识别服务</div>
@@ -39,8 +40,8 @@
       <div class="card-title"><h2>现场画面</h2><span class="small" id="sourceLabel">等待相机画面</span></div>
       <div class="capture-box" id="captureBox"><div id="empty"><div class="viewfinder">⌗</div><h3>让仪器二维码进入画面</h3><p>登记实验员后，自动扫码绑定</p></div><canvas id="imageCanvas" hidden aria-label="图片预览；拖动框选面板"></canvas><video id="webcam" autoplay playsinline hidden></video><img id="neckPreview" hidden alt="挂脖相机实时视频"><span id="liveBadge" class="live-badge" hidden>实时视频</span></div>
       <p id="liveStatus" class="live-status" role="status" aria-live="polite">场景和仪器可同时或独立扫码；同一会话内不会重复绑定。</p>
-      <div class="capture-actions"><button id="neckLive" class="secondary">打开实时视频</button><button id="recognitionPreview" class="secondary" aria-pressed="false" title="查看与识别结果对应的抽样画面，约每秒 2 帧">查看识别叠加</button><label class="button secondary">上传照片<input id="upload" type="file" accept="image/jpeg,image/png,image/webp" hidden></label><button id="stopScan" class="secondary" hidden>停止扫码</button></div>
-      <div class="caption" id="cropHint">对 Agent 说“拍照”，照片保存后自动读数。</div><button id="resetCrop" class="quiet small" hidden>取消选框，使用整张照片</button>
+      <div class="capture-actions"><button id="neckLive" class="secondary">打开实时视频</button><button id="recognitionPreview" class="secondary" aria-pressed="false" title="查看与识别结果对应的抽样画面，约每秒 2 帧">查看识别叠加</button><input id="upload" type="file" accept="image/jpeg,image/png,image/webp" hidden><button id="stopScan" class="secondary" hidden>停止扫码</button></div>
+      <div class="caption" id="cropHint">视频自动保存读数帧证据；语音三连拍写入 NAS 后自动识别。<a href="/trace">按时间追溯两条采集线 ↗</a></div><button id="resetCrop" class="quiet small" hidden>取消选框，使用整张照片</button>
       <details class="capture-tools"><summary>拍照与扫码工具</summary><div class="capture-actions"><button id="continuousScan" class="secondary">连续扫码绑定</button><button id="neckCapture" class="secondary">拍摄单张照片</button><button id="webcamOpen" class="quiet">本机摄像头</button><button id="shutter" class="secondary" hidden>拍摄</button></div><div class="samples"><span>二维码样张</span><button data-sample="Scene01">场景 01 ↗</button><button data-sample="A">仪器 A ↗</button><button data-sample="B">仪器 B ↗</button><small>样张仅供扫码验证。</small></div></details>
     </section>
     <div class="right-column">
@@ -50,7 +51,7 @@
         <div id="sceneInfo" class="caption"></div><button id="enterScene" class="secondary" hidden disabled>确认进入场景</button><div id="sceneResults"></div><div id="scanResults" class="empty-text">仪器码入镜后自动识别。</div>
         <button id="bind" class="primary full" hidden disabled>绑定所选仪器</button><button class="quiet" id="endBinding" hidden>结束本轮全部关联</button>
         <details class="binding-evidence"><summary>最近二维码命中帧</summary><figure id="qrEvidence" class="qr-evidence" hidden><a id="qrEvidenceLink" class="qr-evidence-media" target="_blank" rel="noopener"><img id="qrEvidenceImage" alt="二维码成功解码时保存的原始画面"><svg id="qrEvidenceOverlay" aria-hidden="true"></svg></a><figcaption><strong id="qrEvidenceTitle">二维码命中帧</strong><span id="qrEvidenceTime"></span><span>点击图片查看原始画面与解码位置</span></figcaption></figure></details>
-        <p class="caption binding-note">绑定当天有效（北京时间）；跨日或确认设备重启后重新扫码，断流与 Receiver 重连保留当天绑定。</p>
+        <p class="caption binding-note">绑定当天有效（北京时间）；跨日、设备离线或采集服务异常后自动结束，恢复后重新扫码，历史证据保留。</p>
       </section>
       <section class="card ocr-card">
         <div class="card-title"><h2>实时读数与留存</h2><button id="videoOcrToggle" class="quiet">开启视频识别</button></div><p class="small" id="ocrState">PaddleOCR</p>
@@ -58,7 +59,7 @@
         <details class="readout-record" open><summary>最近保存的识别结果</summary><p id="photoWatchState" class="caption"></p>
         <div id="ocrResults" class="empty-text">扫码绑定后，自动定位对应设备面板并读取数字。</div>
         <a href="#history" class="caption">查看全部识别记录 ↗</a> · <a href="/photo-measurements" class="caption" id="recordPolicy">拍照测量草稿 ↗</a></details>
-        <button id="ocr" class="secondary full" disabled>识别当前照片中的面板</button>
+        <button id="ocr" class="secondary full" hidden disabled>识别当前照片中的面板</button>
       </section>
     </div>
   </div>

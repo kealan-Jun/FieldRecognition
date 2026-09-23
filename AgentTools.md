@@ -220,3 +220,11 @@ OCR 启动优先直接加载本机完整 PP-OCRv5 缓存，也可用 `FIELD_OCR_
 
 部署前需执行 v14 迁移；备份恢复见 [BindingMigration.md](docs/BindingMigration.md)，
 完整变更和现场待验证项见 [FieldRepair20260920.md](docs/FieldRepair20260920.md)。
+
+## 2026-09-23：两路采集证据的时间追溯
+
+视频自动留证与 NAS 语音三连拍是两条业务输入。新增只读 `GET /api/evidence-timeline`
+及 `/trace` 页面，按采集时间查询，不以人工确认作为现场证据可见的前提。
+NAS 接收端支持经核对后启用的“一目录三张”归组；默认保留显式回执协议，
+历史没有明确批次的照片不强行合并。参数、时钟依据和不停服发布限制见
+[两路采集时间追溯](docs/TwoStreamEvidence20260923.md)。此变更不增加 Agent 拍照职责。

@@ -61,6 +61,27 @@ def test_video_only_changed_stable_evidence_is_saved_and_ocr_reused(video, monke
     wait_for_job(client, reader.state['last_job_id'])
 
 
+def test_unchanged_stable_reading_gets_fresh_periodic_frame_without_voice_capture(video, monkeypatch):
+    app, client, _, reader, frame, tick = video
+    monkeypatch.setattr(app, 'RECORD_MODE', 'production')
+    monkeypatch.setattr(app, 'predict_panel', lambda *args: pytest.fail('Reuse completed inference'))
+    accept(video)
+    tick[0] = .5; accept(video)
+    first = wait_for_job(client, reader.state['last_job_id'])
+    assert first['record_scope'] == 'field_observation'
+    tick[0] = 30.4; accept(video)
+    assert reader.state['evidence_saved'] == 1
+    frame[:] = 40  # A fresh real frame, even though the observed number is unchanged.
+    tick[0] = 30.5; accept(video)
+    second = wait_for_job(client, reader.state['last_job_id'])
+    assert reader.state['evidence_saved'] == 2
+    assert second['video_observation']['evidence_reason'] == 'reading_periodic'
+    assert first['capture_id'] != second['capture_id'] and first['image_sha256'] != second['image_sha256']
+    with app.db() as conn:
+        assert conn.execute('SELECT count(*) FROM photo_measurements').fetchone()[0] == 0
+    assert client.get(second['image_url']).status_code == 200
+
+
 def test_unreadable_visible_instrument_is_saved_once_not_periodically(video):
     import cv2
     app, client, _, reader, _, tick = video
