@@ -1,5 +1,6 @@
 """One user-requested photograph: resident local OCR first, timed vision fallback."""
 import hashlib
+import copy
 import json
 import os
 import time
@@ -90,6 +91,38 @@ def primary_unbound_photo(core, document, panel, *, valid, clock, pause, started
     return True
 
 
+def recover_primary_photo(core, document, panel, *, valid, clock, pause, started):
+    """Recover missing panel localization as unassigned photo candidates only."""
+    if (not vision.primary_photos() or not vision.public_config()['available']
+            or document.get('request_trigger') == 'video_stream'
+            or not document.get('all_binding_snapshots', document.get('binding_snapshots', []))):
+        return False
+    if any(r.get('display_state') for r in document.get('panel_regions', [])):
+        return False
+    if any(line.get('value') is not None or vision.READOUT.fullmatch(line.get('text', ''))
+           for line in document.get('lines', [])):
+        return False
+    # The failed crop/region path remains independently inspectable. Whole-photo
+    # transcription cannot inherit that path's physical instrument identity.
+    previous = copy.deepcopy(document)
+    evidence_keys = ('panel_detection', 'panel_regions', 'local_ocr', 'fallback', 'lines',
+                     'instrument', 'binding_id', 'instrument_candidates', 'workbench',
+                     'recognition_skipped', 'skip_reason', 'failure_reason', 'error')
+    evidence = {key:copy.deepcopy(document[key]) for key in evidence_keys if key in document}
+    if primary_unbound_photo(core, document, panel, valid=valid, clock=clock, pause=pause, started=started):
+        document['localized_attempt'] = evidence
+        document['whole_photo_recovery'] = {'status':'completed', 'reason':'no_localized_readings',
+                                             'association':'unbound_candidates'}
+        for key in ('panel_detection', 'recognition_skipped', 'skip_reason', 'failure_reason', 'detector_error'):
+            document.pop(key, None)
+        return True
+    recovery = copy.deepcopy(document.get('fallback', {}))
+    document.clear()
+    document.update(previous, whole_photo_recovery={'status':'failed', 'reason':'no_localized_readings',
+                                                   'fallback':recovery})
+    return False
+
+
 def run(core, document, *, clock=time.monotonic, pause=time.sleep):
     started = clock()
     future = None
@@ -174,9 +207,16 @@ def run(core, document, *, clock=time.monotonic, pause=time.sleep):
         if local and local.get('recognition_skipped'):
             document.update(local)
             document.update(local_ocr=local, outcome='processing_failed' if local.get('status') == 'failed' else 'skipped_unbound_or_unlocalized_panel', phase='completed')
+            recover_primary_photo(core, document, panel, valid=valid, clock=clock, pause=pause, started=started)
+            if not valid():
+                cancelled()
             return
         if local and local.get('panel_regions'):
             finish_regions(core, document, local, image, valid=valid, clock=clock, started=started)
+            if document.get('status') != 'cancelled':
+                recover_primary_photo(core, document, panel, valid=valid, clock=clock, pause=pause, started=started)
+            if not valid():
+                cancelled()
             return
         if (core.get('panel_detector') and core['panel_detector'].enabled()
                 and not (local and local.get('panel_selection') == 'unbound_photo_text')):
@@ -185,6 +225,9 @@ def run(core, document, *, clock=time.monotonic, pause=time.sleep):
             document.update(status='failed', error='bound_panel_localization_unavailable', lines=[],
                 fallback={'status':'skipped', 'reason':'no_verified_bound_panel'},
                 panel_detection={'status':'unavailable'}, panel_regions=[])
+            recover_primary_photo(core, document, panel, valid=valid, clock=clock, pause=pause, started=started)
+            if not valid():
+                cancelled()
             return
         reason = vision.fallback_reason(local['lines'], local.get('error')) if local else 'local_ocr_timeout'
         if reason and configured:

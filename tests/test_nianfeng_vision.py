@@ -208,3 +208,59 @@ def test_bound_primary_reviews_even_numeric_ocr_and_uses_registered_precision(ap
     assert result['readings'][0]['instrument']['id'] == B
     assert result['readings'][0]['normalization']['raw_text'] == '144062 g'
     assert result['fallback']['answer']['readings'][0]['value'] == '144062'
+
+
+@pytest.mark.parametrize('missing_detection', [True, False])
+def test_primary_failed_localization_recovers_full_photo_without_identity(app_client, configured, monkeypatch, missing_detection):
+    from test_panel_regions import configure, BOXES
+    from test_multi_readout import two_bindings
+    app, client = app_client
+    monkeypatch.setenv('FIELD_CAMERA_ID','TestCamera')
+    bindings = two_bindings(app, client)
+    configure(app, monkeypatch, [] if missing_detection else BOXES[1:])
+    monkeypatch.setattr(app.readout_pool,'submit',lambda *a:None)
+    job = app.read_saved_panel(app.SavedPhotoRequest(photo=photo(app)), trigger='voice_photo_directory')
+    local = app.predict_readout(np.zeros((300,400,3),np.uint8), binding_snapshots=bindings)
+    job['precomputed_local'] = local
+    monkeypatch.setenv('FIELD_VISION_DISPLAY_RULES',json.dumps([display_rule()]))
+    calls = []
+    def read(crop, **kwargs):
+        calls.append(crop.shape[:2])
+        if crop.shape[:2] != (300,400):
+            return dict(cloud_result(),answer={'status':'unreadable','readings':[]})
+        assert kwargs['display_rules'] == [display_rule()]
+        return dict(cloud_result(),answer={'status':'readable','readings':[{'text':'144062 g','value':'144062','label':'质量','unit':'g'}]})
+    monkeypatch.setattr(vision,'read_panel',read)
+    clock = Clock()
+    panel_readout.run(vars(app),job,clock=clock,pause=clock.pause)
+    result = app.get_job(job['job_id'])
+    assert result['status'] == 'completed' and calls[-1] == (300,400)
+    assert len(calls) == (1 if missing_detection else 2)
+    assert result['whole_photo_recovery']['status'] == 'completed'
+    assert result['localized_attempt']['panel_detection']
+    if not missing_detection:
+        assert result['localized_attempt']['fallback']['answer']['status'] == 'unreadable'
+    assert len(result['binding_snapshots']) == 2
+    assert result['instrument'] is result['binding_id'] is None
+    assert result['readings'][0]['value'] == '14.4062'
+    assert result['readings'][0]['instrument'] is None
+    assert not result['readings'][0]['human_verified']
+    assert 'panel_detection' not in result and not result.get('recognition_skipped')
+
+
+def test_failed_whole_photo_recovery_retains_original_panel_evidence(app_client, configured, monkeypatch):
+    from test_panel_regions import configure
+    from test_multi_readout import two_bindings
+    app, client = app_client
+    monkeypatch.setenv('FIELD_CAMERA_ID','TestCamera')
+    bindings = two_bindings(app, client)
+    configure(app, monkeypatch, [])
+    monkeypatch.setattr(app.readout_pool,'submit',lambda *a:None)
+    job = app.read_saved_panel(app.SavedPhotoRequest(photo=photo(app)), trigger='voice_photo_directory')
+    job['precomputed_local'] = app.predict_readout(np.zeros((300,400,3),np.uint8),binding_snapshots=bindings)
+    monkeypatch.setattr(vision,'read_panel',lambda *a,**kw:{'status':'failed','error':'timeout','raw_answer':'partial'})
+    app.run_ocr(job)
+    result = app.get_job(job['job_id'])
+    assert result['recognition_skipped'] and result['panel_detection']
+    assert result['whole_photo_recovery']['fallback']['raw_answer'] == 'partial'
+    assert result['readings'] == []
