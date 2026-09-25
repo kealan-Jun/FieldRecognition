@@ -141,8 +141,14 @@ def directory_triplet(request, path, relative):
     if paths != members() or signatures != [(p.stat().st_size, p.stat().st_mtime_ns) for p in paths]:
         raise SourceError('语音三连拍目录发生变化，等待稳定', 503)
     batch = hashlib.sha256(('directory-triplet/1:' + relative.parent.as_posix()).encode()).hexdigest()
+    from photo_experiment_context import resolve_context
+    try:
+        context_ref = resolve_context(request['camera'], photos)
+    except (ValueError, KeyError, TypeError):
+        raise SourceError('实验关联配置无效，请核对相机、时间范围和实验编号', 422) from None
     return {'schema_version': 'field-photo-receipt/1', 'camera_id': request['camera'],
-            'measurement': {'burst_id': 'directory-triplet-' + batch, 'expected_photos': 3}, 'photos': photos}
+            'measurement': {'burst_id': 'directory-triplet-' + batch, 'expected_photos': 3,
+                            **({'experiment_context_ref': context_ref} if context_ref else {})}, 'photos': photos}
 
 
 def discover(request):
