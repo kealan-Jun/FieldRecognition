@@ -25,6 +25,10 @@ def test_burst_conflict_correction_confirmation_and_retry_share_one_folder(setup
     assert len(list(root.glob('*/VoicePhotoReadings/*/Evidence.json'))) == 1
     assert len(result['sources']) == 3
     assert json.loads((root/result['measurement_files'][0]['result']).read_text())['values'][0]['value'] is None
+    readme = (file.parent/'Readme.html').read_text()
+    assert '连拍存在冲突' in readme and '51' in readme and '52' in readme
+    assert '逐张原始识别文字' in readme and '合并值保持 null' in readme
+    assert not (file.parent/'UnboundReadings.json').exists()
     draft = get_draft(client, mid)
     body = {'actor':'Reader', 'revision':draft['revision'], 'reason':'核对三张照片',
         'fields':[{'field_id':draft['fields'][0]['field_id'], 'instrument_id':binding['instrument']['id'],

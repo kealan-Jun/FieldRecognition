@@ -199,14 +199,14 @@ def standard_records(job_rows, group, *, diagnostics=None):
     return result
 
 
-def unbound_candidates(jobs, sources):
+def photo_candidates(jobs, sources, *, unbound_only=True):
     """Expose per-photo candidates without creating instrument or burst identity."""
     captures = {s['capture_id']: s for s in sources}
     result = []
     for job in jobs:
         captured_at, basis = clock_for(job, captures.get(job.get('capture_id'), {}))
         for reading in job.get('readings', []):
-            if reading.get('instrument') or reading.get('binding_id'):
+            if unbound_only and (reading.get('instrument') or reading.get('binding_id')):
                 continue
             issues = list(dict.fromkeys([*(reading.get('quality_issues') or []),
                                         *([reading['quality_issue']] if reading.get('quality_issue') else [])]))
@@ -221,7 +221,9 @@ def unbound_candidates(jobs, sources):
                 'recognition_root_job_id': job.get('recognition_root_job_id', job['job_id']),
                 'recognition_revision': job.get('recognition_revision', 1),
                 'captured_at': captured_at, 'capture_time_basis': basis,
-                'reading_id': reading.get('reading_id'), 'instrument_id': None, 'qr_hash': None,
+                'reading_id': reading.get('reading_id'),
+                'instrument_id': (reading.get('instrument') or {}).get('id') if not unbound_only else None,
+                'qr_hash': None,
                 'raw_text': reading.get('text'),
                 'raw_value': reading.get('raw_value', (normalization or {}).get('raw_value', reading.get('value'))),
                 'raw_unit': reading.get('unit'), 'value': value,
@@ -234,17 +236,29 @@ def unbound_candidates(jobs, sources):
     return result
 
 
-def unbound_readme(content):
+def photo_readme(content, *, jobs=(), measurement_files=(), records=(), aggregation_issues=()):
     esc = lambda value: html.escape(str(value if value is not None else '未知'), quote=True)
-    body = '<p><strong>仪器身份未确认；以下是待核实候选，不是正式测量结果。</strong>逐张展示，不把不同照片合并成有效读数。</p>'
-    body += '<p><a href="UnboundReadings.json">候选 JSON</a> · <a href="Evidence.json">完整证据与历史版本</a></p>'
+    unbound = content.get('record_scope') == 'unbound_candidates'
+    body = '<p><strong>' + ('仪器身份未确认；以下是待核实候选，不是正式测量结果。' if unbound else '逐张识别候选与合并结果分别展示；候选未经人工核实。') + '</strong>逐张候选不替代合并后的测量结果。</p>'
+    body += '<p><a href="Evidence.json">完整证据与历史版本</a>'
+    if unbound:
+        body += ' · <a href="UnboundReadings.json">未绑定候选 JSON</a>'
+    for measurement in measurement_files:
+        body += ' · <a href="' + esc(PurePosixPath(measurement['result']).name) + '">' + esc(measurement['instrument_name'] or measurement['instrument_id']) + ' 合并结果</a>'
+    body += '</p>'
+    conflicts = list(dict.fromkeys(name for entry in records for name in entry['evidence'].get('conflicting_fields', [])))
+    if conflicts or aggregation_issues:
+        body += '<p><strong>连拍存在冲突，已识别的逐张数字见下表。冲突字段的合并值保持 null，不能视为有效读数。</strong> ' + esc('、'.join(conflicts) or '归属/使用时段冲突') + '</p>'
     body += '<table><tr><th>拍摄时间 / 任务</th><th>面板原文</th><th>候选值 / 单位</th><th>规则与质量问题</th></tr>'
     for reading in content['readings']:
         value = esc(reading['value']) if reading['value'] is not None else '不可作为有效值'
         body += '<tr><td>' + esc(reading['captured_at']) + '<br>' + esc(reading['job_id']) + '</td><td>' + esc(reading['raw_text']) + '</td><td>' + value + ' ' + esc(reading['unit']) + '<br>待核实</td><td>' + esc('、'.join(reading['quality_issues']) or '未发现已知规则冲突；未经人工核实') + '<br>' + esc((reading['normalization'] or {}).get('method')) + '</td></tr>'
     if not content['readings']:
         body += '<tr><td colspan="4">当前没有结构化候选；处理状态与原因请查看 Evidence.json。</td></tr>'
-    return page('未绑定照片读数候选 · 待核实', body + '</table>')
+    body += '</table>'
+    for job in jobs:
+        body += '<details><summary>逐张原始识别文字 · ' + esc(job['job_id']) + '</summary><pre>' + esc(json.dumps(job.get('lines', []), ensure_ascii=False, indent=2)) + '</pre></details>'
+    return page('未绑定照片读数候选 · 待核实' if unbound else '照片逐张读数与合并结果', body)
 
 
 def make_views(bundles, paths, receipts, *, preserve_asset_locations=False):
@@ -349,7 +363,7 @@ def make_views(bundles, paths, receipts, *, preserve_asset_locations=False):
             # Completed is a worker lifecycle state, not proof that OCR was invoked.
             from result_reprocessing import preferred_jobs
             current_jobs = preferred_jobs([r['doc'] for r in bundle['jobs']])
-            candidates = unbound_candidates(current_jobs, bundle['sources'])
+            candidates = photo_candidates(current_jobs, bundle['sources'])
             if bundle['kind'] == 'VoicePhotoReadings' and (candidates or not measurement_files):
                 candidate_file = directory + '/UnboundReadings.json'
                 candidate_content = {'schema': 'field-unbound-readings/1', 'derived_view': True,
@@ -361,10 +375,16 @@ def make_views(bundles, paths, receipts, *, preserve_asset_locations=False):
                     'evidence': file, 'receipt_versions': history}
                 raw = raw_json(candidate_content)
                 views[candidate_file] = raw
-                views[directory + '/Readme.html'] = unbound_readme(candidate_content)
                 content['unbound_readings'] = {'path': candidate_file,
                     'readme': directory + '/Readme.html', 'count': len(candidates),
                     'sha256': hashlib.sha256(raw).hexdigest(), 'human_verified': False}
+            if bundle['kind'] == 'VoicePhotoReadings':
+                content['readings_readme'] = directory + '/Readme.html'
+                views[content['readings_readme']] = photo_readme(
+                    {'record_scope': 'unbound_candidates' if not measurement_files else 'per_photo_candidates',
+                     'readings': photo_candidates(current_jobs, bundle['sources'], unbound_only=False)},
+                    jobs=current_jobs, measurement_files=measurement_files, records=records,
+                    aggregation_issues=aggregation_issues)
             latest_attempts = {}
             for row in bundle['jobs']:
                 job = row['doc']
@@ -427,6 +447,7 @@ def make_views(bundles, paths, receipts, *, preserve_asset_locations=False):
                 'status': content['status'], 'result': file,
                 'acquisition': content.get('acquisition', []),
                 'unbound_readings': content.get('unbound_readings'),
+                'readings_readme': content.get('readings_readme'),
                 'measurement_files': [{k: m[k] for k in ('instrument_id', 'instrument_name', 'result')} for m in content.get('measurement_files', [])],
                 'photo': next((v['path'] for v in photos.values() if 'original' in v['kind']), next((v['path'] for v in photos.values()), None))})
     esc = lambda x: html.escape(str(x if x is not None else '未记录'), quote=True)
@@ -450,8 +471,8 @@ def make_views(bundles, paths, receipts, *, preserve_asset_locations=False):
             body += '<tr><td>' + esc(moment.strftime('%H:%M:%S.%f')[:-3] if moment else '拍摄时间未知') + '</td><td>' + esc(KINDS[entry['category']]) + '<br>' + esc(entry['target']) + '</td><td>' + esc(entry['operator']) + '<br>' + esc(statuses.get(entry['status'], entry['status'])) + '</td><td><a href="' + link(entry['result']) + '">' + ('绑定记录' if entry['category'] == 'Bindings' else '追溯与状态') + '</a>'
             for measurement in entry.get('measurement_files', []):
                 body += ' · <a href="' + link(measurement['result']) + '">' + esc(measurement['instrument_name'] or measurement['instrument_id']) + ' 读数</a>'
-            if entry.get('unbound_readings'):
-                body += ' · <a href="' + link(entry['unbound_readings']['readme']) + '">未绑定读数候选（待核实）</a>'
+            if entry.get('readings_readme'):
+                body += ' · <a href="' + link(entry['readings_readme']) + '">' + ('未绑定读数候选（待核实）' if not entry['measurement_files'] else '逐张读数与合并结果') + '</a>'
             if entry['photo']:
                 body += ' · <a href="' + link(entry['photo']) + '">原图</a>'
             body += '</td></tr>'
