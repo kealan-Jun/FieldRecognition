@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 from archive_browse import page, token
 from archive_readable import raw_json
-from measurement_records import build_records, capture_clock, measurement_value, RULE_VERSION
+from measurement_records import build_records, capture_clock, measurement_value, number, RULE_VERSION
 from evidence_timeline import acquisition
 
 KINDS = {'Bindings': '二维码与绑定', 'VideoReadings': '视频面板读数',
@@ -199,6 +199,54 @@ def standard_records(job_rows, group, *, diagnostics=None):
     return result
 
 
+def unbound_candidates(jobs, sources):
+    """Expose per-photo candidates without creating instrument or burst identity."""
+    captures = {s['capture_id']: s for s in sources}
+    result = []
+    for job in jobs:
+        captured_at, basis = clock_for(job, captures.get(job.get('capture_id'), {}))
+        for reading in job.get('readings', []):
+            if reading.get('instrument') or reading.get('binding_id'):
+                continue
+            issues = list(dict.fromkeys([*(reading.get('quality_issues') or []),
+                                        *([reading['quality_issue']] if reading.get('quality_issue') else [])]))
+            normalized = reading.get('normalized_value')
+            if isinstance(normalized, dict) and normalized.get('value') is None and not issues:
+                issues.append('normalized_value_unavailable')
+            value = number(reading) if not issues else None
+            if value is None and not issues:
+                issues.append('invalid_or_uncertain_number')
+            normalization = copy.deepcopy(reading.get('normalization'))
+            result.append({'job_id': job['job_id'], 'capture_id': job.get('capture_id'),
+                'recognition_root_job_id': job.get('recognition_root_job_id', job['job_id']),
+                'recognition_revision': job.get('recognition_revision', 1),
+                'captured_at': captured_at, 'capture_time_basis': basis,
+                'reading_id': reading.get('reading_id'), 'instrument_id': None, 'qr_hash': None,
+                'raw_text': reading.get('text'),
+                'raw_value': reading.get('raw_value', (normalization or {}).get('raw_value', reading.get('value'))),
+                'raw_unit': reading.get('unit'), 'value': value,
+                'unit': None if any('unit_conflict' in issue for issue in issues) else reading.get('unit'),
+                'measurement_name': reading.get('measurement_name') or (normalized or {}).get('name'),
+                'quality_issue': issues[0] if issues else None, 'quality_issues': issues,
+                'normalization': normalization, 'normalized_value': normalized,
+                'display_rule': reading.get('display_rule'), 'status': 'needs_review',
+                'human_verified': False, 'activity_confirmed': False})
+    return result
+
+
+def unbound_readme(content):
+    esc = lambda value: html.escape(str(value if value is not None else '未知'), quote=True)
+    body = '<p><strong>仪器身份未确认；以下是待核实候选，不是正式测量结果。</strong>逐张展示，不把不同照片合并成有效读数。</p>'
+    body += '<p><a href="UnboundReadings.json">候选 JSON</a> · <a href="Evidence.json">完整证据与历史版本</a></p>'
+    body += '<table><tr><th>拍摄时间 / 任务</th><th>面板原文</th><th>候选值 / 单位</th><th>规则与质量问题</th></tr>'
+    for reading in content['readings']:
+        value = esc(reading['value']) if reading['value'] is not None else '不可作为有效值'
+        body += '<tr><td>' + esc(reading['captured_at']) + '<br>' + esc(reading['job_id']) + '</td><td>' + esc(reading['raw_text']) + '</td><td>' + value + ' ' + esc(reading['unit']) + '<br>待核实</td><td>' + esc('、'.join(reading['quality_issues']) or '未发现已知规则冲突；未经人工核实') + '<br>' + esc((reading['normalization'] or {}).get('method')) + '</td></tr>'
+    if not content['readings']:
+        body += '<tr><td colspan="4">当前没有结构化候选；处理状态与原因请查看 Evidence.json。</td></tr>'
+    return page('未绑定照片读数候选 · 待核实', body + '</table>')
+
+
 def make_views(bundles, paths, receipts, *, preserve_asset_locations=False):
     views, days = {}, {}
     owners = {}
@@ -301,6 +349,22 @@ def make_views(bundles, paths, receipts, *, preserve_asset_locations=False):
             # Completed is a worker lifecycle state, not proof that OCR was invoked.
             from result_reprocessing import preferred_jobs
             current_jobs = preferred_jobs([r['doc'] for r in bundle['jobs']])
+            candidates = unbound_candidates(current_jobs, bundle['sources'])
+            if bundle['kind'] == 'VoicePhotoReadings' and (candidates or not measurement_files):
+                candidate_file = directory + '/UnboundReadings.json'
+                candidate_content = {'schema': 'field-unbound-readings/1', 'derived_view': True,
+                    'title': '未绑定照片读数候选（待核实，非正式测量结果）',
+                    'event_id': bundle['key'], 'camera_id': bundle['camera_id'],
+                    'instrument_id': None, 'qr_hash': None, 'human_verified': False,
+                    'record_scope': 'unbound_candidates', 'status': 'needs_review',
+                    'aggregation': 'per_photo_candidates_not_merged', 'readings': candidates,
+                    'evidence': file, 'receipt_versions': history}
+                raw = raw_json(candidate_content)
+                views[candidate_file] = raw
+                views[directory + '/Readme.html'] = unbound_readme(candidate_content)
+                content['unbound_readings'] = {'path': candidate_file,
+                    'readme': directory + '/Readme.html', 'count': len(candidates),
+                    'sha256': hashlib.sha256(raw).hexdigest(), 'human_verified': False}
             latest_attempts = {}
             for row in bundle['jobs']:
                 job = row['doc']
@@ -336,7 +400,8 @@ def make_views(bundles, paths, receipts, *, preserve_asset_locations=False):
                 'reader_rule': 'parse Evidence, parse every measurement_file and verify sha256; retry mismatches',
                 'result_count': len(measurement_files),
                 'generation': hashlib.sha256(json.dumps({'receipts': [v['sequence'] for v in history],
-                    'results': [(m['result'], m['sha256']) for m in measurement_files]}, sort_keys=True).encode()).hexdigest()}
+                    'results': [(m['result'], m['sha256']) for m in measurement_files],
+                    'unbound_readings': content.get('unbound_readings')}, sort_keys=True).encode()).hexdigest()}
             # Keep the first measured rebuild for this generation. Re-reading or
             # re-indexing unchanged history must not rewrite its evidence bytes.
             timings = paths.data.setdefault('event_stage_timings', {})
@@ -361,6 +426,7 @@ def make_views(bundles, paths, receipts, *, preserve_asset_locations=False):
                 'category': bundle['kind'], 'target': target or '归属待确认', 'operator': content['operator'],
                 'status': content['status'], 'result': file,
                 'acquisition': content.get('acquisition', []),
+                'unbound_readings': content.get('unbound_readings'),
                 'measurement_files': [{k: m[k] for k in ('instrument_id', 'instrument_name', 'result')} for m in content.get('measurement_files', [])],
                 'photo': next((v['path'] for v in photos.values() if 'original' in v['kind']), next((v['path'] for v in photos.values()), None))})
     esc = lambda x: html.escape(str(x if x is not None else '未记录'), quote=True)
@@ -384,6 +450,8 @@ def make_views(bundles, paths, receipts, *, preserve_asset_locations=False):
             body += '<tr><td>' + esc(moment.strftime('%H:%M:%S.%f')[:-3] if moment else '拍摄时间未知') + '</td><td>' + esc(KINDS[entry['category']]) + '<br>' + esc(entry['target']) + '</td><td>' + esc(entry['operator']) + '<br>' + esc(statuses.get(entry['status'], entry['status'])) + '</td><td><a href="' + link(entry['result']) + '">' + ('绑定记录' if entry['category'] == 'Bindings' else '追溯与状态') + '</a>'
             for measurement in entry.get('measurement_files', []):
                 body += ' · <a href="' + link(measurement['result']) + '">' + esc(measurement['instrument_name'] or measurement['instrument_id']) + ' 读数</a>'
+            if entry.get('unbound_readings'):
+                body += ' · <a href="' + link(entry['unbound_readings']['readme']) + '">未绑定读数候选（待核实）</a>'
             if entry['photo']:
                 body += ' · <a href="' + link(entry['photo']) + '">原图</a>'
             body += '</td></tr>'

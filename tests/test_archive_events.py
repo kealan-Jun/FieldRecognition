@@ -146,6 +146,56 @@ def test_skipped_unbound_photo_has_evidence_but_no_fake_measurement(tmp_path):
     assert resolve_file(tmp_path, str(file.relative_to(tmp_path).with_name('Result.json'))) == file
 
 
+def test_unbound_candidates_visible_without_formal_result_or_identity(tmp_path):
+    from test_measurement_records import document
+    doc = document() | {'camera_id': 'Cam', 'panel_regions': [], 'instrument': None,
+        'readings': [{'reading_id': 'candidate', 'text': '144062', 'raw_value': '144062',
+            'value': '14.4062', 'unit': 'g', 'instrument': None, 'binding_id': None,
+            'normalization': {'method': 'registered_fixed_decimal_v2', 'raw_text': '144062',
+                'instrument_id': None, 'value': '14.4062', 'decimal_places': 4},
+            'display_rule': {'basis': 'user_confirmed_display_type'}}]}
+    file = publish_document(tmp_path, doc)
+    evidence = json.loads(file.read_text())
+    candidate_path = tmp_path/evidence['unbound_readings']['path']
+    content = json.loads(candidate_path.read_text())
+    reading = content['readings'][0]
+    assert reading['job_id'] == doc['job_id']
+    assert reading['captured_at'] == doc['external_photo']['captured_at']
+    assert reading['raw_text'] == reading['raw_value'] == '144062'
+    assert reading['value'] == 14.4062 and reading['unit'] == 'g'
+    assert reading['normalization']['decimal_places'] == 4
+    assert reading['display_rule']['basis'] == 'user_confirmed_display_type'
+    assert content['instrument_id'] is content['qr_hash'] is reading['instrument_id'] is reading['qr_hash'] is None
+    assert not content['human_verified'] and not reading['human_verified']
+    assert content['record_scope'] == 'unbound_candidates'
+    assert evidence['measurement_files'] == [] and not list(file.parent.glob('Result*.json'))
+    assert evidence['observations'][0]['readings'] == doc['readings']
+    assert content['receipt_versions'] == evidence['receipt_versions']
+    assert hashlib.sha256(candidate_path.read_bytes()).hexdigest() == evidence['unbound_readings']['sha256']
+    assert '14.4062' in (file.parent/'Readme.html').read_text()
+    assert '非正式测量结果' in candidate_path.read_text()
+    assert '未绑定读数候选' in next(tmp_path.glob('*/DailyReport/DailyReport.html')).read_text()
+
+
+@pytest.mark.parametrize('issue', ['unit_conflict', 'display_precision_mismatch'])
+def test_unbound_conflicts_retain_raw_evidence_without_effective_value(tmp_path, issue):
+    from test_measurement_records import document
+    doc = document() | {'camera_id': 'Cam', 'panel_regions': [], 'instrument': None,
+        'readings': [{'text': '<script>144.062</script>', 'value': '144.062', 'unit': 'g',
+            'instrument': None, 'quality_issue': issue,
+            'normalized_value': {'name': '质量', 'value': None, 'unit': 'g', 'range': [None, None]}}]}
+    file = publish_document(tmp_path, doc)
+    content = json.loads((file.parent/'UnboundReadings.json').read_text())
+    reading = content['readings'][0]
+    assert reading['value'] is None and reading['raw_value'] == '144.062'
+    assert reading['quality_issue'] == issue
+    if issue == 'unit_conflict':
+        assert reading['unit'] is None
+    assert '不可作为有效值' in (file.parent/'Readme.html').read_text()
+    assert '<script>' not in (file.parent/'Readme.html').read_text()
+    assert not list(file.parent.glob('Result*.json'))
+
+
 def test_upgrade_replaces_generated_envelope_without_duplicate_results(tmp_path):
     from test_measurement_records import document
     doc = document() | {'camera_id': 'Cam'}
