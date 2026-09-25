@@ -232,3 +232,10 @@ NAS 接收端支持经核对后启用的“一目录三张”归组；默认保�
 本机 2026-09-23 已在本次明确授权的短暂停服窗口部署，接收端启用 directory_triplet，
 视频稳定读数留证间隔为 30 秒；缺张等待补齐，不重新归组历史记录。
 部署状态和仍待现场验证的内容见 [上线记录](docs/TwoStreamDeployment20260923.md)。
+
+
+## 2026-09-25 草稿重校验
+
+`POST /api/photo-measurements/{measurement_id}/revalidate` 接收 `revision` 与 `actor`，仅管理员/审核员可调用；设备凭证不能调用。接口按当前候选汇总规则重算未确认草稿，不重新识别、不确认、不写表；保留原始候选、人工修订和 validation_history 审计。版本不符或非 draft 状态返回 409。
+
+三连拍有至少一个可用候选且可用候选一致时，可形成草稿；异常候选保留为警告。有效值冲突、身份或绑定冲突等仍阻塞。详见 [候选校验修复](docs/BurstValidation20260925.md)。这是新增 HTTP 接口，未新增 /api/tools 工具名称。

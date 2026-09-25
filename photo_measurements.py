@@ -15,7 +15,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, FiniteFloat
 
 from measurement_records import number, unit_evidence, field_issues, measurement_value, binding_for_region
 
-RULE_VERSION = 'photo-measurement/3'
+RULE_VERSION = 'photo-measurement/4'
 TERMINAL = {'completed', 'failed', 'cancelled', 'interrupted'}
 UNITS = {'温度': {'°C'}, '转速': {'rpm'}, '质量': {'g', 'mg', 'kg'}}
 
@@ -171,32 +171,49 @@ def candidates(jobs):
                 'operator':binding.get('operator'), 'wearer_id':binding.get('wearer_id'),
                 'identity_basis': reading.get('association_basis'), 'binding_id': reading.get('binding_id')})
     for field in fields.values():
-        rows = field['original_candidates']
-        unique = {(r['value'], r['unit']) for r in rows if r['value'] is not None}
-        states = {r.get('display_state') for r in rows}
-        state_conflict = any(states) and (len(states) > 1 or bool(unique))
-        session_conflict = len({(r.get('binding_id'),r.get('operator'),r.get('wearer_id')) for r in rows}) > 1
-        units = {r['unit'] for r in rows}
-        field.update(value=next(iter(unique))[0] if len(unique) == 1 and not state_conflict and not session_conflict else None,
-            display_state=next(iter(states)) if len(states) == 1 and not unique and not session_conflict else None,
-            unit=next(iter(units)) if len(units) == 1 else None,
-            agreement={'matching_photos': len({r['image_sha256'] or r['capture_id'] for r in rows if r['value'] is not None}) if len(unique) == 1 and not state_conflict and not session_conflict else 0,
-                       'photos_with_region': len({r['capture_id'] for r in rows}),
-                       'basis': 'exact_value_and_unit_agreement', 'accuracy': None})
-        field['display_value'] = next((r['raw_value'] for r in rows if r['value'] == field['value']), None) if field['value'] is not None else None
-        issues = []
-        if session_conflict:
-            issues.append('跨使用时段或实际人员的读数不能合并')
-        if len(unique) > 1 or state_conflict:
-            issues.append('多图读数或单位冲突')
-        if any(r['quality_issue'] for r in rows):
-            issues.append('存在不可读或格式异常的原始结果')
-        if not field['instrument'] or not all(r['qr_hash'] and r['bbox'] for r in rows):
-            issues.append('二维码身份或面板归属不明确')
-        if any(r['qr_conflict'] for r in rows):
-            issues.append('照片二维码与面板仪器不一致')
-        field['recognition_issues'] = issues
+        summarize_candidates(field)
     return list(fields.values())
+
+
+def summarize_candidates(field):
+    """Use readable candidates; keep rejected OCR evidence without vetoing the burst.
+
+    Identity/session conflicts still inspect every candidate. A clean candidate
+    does not repair missing attribution, override another usable value or imply
+    human confirmation. This also works on frozen draft evidence for revalidation.
+    """
+    rows = field['original_candidates']
+    usable = [r for r in rows if not r.get('quality_issue') and
+              (r.get('value') is not None or r.get('display_state') == 'OFF')]
+    excluded = [r for r in rows if r not in usable]
+    unique = {(r['value'], r['unit']) for r in usable if r['value'] is not None}
+    states = {r.get('display_state') for r in usable}
+    state_conflict = any(states) and (len(states) > 1 or bool(unique))
+    session_conflict = len({(r.get('binding_id'), r.get('operator'), r.get('wearer_id')) for r in rows}) > 1
+    units = {r['unit'] for r in usable}
+    field.update(value=next(iter(unique))[0] if len(unique) == 1 and not state_conflict and not session_conflict else None,
+        display_state=next(iter(states)) if len(states) == 1 and not unique and not session_conflict else None,
+        unit=next(iter(units)) if len(units) == 1 else None,
+        agreement={'matching_photos': len({r['image_sha256'] or r['capture_id'] for r in usable if r['value'] is not None}) if len(unique) == 1 and not state_conflict and not session_conflict else 0,
+                   'photos_with_region': len({r['capture_id'] for r in rows}),
+                   'basis': 'exact_value_and_unit_agreement', 'accuracy': None},
+        validation_rules=RULE_VERSION,
+        excluded_candidates=[{'job_id': r['job_id'], 'capture_id': r['capture_id'],
+                              'reason': r.get('quality_issue') or 'unreadable'} for r in excluded],
+        recognition_warnings=['部分原始候选不可用，已保留供核对；汇总采用可用候选'] if excluded and usable else [])
+    field['display_value'] = next((r['raw_value'] for r in usable if r['value'] == field['value']), None) if field['value'] is not None else None
+    issues = []
+    if session_conflict:
+        issues.append('跨使用时段或实际人员的读数不能合并')
+    if len(unique) > 1 or state_conflict:
+        issues.append('多图读数或单位冲突')
+    if not usable:
+        issues.append('没有可用读数：原始结果不可读或格式异常')
+    if not field['instrument'] or not rows or not all(r['qr_hash'] and r['bbox'] for r in rows):
+        issues.append('二维码身份或面板归属不明确')
+    if any(r['qr_conflict'] for r in rows):
+        issues.append('照片二维码与面板仪器不一致')
+    field['recognition_issues'] = issues
 
 
 def blockers(group):
@@ -473,6 +490,28 @@ def install(core):
             group['corrections'].append({'actor': body.actor, 'reason': body.reason, 'at': core['now'](),
                 'based_on_revision': body.revision, 'before_fields': before,
                 'changes': body.model_dump(mode='json')})
+            return store(conn, group)
+
+    @core['app'].post('/api/photo-measurements/{mid}/revalidate')
+    def revalidate(mid: uuid.UUID, body: Decision):
+        """Recheck a draft's frozen candidates without OCR or a human correction."""
+        from security import require_role, actor_name
+        require_role('admin', 'reviewer')
+        actor = actor_name(body.actor)
+        with core['db']() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            group = fetch(conn, mid)
+            editable(group, body)
+            before = copy.deepcopy(group['fields'])
+            previous_blockers = blockers(group)
+            for field in group['fields']:
+                if not field.get('corrected'):
+                    summarize_candidates(field)
+            group.setdefault('validation_history', []).append({
+                'actor': actor, 'at': core['now'](), 'based_on_revision': body.revision,
+                'rules': RULE_VERSION, 'before_fields': before,
+                'before_blockers': previous_blockers,
+                'basis': 'revalidate_frozen_candidates_without_rerunning_ocr'})
             return store(conn, group)
 
     @core['app'].post('/api/photo-measurements/{mid}/confirm')
