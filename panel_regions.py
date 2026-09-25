@@ -248,8 +248,9 @@ def validate_lines(lines, name, instrument):
         if not match and line.get('value') is None:
             result.append(line)
             continue
-        raw = dict(line,value=str(line['value']) if line.get('value') is not None else match[1],
-                   unit=line.get('unit') or (line['text'][match.end():].strip() if match else None) or None)
+        unit = (line.get('unit') if line.get('reading_source') == 'vision' else
+                line.get('unit') or (line['text'][match.end():].strip() if match else None) or None)
+        raw = dict(line,value=str(line['value']) if line.get('value') is not None else match[1], unit=unit)
         issues = field_issues(name,raw,instrument)
         result.append(dict(line,quality_issue=next(iter(issues),None),measurement_name=name,
                            normalized_value=measurement_value(name,raw,instrument)[0]))

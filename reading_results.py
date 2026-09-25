@@ -33,8 +33,10 @@ def build_readings(document):
         issue = 'decimal_uncertain' if re.fullmatch(r'[+-]?0\d+', value) else None
         if re.fullmatch(r'[+-]?8{5,}(?:\.8+)?', value):
             issue = 'possible_display_self_test'
+        vision_line = document.get('device') == 'cloud' or line.get('reading_source') == 'vision'
+        observed_unit = line.get('unit') if vision_line else line.get('unit') or (text[match.end():].strip() if match else None) or None
         result.append({'reading_id': f"{document['job_id']}:{len(result) + 1}",
-            'text': text, 'value': value, 'unit': line.get('unit') or (text[match.end():].strip() if match else None) or None,
+            'text': text, 'value': value, 'unit': observed_unit,
             'polygon': line.get('polygon'), 'confidence': line.get('confidence'),
             'clarity':line.get('clarity'),
             'normalization': line.get('normalization'),

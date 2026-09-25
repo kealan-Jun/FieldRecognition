@@ -287,3 +287,39 @@ def test_spaced_readout_cannot_delete_sign_decimal_unit_or_text(configured, monk
     result = vision.read_panel(np.zeros((20,20,3),np.uint8))
     assert result['status'] == 'failed' and result['error'] == 'invalid_answer'
     assert result['raw_answer']
+
+
+def test_spaced_vision_readout_keeps_unknown_unit_through_reading_generation(app_client, configured, monkeypatch):
+    app, client = app_client
+    job = unbound_job(app, client, monkeypatch)
+    monkeypatch.setattr(vision, '_request', lambda *a: response({'status':'readable','readings':[{'text':'1440 18','value':'144018','label':None,'unit':None}]}))
+    app.run_ocr(job)
+    result = app.get_job(job['job_id'])
+    reading = result['readings'][0]
+    assert result['fallback']['status'] == 'completed'
+    assert reading['text'] == '1440 18' and reading['value'] == '144018'
+    assert reading['unit'] is None and reading['quality_issue'] is None
+    assert reading['instrument'] is None
+
+
+def test_bound_spaced_vision_readout_uses_registered_unit_without_suffix_invention(app_client, configured, monkeypatch):
+    from test_panel_regions import configure, BOXES, B
+    from test_multi_readout import two_bindings
+    app, client = app_client
+    monkeypatch.setenv('FIELD_CAMERA_ID','TestCamera')
+    bindings = two_bindings(app, client)
+    configure(app, monkeypatch, BOXES[1:])
+    monkeypatch.setattr(app.readout_pool,'submit',lambda *a:None)
+    job = app.read_saved_panel(app.SavedPhotoRequest(photo=photo(app)), trigger='voice_photo_directory')
+    job['field_rules'][B] = {'质量':{'unit':'g','decimal_places':4,'fixed_decimal_display':True}}
+    job['precomputed_local'] = app.predict_readout(np.zeros((300,400,3),np.uint8),binding_snapshots=bindings)
+    monkeypatch.setattr(vision, '_request', lambda *a: response({'status':'readable','readings':[{'text':'1440 18','value':'144018','label':None,'unit':None}]}))
+    app.run_ocr(job)
+    result = app.get_job(job['job_id'])
+    reading = result['readings'][0]
+    assert reading['text'] == '1440 18' and reading['value'] == '14.4018'
+    assert reading['unit'] is None and reading['quality_issue'] is None
+    assert reading['normalized_value']['unit'] == 'g'
+    assert reading['normalized_value']['value'] == 14.4018
+    assert reading['normalization']['raw_text'] == '1440 18'
+    assert reading['instrument']['id'] == B
