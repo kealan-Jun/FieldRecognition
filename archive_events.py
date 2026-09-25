@@ -227,6 +227,7 @@ def photo_candidates(jobs, sources, *, unbound_only=True):
                 'raw_text': reading.get('text'),
                 'raw_value': reading.get('raw_value', (normalization or {}).get('raw_value', reading.get('value'))),
                 'raw_unit': reading.get('unit'), 'value': value,
+                'display_value': str(reading['value']) if value is not None else None,
                 'unit': None if any('unit_conflict' in issue for issue in issues) else reading.get('unit'),
                 'measurement_name': reading.get('measurement_name') or (normalized or {}).get('name'),
                 'quality_issue': issues[0] if issues else None, 'quality_issues': issues,
@@ -251,7 +252,7 @@ def photo_readme(content, *, jobs=(), measurement_files=(), records=(), aggregat
         body += '<p><strong>连拍存在冲突，已识别的逐张数字见下表。冲突字段的合并值保持 null，不能视为有效读数。</strong> ' + esc('、'.join(conflicts) or '归属/使用时段冲突') + '</p>'
     body += '<table><tr><th>拍摄时间 / 任务</th><th>面板原文</th><th>候选值 / 单位</th><th>规则与质量问题</th></tr>'
     for reading in content['readings']:
-        value = esc(reading['value']) if reading['value'] is not None else '不可作为有效值'
+        value = esc(reading['display_value']) if reading['value'] is not None else '不可作为有效值'
         body += '<tr><td>' + esc(reading['captured_at']) + '<br>' + esc(reading['job_id']) + '</td><td>' + esc(reading['raw_text']) + '</td><td>' + value + ' ' + esc(reading['unit']) + '<br>待核实</td><td>' + esc('、'.join(reading['quality_issues']) or '未发现已知规则冲突；未经人工核实') + '<br>' + esc((reading['normalization'] or {}).get('method')) + '</td></tr>'
     if not content['readings']:
         body += '<tr><td colspan="4">当前没有结构化候选；处理状态与原因请查看 Evidence.json。</td></tr>'

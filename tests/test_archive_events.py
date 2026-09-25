@@ -179,6 +179,9 @@ def test_unbound_candidates_visible_without_formal_result_or_identity(tmp_path):
     assert '14.4062' in (file.parent/'Readme.html').read_text()
     assert '非正式测量结果' in candidate_path.read_text()
     assert '未绑定读数候选' in next(tmp_path.glob('*/DailyReport/DailyReport.html')).read_text()
+    doc['readings'][0].update(text='144000', raw_value='144000', value='14.4000')
+    publish_document(tmp_path, doc)
+    assert '14.4000' in (file.parent/'Readme.html').read_text()
 
 
 @pytest.mark.parametrize('issue', ['unit_conflict', 'display_precision_mismatch'])
