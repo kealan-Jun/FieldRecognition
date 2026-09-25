@@ -48,7 +48,16 @@ class Reading(BaseModel):
 
     @model_validator(mode='after')
     def visible_number(self):
-        if not re.fullmatch(NUMBER, self.value) or self.value not in self.text:
+        # LCD glyph spacing may be transcribed as horizontal whitespace. Keep
+        # the raw text intact; never cross rows, words, units, signs or decimal
+        # marks to manufacture a number. Match a whole numeric token, not a
+        # substring that could drop a leading sign or trailing digit.
+        horizontal_space = r'[\t \u00a0\u2000-\u200a\u202f\u205f\u3000]+'
+        transcription = re.sub(r'(?<=\d)' + horizontal_space + r'(?=\d)', '', self.text)
+        complete = any(match.group() == self.value
+                       and not re.search(r'[+\-.,]\s*$', transcription[:match.start()])
+                       for match in re.finditer(NUMBER, transcription))
+        if not re.fullmatch(NUMBER, self.value) or not complete:
             raise ValueError('Readout must be a complete number included in the transcription')
         return self
 

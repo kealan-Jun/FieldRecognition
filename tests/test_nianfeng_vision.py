@@ -264,3 +264,26 @@ def test_failed_whole_photo_recovery_retains_original_panel_evidence(app_client,
     assert result['recognition_skipped'] and result['panel_detection']
     assert result['whole_photo_recovery']['fallback']['raw_answer'] == 'partial'
     assert result['readings'] == []
+
+
+@pytest.mark.parametrize('text', ['1440 18', '1440\u200918', '1440\t18 g'])
+def test_spaced_lcd_digits_preserve_original_transcription(configured, monkeypatch, text):
+    monkeypatch.setattr(vision, '_request', lambda *a: response({'status':'readable','readings':[{'text':text,'value':'144018','label':None,'unit':None}]}))
+    result = vision.read_panel(np.zeros((20,20,3),np.uint8))
+    assert result['status'] == 'completed'
+    assert result['answer']['readings'][0]['text'] == text
+    assert result['answer']['readings'][0]['value'] == '144018'
+    assert result['raw_answer']
+
+
+@pytest.mark.parametrize('text,value', [
+    ('14.4018','144018'), ('-144018','144018'), ('+144018','144018'),
+    ('144018','14401'), ('1440\n18','144018'), ('1440 g 18','144018'),
+    ('1440a18','144018'), ('14 .4018','14.4018'), ('- 144018','-144018'),
+    ('- 144018','144018'), ('+ 144018','144018'),
+])
+def test_spaced_readout_cannot_delete_sign_decimal_unit_or_text(configured, monkeypatch, text, value):
+    monkeypatch.setattr(vision, '_request', lambda *a: response({'status':'readable','readings':[{'text':text,'value':value}]}))
+    result = vision.read_panel(np.zeros((20,20,3),np.uint8))
+    assert result['status'] == 'failed' and result['error'] == 'invalid_answer'
+    assert result['raw_answer']
