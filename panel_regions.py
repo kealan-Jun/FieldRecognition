@@ -17,6 +17,14 @@ def predict(core, image, x=0, y=0, *, video=False, allowed_instrument_ids=()):
     started = core['now']()
     begin = time.monotonic()
     allowed = set(allowed_instrument_ids)
+    # A saved photo remains readable without an instrument identity. Keep its
+    # raw OCR separate from detector-bound measurements; video still requires
+    # an active binding before spending inference on background frames.
+    if not allowed and not video:
+        result = dict(core['predict_panel'](image, x, y))
+        result.update(panel_regions=[], panel_selection='unbound_photo_text',
+                      instrument_identity_basis='unconfirmed')
+        return result
     detection = detector.predict(image, photo=True) if allowed and not video else detector.predict(image) if allowed else {'status':'waiting_binding', 'boxes':[], 'model':'YOLO11n'}
     from panel_layout import resolve_type_boxes,roles_for_boxes
     detection['boxes']=resolve_type_boxes(detection['boxes'],allowed,core.get('get_instrument',lambda _:{}))

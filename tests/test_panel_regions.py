@@ -108,21 +108,36 @@ def test_unlocalized_ocr_does_not_borrow_the_only_bound_instrument(app_client, m
     assert done['instrument'] is done['binding_id'] is None
 
 
-def test_unbound_photo_skips_detector_ocr_and_cloud(app_client,monkeypatch):
+def test_unbound_photo_reads_text_without_inventing_instrument(app_client,monkeypatch):
     app,client=app_client
     monkeypatch.setenv('FIELD_CAMERA_ID','TestCamera')
     configure(app,monkeypatch)
-    import aliyun_vision as vision
-    monkeypatch.setenv('FIELD_ALIYUN_FALLBACK_ENABLED','1')
-    monkeypatch.setenv('DASHSCOPE_API_KEY','test-only-key')
-    monkeypatch.setattr(app.panel_detector,'predict',lambda *a:pytest.fail('No bound instrument'))
-    monkeypatch.setattr(app,'predict_panel',lambda *a:pytest.fail('No bound instrument'))
-    monkeypatch.setattr(vision,'read_panel',lambda *a:pytest.fail('No bound instrument'))
+    monkeypatch.setattr(app.panel_detector,'predict',lambda *a:pytest.fail('No identity from detector'))
+    calls=[]
+    def predict(*args):
+        calls.append(args)
+        return {'status':'completed','lines':[{'text':'12.34','confidence':.9}],
+                'actual_model_invocation':True,'device':'cpu'}
+    monkeypatch.setattr(app,'predict_panel',predict)
     job=app.read_saved_panel(app.SavedPhotoRequest(photo=photo(app)),trigger='voice_photo_directory')
     done=wait_for_job(client,job['job_id'])
-    assert done['readings']==[] and done['recognition_skipped']
-    assert done['skip_reason']=='no_active_instrument_binding'
+    assert calls and done['actual_model_invocation']
+    assert done['lines'][0]['text']=='12.34'
+    assert not done.get('recognition_skipped')
+    assert done['instrument'] is done['binding_id'] is None
+    assert done['panel_regions']==[]
+    assert all(r.get('instrument') is None for r in done['readings'])
     assert not client.get('/api/state').json()['bindings']
+
+
+def test_unbound_video_still_skips_inference(app_client,monkeypatch):
+    app,_=app_client
+    configure(app,monkeypatch)
+    monkeypatch.setattr(app.panel_detector,'predict',lambda *a:pytest.fail('No video binding'))
+    monkeypatch.setattr(app,'predict_panel',lambda *a:pytest.fail('No video binding'))
+    result=panel_regions.predict(vars(app),np.zeros((100,150,3),np.uint8),video=True)
+    assert result['recognition_skipped']
+    assert result['skip_reason']=='no_active_instrument_binding'
 
 
 def test_missing_a_uses_its_crop_for_fallback_even_when_b_has_digits(app_client,monkeypatch):

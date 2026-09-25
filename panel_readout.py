@@ -114,7 +114,8 @@ def run(core, document, *, clock=time.monotonic, pause=time.sleep):
         if local and local.get('panel_regions'):
             finish_regions(core, document, local, image, valid=valid, clock=clock, started=started)
             return
-        if core.get('panel_detector') and core['panel_detector'].enabled():
+        if (core.get('panel_detector') and core['panel_detector'].enabled()
+                and not (local and local.get('panel_selection') == 'unbound_photo_text')):
             # Missing/slow localization must never fall back to reading the entire
             # frame: that could include an unbound laptop or another instrument.
             document.update(status='failed', error='bound_panel_localization_unavailable', lines=[],

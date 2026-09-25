@@ -79,7 +79,7 @@ def test_laptop_and_unbound_stirrer_are_excluded_before_ocr(monkeypatch):
 ])
 def test_diagnostics_distinguish_not_run_miss_disallowed_and_unknown_identity(monkeypatch, allowed, boxes, expected, raw):
     core, calls = model_core(monkeypatch, boxes)
-    result = panel_regions.predict(core,np.zeros((100,150,3),np.uint8),allowed_instrument_ids=allowed)
+    result = panel_regions.predict(core,np.zeros((100,150,3),np.uint8),allowed_instrument_ids=allowed,video=not allowed)
     assert result['failure_reason'] == expected and result['recognition_skipped']
     assert result['panel_detection']['diagnostics']['raw_candidate_count'] == raw
     assert result['panel_detection']['diagnostics']['ocr_input_region_count'] == 0
