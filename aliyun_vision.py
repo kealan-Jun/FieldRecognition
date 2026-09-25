@@ -1,4 +1,4 @@
-"""Bounded Alibaba Cloud vision fallback. Secrets never enter receipts or prompts."""
+"""Bounded, explicitly configured vision providers. Secrets never enter receipts."""
 import base64
 import hashlib
 import json
@@ -15,6 +15,7 @@ from typing import Literal
 
 DEFAULT_MODEL = 'qwen3.8-max'
 DEFAULT_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
+NIANFENG_BASE_URL = 'https://api.nianfeng.tech/v1'
 PROMPT_VERSION = 'panel-readout-v2-multiple'
 NUMBER = r'[+-]?(?:\d+(?:[.,]\d+)?|[.,]\d+)(?:[eE][+-]?\d+)?'
 READOUT = re.compile(rf'^\s*{NUMBER}\s*(?:%|°?[CF]|℃|℉|[μµu]?g|kg|mg|ml|mL|L|rpm|r/min|[mkM]?[AVW]|[kM]?Hz|Pa|kPa|MPa|bar|mm|cm|m|s|min|h|pH|ppm)?\s*$', re.I)
@@ -65,29 +66,54 @@ class Answer(BaseModel):
         return self
 
 
+def provider():
+    return os.environ.get('FIELD_VISION_PROVIDER', 'aliyun').strip().lower()
+
+
+def primary_photos():
+    return os.environ.get('FIELD_VISION_PHOTO_MODE', 'fallback').strip().lower() == 'primary'
+
+
+def api_key():
+    name = 'FIELD_VISION_API_KEY' if provider() == 'nianfeng' else 'DASHSCOPE_API_KEY'
+    return os.environ.get(name, '').strip()
+
+
 def base_url():
-    value = os.environ.get('FIELD_ALIYUN_BASE_URL', DEFAULT_BASE_URL).rstrip('/')
+    selected = provider()
+    if selected not in {'aliyun', 'nianfeng'}:
+        raise CloudError('invalid_vision_provider')
+    value = (os.environ.get('FIELD_VISION_BASE_URL', NIANFENG_BASE_URL) if selected == 'nianfeng'
+             else os.environ.get('FIELD_ALIYUN_BASE_URL', DEFAULT_BASE_URL)).rstrip('/')
     url = urlsplit(value)
     host = url.hostname or ''
-    approved = host in {'dashscope.aliyuncs.com', 'dashscope-intl.aliyuncs.com', 'dashscope-us.aliyuncs.com'}
-    approved |= bool(re.fullmatch(r'[a-z0-9-]+\.(?:cn-beijing|ap-southeast-1|us-east-1|cn-hongkong|ap-northeast-1|eu-central-1)\.maas\.aliyuncs\.com', host))
+    if selected == 'nianfeng':
+        approved, required_path = host == 'api.nianfeng.tech', '/v1'
+    else:
+        approved = host in {'dashscope.aliyuncs.com', 'dashscope-intl.aliyuncs.com', 'dashscope-us.aliyuncs.com'}
+        approved |= bool(re.fullmatch(r'[a-z0-9-]+\.(?:cn-beijing|ap-southeast-1|us-east-1|cn-hongkong|ap-northeast-1|eu-central-1)\.maas\.aliyuncs\.com', host))
+        required_path = '/compatible-mode/v1'
     if (url.scheme != 'https' or not approved or url.username or url.password or url.port not in (None, 443)
-            or url.query or url.fragment or url.path != '/compatible-mode/v1'):
-        raise CloudError('invalid_aliyun_endpoint')
+            or url.query or url.fragment or url.path != required_path):
+        raise CloudError('invalid_' + selected + '_endpoint')
     return value
 
 
 def public_config():
-    configured = bool(os.environ.get('DASHSCOPE_API_KEY', '').strip())
-    enabled = os.environ.get('FIELD_ALIYUN_FALLBACK_ENABLED', '0').lower() in {'1', 'true', 'yes'}
+    selected = provider()
+    configured = bool(api_key())
+    enabled = os.environ.get('FIELD_VISION_ENABLED' if selected == 'nianfeng' else 'FIELD_ALIYUN_FALLBACK_ENABLED', '0').lower() in {'1', 'true', 'yes'}
+    model = (os.environ.get('FIELD_VISION_MODEL', '') if selected == 'nianfeng'
+             else os.environ.get('FIELD_ALIYUN_MODEL', DEFAULT_MODEL)).strip()
     try:
         base_url()
         endpoint_valid = True
     except (CloudError, ValueError):
         endpoint_valid = False
-    return {'provider': 'aliyun', 'model': os.environ.get('FIELD_ALIYUN_MODEL', DEFAULT_MODEL),
+    return {'provider': selected, 'model': model, 'model_configured': bool(model),
             'enabled': enabled, 'configured': configured, 'endpoint_valid': endpoint_valid,
-            'available': enabled and configured and endpoint_valid,
+            'available': enabled and configured and endpoint_valid and bool(model),
+            'photo_mode': 'primary' if primary_photos() else 'fallback',
             'sends': 'panel_crop_or_current_camera_frame', 'no_digits_seconds': no_digits_seconds()}
 
 
@@ -155,12 +181,13 @@ def _request(payload, key):
         raise CloudError('invalid_response') from None
 
 
-def read_panel(panel):
+def read_panel(panel, *, display_rules=None):
     config = public_config()
-    receipt = {'provider': 'aliyun', 'model': config['model'], 'prompt_version': PROMPT_VERSION,
+    receipt = {'provider': config['provider'], 'model': config['model'], 'prompt_version': PROMPT_VERSION,
                'attempted': False, 'actual_model_invocation': False, 'human_verified': False}
     if not config['available']:
-        reason = 'disabled' if not config['enabled'] else 'missing_api_key' if not config['configured'] else 'invalid_aliyun_endpoint'
+        reason = ('disabled' if not config['enabled'] else 'missing_api_key' if not config['configured']
+                  else 'missing_model' if not config['model_configured'] else 'invalid_' + config['provider'] + '_endpoint')
         return receipt | {'status': 'unavailable', 'error': reason}
     started = time.monotonic()
     try:
@@ -171,27 +198,47 @@ def read_panel(panel):
         png = encoded.tobytes()
         receipt.update(image_sha256=hashlib.sha256(png).hexdigest(),
                        image_width=panel.shape[1], image_height=panel.shape[0])
+        prompt = '请仅根据这张面板图片提取当前完整读数，返回规定的 JSON。'
+        if display_rules:
+            # Configuration is evidence about formatting, never permission to
+            # infer digits or a physical instrument identity from the registry.
+            receipt['display_rules'] = display_rules
+            prompt += ('\n用户已确认的显示格式规则：' + json.dumps(display_rules, ensure_ascii=False)
+                       + '\n规则只解释已看清的完整数字的显示格式；不要补数字，不要据此猜仪器身份。'
+                       '只有明确看出电子天平的质量显示时才输出label=质量、unit=g；'
+                       '看不清仪器类型或单位时保留null，不能从模板反推类型。'
+                       'text始终保留图片直接识别的原文，value同样先保留原始完整数字；'
+                       '后端会单独记录固定小数规则的规范化结果及依据。'
+                       '规则换算由程序完成，你仅转录可见数字；不要为了符合模板删除或移动已看清的小数点；'
+                       '小数点看不清就在notes说明，notes不得计算或建议任何新数值。')
         payload = {'model': config['model'], 'messages': [
             {'role': 'system', 'content': SYSTEM_PROMPT},
             {'role': 'user', 'content': [
                 {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,' + base64.b64encode(png).decode()}},
-                {'type': 'text', 'text': '请仅根据这张面板图片提取当前完整读数，返回规定的 JSON。'}]}],
-            'stream': False, 'enable_thinking': True, 'thinking_budget': 2048,
-            'max_completion_tokens': 4096}
+                {'type': 'text', 'text': prompt}]}],
+            'stream': False}
+        if config['provider'] == 'aliyun':
+            payload.update(enable_thinking=True, thinking_budget=2048, max_completion_tokens=4096)
+        else:
+            # Common Chat Completions fields; do not send Qwen-only thinking flags
+            # to a Claude/OpenAI-compatible gateway.
+            payload.update(max_tokens=4096)
         receipt['attempted'] = True
-        response = _request(payload, os.environ['DASHSCOPE_API_KEY'].strip())
+        response = _request(payload, api_key())
         receipt['actual_model_invocation'] = True
         choice = response['choices'][0]
+        content = choice['message']['content']
+        if isinstance(content, str) and len(content) <= 16000:
+            receipt.update(raw_answer=content.replace(api_key(), '[REDACTED]'),
+                           request_id=response.get('id'), returned_model=response.get('model'), usage=response.get('usage'))
         if choice.get('finish_reason') != 'stop':
             raise CloudError('incomplete_answer')
-        content = choice['message']['content']
         if not isinstance(content, str) or len(content) > 16000:
             raise CloudError('invalid_answer')
         # Accept a JSON code fence, but never extract arbitrary digits from prose.
         cleaned = re.sub(r'^```(?:json)?\s*\n?(.*?)\n?```$', r'\1', content.strip(), flags=re.S)
         answer = Answer.model_validate_json(cleaned)
-        receipt.update(status='completed', answer=answer.model_dump(), raw_answer=content,
-                       request_id=response.get('id'), returned_model=response.get('model'), usage=response.get('usage'))
+        receipt.update(status='completed', answer=answer.model_dump())
     except CloudError as exc:
         receipt.update(status='failed', error=exc.code, http_status=exc.http_status)
         if exc.provider_code:

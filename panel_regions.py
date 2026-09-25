@@ -128,7 +128,7 @@ def needs_fallback(local):
 
 
 def finish(core, document, local, image, *, valid, clock=time.monotonic, started=0):
-    from panel_readout import save
+    from panel_readout import save, acquire_primary_slot
     document.update(copy.deepcopy(local))
     # A completed model call is not a completed business task. Keep the lease
     # while saving crop evidence and waiting for the optional provider response.
@@ -166,14 +166,18 @@ def finish(core, document, local, image, *, valid, clock=time.monotonic, started
         lines = copy.deepcopy(result.get('lines', []))
         lines = validate_lines(lines, region.get('measurement_name'), region['instrument'])
         reason = None if region.get('display_state') else 'field_rule_conflict' if any(l.get('quality_issue') for l in lines) else reading_fallback_reason(lines, result.get('error'))
+        primary = vision.primary_photos() and document.get('request_trigger') != 'video_stream'
+        if primary and not region.get('display_state'):
+            reason = 'primary_photo'
         if reason and vision.public_config()['available'] and valid():
             attempt = {'panel_id':region['panel_id'], 'trigger':reason}
-            if not core['vision_call_lock'].acquire(blocking=False):
+            acquired = acquire_primary_slot(core, valid, clock=clock) if primary else core['vision_call_lock'].acquire(blocking=False)
+            if not acquired:
                 attempt.update(status='skipped', reason='busy')
             else:
                 try:
                     scope = f"panel:{document['camera_id']}:{region['instrument_id']}:{region['panel_id']}"
-                    if not core['reserve_fallback'](scope):
+                    if not primary and not core['reserve_fallback'](scope):
                         attempt.update(status='skipped', reason='cooldown')
                     elif valid():
                         attempt.update(status='running', attempted_at=core['now'](), trigger_elapsed_seconds=round(clock()-started,3))
@@ -182,7 +186,12 @@ def finish(core, document, local, image, *, valid, clock=time.monotonic, started
                         save(core, document)
                         provider_started = clock()
                         try:
-                            cloud = vision.read_panel(crop)
+                            name = region.get('measurement_name')
+                            registered = ((region['instrument'].get('measurement_ranges') or {}).get(name) or {})
+                            display_rules = ([{'measurement_name':name, **{key:registered[key] for key in
+                                ('unit','decimal_places','fixed_decimal_display') if key in registered}}]
+                                if primary and registered.get('fixed_decimal_display') is True else None)
+                            cloud = vision.read_panel(crop, display_rules=display_rules) if display_rules else vision.read_panel(crop)
                         finally:
                             attempt.update(duration_ms=round((clock()-provider_started)*1000,3), clock_basis='process_monotonic')
                         attempt.update(cloud, finished_at=core['now']())
@@ -190,6 +199,18 @@ def finish(core, document, local, image, *, valid, clock=time.monotonic, started
                             lines = [{'text':r['text'], 'value':r['value'], 'unit':r.get('unit'),
                                 'label':r.get('label'), 'numeric_candidates':[r['value']], 'confidence':None,
                                 'polygon':None, 'reading_source':'vision'} for r in cloud['answer']['readings']]
+                            if primary and display_rules:
+                                from measurement_records import apply_fixed_decimal
+                                for line in lines:
+                                    normalized = apply_fixed_decimal(name, dict(line,text=line['value']), region['instrument'])
+                                    if normalized.get('normalization'):
+                                        line.update(value=normalized['value'], raw_value=line['value'],
+                                            normalization=dict(normalized['normalization'], raw_text=line['text']),
+                                            numeric_candidates=[normalized['value']])
+                        elif primary and cloud.get('status') == 'completed':
+                            # A model-declared unreadable panel must not be replaced by
+                            # the very OCR candidate the primary mode was meant to review.
+                            lines = []
                 finally:
                     core['vision_call_lock'].release()
             region['fallback'] = attempt; attempts.append(attempt)

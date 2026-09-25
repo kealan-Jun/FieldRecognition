@@ -1,0 +1,15 @@
+# 年丰视觉模型与照片优先识别
+
+通过 `.env.example` 中的 `FIELD_VISION_PROVIDER=nianfeng`、`FIELD_VISION_ENABLED=1`、`FIELD_VISION_API_KEY`、`FIELD_VISION_MODEL` 明确选择年丰兼容接口。`FIELD_VISION_BASE_URL` 只接受 `https://api.nianfeng.tech/v1`；钱包页面不是推理接口。密钥放在未跟踪的环境文件，不写入回执。阿里云默认配置保持兼容。
+
+`FIELD_VISION_PHOTO_MODE=primary` 使无绑定照片直接调用所配置视觉模型，避免整图 OCR 中的背景数字或错误整数阻止视觉调用。每张照片排队等待最多 120 秒，视觉请求仍串行；该模式不受每相机 30 秒兜底冷却影响。失败时保留云端失败回执并尝试本地 OCR；模型明确返回不可读时不生成读数。绑定照片仍先定位已授权面板，再对各面板优先调用视觉模型；视频原规则不变。此模式会增加外部调用次数及费用。
+
+原图、选框哈希、原始模型回答、返回模型名和用量保留。无绑定结果为 `needs_review` 候选，`instrument`、`binding_id` 为空，`human_verified=false`；不生成仪器身份或正式测量确认。
+
+## 用户确认的类型显示模板
+
+本次用户明确质量单位 g、固定四位小数，且人工查看样张确认电子天平显示。可通过 `FIELD_VISION_DISPLAY_RULES` 配置 `.env.example` 的显式模板。只有用户确认标志为 true 且模型明确输出 `label=质量`、`unit=g` 时才应用，不能从唯一登记仪器猜类型。
+
+完整整数字符串 `144062` 可依确认的固定显示规则规范化为 `14.4062`，原始字符串、原始模型回答及规则依据保留；身份仍为空。已经识别出小数点的 `144.062` 不移动小数点，而是标记 `display_precision_mismatch`，`normalized_value.value=null`。类型/单位不明、冲突模板、缺位和模糊数字不补写。
+
+这只证明流程和规则约束，不能证明模型读数正确。实际模型可用性、速度和真实仪器准确率必须以现场回执和人工核对为准；配置模型名称并不代表该模型已被调用。

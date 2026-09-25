@@ -40,6 +40,56 @@ def save(core, document):
             refresh(core, conn, document['measurement_id'])
 
 
+def acquire_primary_slot(core, valid, *, clock=time.monotonic, pause=time.sleep):
+    """Each requested photo gets a bounded turn; no burst is dropped as busy/cooldown."""
+    deadline = clock() + 120
+    while valid():
+        if core['vision_call_lock'].acquire(blocking=False):
+            return True
+        if clock() >= deadline:
+            return False
+        pause(min(.1, deadline - clock()))
+    return False
+
+
+def primary_unbound_photo(core, document, panel, *, valid, clock, pause, started):
+    """Direct model transcription, explicitly without physical instrument attribution."""
+    from vision_display_rules import configured_rules, apply_rule
+    rules = configured_rules()
+    document.update(phase='vision_primary', reading_mode='vision_primary_photo',
+                    vision_display_rules=rules,
+                    fallback={'status': 'waiting', 'trigger': 'primary_photo'})
+    save(core, document)
+    if not acquire_primary_slot(core, valid, clock=clock, pause=pause):
+        document['fallback'].update(status='failed', error='vision_slot_timeout')
+        return False
+    try:
+        if not valid():
+            return False
+        document['fallback'].update(status='running', attempted_at=core['now'](),
+                                    trigger_elapsed_seconds=round(clock() - started, 3))
+        save(core, document)
+        vision_started = clock()
+        cloud = vision.read_panel(panel, display_rules=rules) if rules else vision.read_panel(panel)
+        record_duration(document, 'vision_ms', vision_started, clock())
+        document['fallback'].update(cloud, finished_at=core['now']())
+    finally:
+        core['vision_call_lock'].release()
+    if cloud.get('status') != 'completed':
+        return False  # Preserve the provider failure and try local OCR once.
+    readings = cloud['answer']['readings']
+    document['capture_association'] = {k:document.get(k) for k in ('instrument', 'binding_id', 'instrument_candidates', 'workbench')}
+    document.update(status='completed', phase='completed', model=cloud['model'], device='cloud',
+        actual_model_invocation=True, local_ocr={'status':'skipped', 'reason':'vision_primary_photo', 'lines':[]},
+        instrument=None, binding_id=None, binding_ids=[], instrument_candidates=[], panel_regions=[],
+        instrument_association='unbound_photo', instrument_identity_basis='unconfirmed', association_status='unbound',
+        lines=[apply_rule({'text':r['text'], 'value':r['value'], 'unit':r.get('unit'), 'label':r.get('label'),
+                'numeric_candidates':[r['value']], 'confidence':None, 'polygon':None, 'reading_source':'vision'}, rules) for r in readings],
+        outcome='numeric_readout' if readings else 'no_numeric_readout')
+    document.pop('error', None)
+    return True
+
+
 def run(core, document, *, clock=time.monotonic, pause=time.sleep):
     started = clock()
     future = None
@@ -71,6 +121,20 @@ def run(core, document, *, clock=time.monotonic, pause=time.sleep):
         document.update(crop_image_url=f"/api/images/{document['job_id']}",
                         crop_image_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
                         accuracy='not_human_verified', panel_selection='user_selected_crop_or_full_photo')
+        configured = vision.public_config()['available']
+        snapshots = document.get('all_binding_snapshots', document.get('binding_snapshots', []))
+        primary_attempted = bool(configured and vision.primary_photos()
+            and document.get('request_trigger') != 'video_stream' and not snapshots and not document.get('binding_id'))
+        if primary_attempted:
+            completed = primary_unbound_photo(core, document, panel, valid=valid, clock=clock, pause=pause, started=started)
+            if not valid():
+                cancelled()
+                return
+            if completed:
+                return
+            # One cloud request per attempt. Its failure receipt survives the local fallback.
+            configured = False
+            document.update(phase='local_ocr_after_vision_failure')
         precomputed = document.pop('precomputed_local', None)
         if precomputed is not None:
             future = Future()
@@ -83,7 +147,6 @@ def run(core, document, *, clock=time.monotonic, pause=time.sleep):
                 with inference_request(document['job_id']):
                     return predictor(pixels, offset_x, offset_y)
             future = core['ocr_pool'].submit(predict_request, panel, x, y)
-        configured = vision.public_config()['available']
         video_elapsed = (document.get('video_observation') or {}).get('no_digits_elapsed_seconds', 0)
         deadline = started + (max(0, vision.no_digits_seconds() - video_elapsed) if configured else 90)
         # A successful numeric result returns immediately. A miss cannot trigger a paid
@@ -95,7 +158,8 @@ def run(core, document, *, clock=time.monotonic, pause=time.sleep):
             local = result_if_ready()
             if local and local.get('recognition_skipped'):
                 break
-            if local and (not configured or needs_fallback(local) is None):
+            if local and (not configured or needs_fallback(local) is None
+                          or (vision.primary_photos() and document.get('request_trigger') != 'video_stream')):
                 break
             # An unavailable remote worker must return a durable wait, not trigger
             # a cloud call or finalize an empty localization before it responds.
