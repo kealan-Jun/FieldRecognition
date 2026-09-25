@@ -203,6 +203,21 @@ def test_unbound_conflicts_retain_raw_evidence_without_effective_value(tmp_path,
     assert not list(file.parent.glob('Result*.json'))
 
 
+def test_photo_readme_uses_normalized_unit_and_preserves_missing_raw_unit():
+    from archive_events import photo_candidates, photo_readme
+    doc = {'job_id': 'unit-test', 'capture_id': 'photo', 'readings': [{
+        'text': '143976', 'value': '14.3976', 'unit': None,
+        'instrument': {'id': 'registered-balance'}, 'binding_id': 'binding',
+        'normalized_value': {'name': '质量', 'value': 14.3976, 'unit': 'g', 'range': [None, None]}}]}
+    readings = photo_candidates([doc], [], unbound_only=False)
+    assert readings[0]['raw_unit'] is None and readings[0]['unit'] == 'g'
+    assert '14.3976 g' in photo_readme({'readings': readings}).decode()
+    doc['readings'][0]['quality_issue'] = 'unit_conflict'
+    readings = photo_candidates([doc], [], unbound_only=False)
+    assert readings[0]['raw_unit'] is None and readings[0]['unit'] is None
+    assert readings[0]['value'] is None
+
+
 def test_upgrade_replaces_generated_envelope_without_duplicate_results(tmp_path):
     from test_measurement_records import document
     doc = document() | {'camera_id': 'Cam'}

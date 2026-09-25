@@ -228,7 +228,8 @@ def photo_candidates(jobs, sources, *, unbound_only=True):
                 'raw_value': reading.get('raw_value', (normalization or {}).get('raw_value', reading.get('value'))),
                 'raw_unit': reading.get('unit'), 'value': value,
                 'display_value': str(reading['value']) if value is not None else None,
-                'unit': None if any('unit_conflict' in issue for issue in issues) else reading.get('unit'),
+                'unit': None if any('unit_conflict' in issue for issue in issues) else (
+                    normalized.get('unit') if isinstance(normalized, dict) else reading.get('unit')),
                 'measurement_name': reading.get('measurement_name') or (normalized or {}).get('name'),
                 'quality_issue': issues[0] if issues else None, 'quality_issues': issues,
                 'normalization': normalization, 'normalized_value': normalized,
