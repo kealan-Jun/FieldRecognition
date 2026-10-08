@@ -4,15 +4,17 @@ import json
 from pathlib import Path
 import time
 
-from archive_events import make_views, prepare
+from archive_events import event_rows, make_views, prepare
 from archive_paths import ArchivePaths, checked, empty_directories
 from archive_progress import advance
 
 
-def publish_events(archive, rows):
+def publish_events(archive, rows=None):
     """Deliver changed business files before scanning historical NAS content."""
-    pending = {row['seq'] for row in rows if row['published_at'] and not row['readable_at']}
     with archive.core['db']() as conn:
+        pending = {row['seq'] for row in conn.execute(
+            'SELECT seq FROM archive_outbox WHERE archived_at IS NOT NULL '
+            'AND published_at IS NOT NULL AND readable_at IS NULL')}
         confirmation = conn.execute("SELECT value FROM archive_meta WHERE key='event_confirmation_pending'").fetchone()
     confirmations = set(json.loads(confirmation[0])) if confirmation else set()
     pending |= confirmations
@@ -21,6 +23,9 @@ def publish_events(archive, rows):
     started = time.monotonic()
     root = archive._root()
     paths = ArchivePaths(root)
+    with archive.core['db']() as conn:
+        rows = event_rows(conn, pending, paths)
+    by_sequence = {row['seq']: row for row in rows}
     bundles, _ = prepare(rows, paths)
     selected = [b for b in bundles if any(v['sequence'] in pending for v in b['history'])]
     receipts = {}
@@ -34,7 +39,7 @@ def publish_events(archive, rows):
             if hashlib.sha256(raw).hexdigest() != path.stem.split('-', 1)[-1]:
                 raise ValueError('Cannot publish corrupt receipt')
             receipt = json.loads(raw)
-            row = next(r for r in rows if r['seq'] == seq)
+            row = by_sequence[seq]
             if (receipt['sequence'], receipt['entity'], receipt['entity_id'], receipt['document']) != (
                     seq, row['entity'], row['entity_id'], json.loads(row['document'])):
                 raise ValueError('Cannot publish mismatched receipt')
@@ -59,7 +64,8 @@ def publish_events(archive, rows):
         # navigation work. An interrupted rebuild must not leave readable_at
         # hidden from the Evidence that was already published successfully.
         with archive.core['db']() as conn:
-            refreshed = conn.execute('SELECT * FROM archive_outbox WHERE archived_at IS NOT NULL ORDER BY seq DESC').fetchall()
+            refreshed = [conn.execute('SELECT * FROM archive_outbox WHERE seq=?', (row['seq'],)).fetchone()
+                         for row in rows]
         keys = {b['key'] for b in selected}
         bundles, _ = prepare(refreshed, paths)
         selected = [b for b in bundles if b['key'] in keys]

@@ -34,6 +34,7 @@ class ArchiveIntegrity:
         self.core = archive.core
         self.stop = threading.Event()
         self.lock = threading.Lock()
+        self.run_lock = threading.Lock()
         self.worker = None
         self.running = False
         with self.core['db']() as conn:
@@ -67,11 +68,16 @@ class ArchiveIntegrity:
         return due is None or datetime.now(timezone.utc) >= datetime.fromisoformat(due)
 
     def digest(self, path, *, keep=False):
-        before = path.stat()
+        # Pin an open descriptor while the single writer can move paths. Hashing
+        # a whole historical snapshot must not hold the writer's migration gate.
+        with self.lock:
+            resolved = path() if callable(path) else path
+            source = resolved.open('rb')
+            before = os.fstat(source.fileno())
         sha, pieces, count = hashlib.sha256(), [], 0
-        if keep and before.st_size > 16 * 1024 * 1024:
-            raise ValueError('Receipt exceeds read limit')
-        with path.open('rb') as source:
+        with source:
+            if keep and before.st_size > 16 * 1024 * 1024:
+                raise ValueError('Receipt exceeds read limit')
             while True:
                 if self.stop.is_set():
                     raise CheckStopped()
@@ -84,13 +90,23 @@ class ArchiveIntegrity:
                 # Yield between chunks; this worker never uses the OCR queue.
                 if self.stop.wait(.005):
                     raise CheckStopped()
-        after = path.stat()
+            after = os.fstat(source.fileno())
         if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
             raise IntegrityError('changed_during_check')
         return sha.hexdigest(), count, b''.join(pieces)
 
+    def stable_digest(self, locate, *, keep=False):
+        # CIFS can refresh cached metadata during a rename. Reopen the current
+        # alias once; callers still compare the bytes against immutable hashes.
+        for attempt in range(2):
+            try:
+                return self.digest(locate, keep=keep)
+            except IntegrityError as exc:
+                if exc.code != 'changed_during_check' or attempt:
+                    raise
+
     def run_once(self):
-        if not self.archive.enabled() or not self.lock.acquire(blocking=False):
+        if not self.archive.enabled() or not self.run_lock.acquire(blocking=False):
             return None
         self.running = True
         started = time.monotonic()
@@ -103,8 +119,18 @@ class ArchiveIntegrity:
         try:
             root = self.archive._root(create=False)
             from archive_paths import load, checked, resolve_name
-            aliases = load(root)['aliases']
-            locate = lambda relative: checked(root, resolve_name(root, relative, aliases))
+            with self.lock:
+                aliases = load(root)['aliases']
+
+            def locate(relative):
+                nonlocal aliases
+                path = checked(root, resolve_name(root, relative, aliases))
+                if not path.is_file():
+                    # A move may have completed since this snapshot loaded its
+                    # aliases. Refresh only on a missing old location.
+                    aliases = load(root)['aliases']
+                    path = checked(root, resolve_name(root, relative, aliases))
+                return path
             with self.core['db']() as conn:
                 rows = conn.execute('SELECT * FROM archive_outbox WHERE archived_at IS NOT NULL ORDER BY seq').fetchall()
             report['expected_receipts'] = len(rows)
@@ -113,7 +139,7 @@ class ArchiveIntegrity:
             for row in rows:
                 relative = row['receipt_path']
                 try:
-                    digest, size, raw = self.digest(locate(relative), keep=True)
+                    digest, size, raw = self.stable_digest(lambda: locate(relative), keep=True)
                     report['bytes_checked'] += size
                     if digest != Path(relative).stem.split('-', 1)[-1]:
                         raise IntegrityError('sha256_mismatch')
@@ -127,7 +153,8 @@ class ArchiveIntegrity:
                     for kind, item in receipt.get('artifacts', {}).items():
                         if not isinstance(item, dict):
                             continue  # Legacy original_status is an explicit string.
-                        locate(item['path'])
+                        with self.lock:
+                            locate(item['path'])
                         if item['path'] in artifacts and artifacts[item['path']] != item:
                             raise IntegrityError('conflicting_object_metadata')
                         artifacts[item['path']] = item
@@ -140,7 +167,7 @@ class ArchiveIntegrity:
             report['expected_objects'] = len(artifacts)
             for relative, item in artifacts.items():
                 try:
-                    digest, size, _ = self.digest(locate(relative))
+                    digest, size, _ = self.stable_digest(lambda: locate(relative))
                     report['bytes_checked'] += size
                     if digest != item['sha256']:
                         raise IntegrityError('sha256_mismatch')
@@ -166,7 +193,7 @@ class ArchiveIntegrity:
                                  (report['run_id'], json.dumps(report, ensure_ascii=False)))
             finally:
                 self.running = False
-                self.lock.release()
+                self.run_lock.release()
         return report
 
     def publish_pending(self):

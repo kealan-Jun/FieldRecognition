@@ -187,7 +187,11 @@ def finish(core, document, local, image, *, valid, clock=time.monotonic, started
             reason = 'primary_photo'
         if reason and vision.public_config()['available'] and valid():
             attempt = {'panel_id':region['panel_id'], 'trigger':reason}
+            slot_started = clock()
             acquired = acquire_primary_slot(core, valid, clock=clock) if primary else core['vision_call_lock'].acquire(blocking=False)
+            attempt.update(queue_wait_ms=round((clock()-slot_started)*1000, 3),
+                           queue_wait_clock_basis='process_monotonic',
+                           queue_wait_scope='panel_provider_slot_acquisition')
             if not acquired:
                 attempt.update(status='skipped', reason='busy')
             else:
@@ -248,6 +252,8 @@ def finish(core, document, local, image, *, valid, clock=time.monotonic, started
         document.update(status='failed', error='panel_ocr_failed')
     if attempts:
         document['fallback'] = dict(attempts[-1], regions=attempts,
+            queue_wait_ms=sum(a['queue_wait_ms'] for a in attempts),
+            queue_wait_scope='sum_of_this_task_panel_provider_slot_acquisitions',
             duration_ms=sum(a['duration_ms'] for a in attempts if a.get('duration_ms') is not None) if any(a.get('duration_ms') is not None for a in attempts) else None,
             attempted_at=next((a['attempted_at'] for a in attempts if a.get('attempted_at')), None),
             finished_at=next((a['finished_at'] for a in reversed(attempts) if a.get('finished_at')), None))

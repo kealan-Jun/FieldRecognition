@@ -295,8 +295,6 @@ class ArchiveStore:
         from archive_progress import checkpoint
         with self.lock:
             self.status.update(status='indexing')
-        with self.core['db']() as conn:
-            rows = conn.execute('SELECT * FROM archive_outbox WHERE archived_at IS NOT NULL ORDER BY seq DESC').fetchall()
         # The verifier cannot observe a file between path resolution and rename.
         if not self.integrity.lock.acquire(timeout=5):
             with self.lock:
@@ -304,9 +302,7 @@ class ArchiveStore:
             return None
         try:
             started = time.monotonic()
-            publish_events(self, rows)
-            with self.core['db']() as conn:
-                rows = conn.execute('SELECT * FROM archive_outbox WHERE archived_at IS NOT NULL ORDER BY seq DESC').fetchall()
+            publish_events(self)
 
             class NewReceipts(Exception):
                 pass
@@ -319,6 +315,9 @@ class ArchiveStore:
                     raise NewReceipts()
 
             try:
+                yield_to_receipts()
+                with self.core['db']() as conn:
+                    rows = conn.execute('SELECT * FROM archive_outbox WHERE archived_at IS NOT NULL ORDER BY seq DESC').fetchall()
                 yield_to_receipts()
                 with checkpoint(yield_to_receipts):
                     result = rebuild(self, rows)

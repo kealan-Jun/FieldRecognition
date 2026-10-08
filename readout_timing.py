@@ -98,6 +98,8 @@ def update_timing(document, *, preserve_recorded_durations=False):
         measured['panel_detection_ms'] = detection['duration_ms']
     if fallback.get('duration_ms') is not None and fallback.get('clock_basis') == 'process_monotonic':
         measured['vision_ms'] = fallback['duration_ms']
+    if fallback.get('queue_wait_ms') is not None and fallback.get('queue_wait_clock_basis') == 'process_monotonic':
+        measured['vision_queue_wait_ms'] = fallback['queue_wait_ms']
     if local.get('ocr_elapsed_ms') is not None:
         measured['ocr_ms'] = local['ocr_elapsed_ms']
     elif not local.get('panel_detection') and local.get('wall_seconds') is not None:
@@ -109,6 +111,8 @@ def update_timing(document, *, preserve_recorded_durations=False):
             timing['duration_clock_basis'][name] = 'process_monotonic'
     timing['ocr_scope'] = 'localized_region_processing_including_preprocessing_and_model_wait' if local.get('panel_detection') else 'model_call_including_lock_and_model_wait'
     timing['duration_scopes'] = {
+        'vision_queue_wait_ms': 'provider_slot_wait; panel tasks sum_across_this_tasks_panels',
+        'vision_ms': 'provider_calls; excludes_provider_slot_wait_when_monotonic',
         'ocr_wait_ms': 'run_start_to_reported_ocr_start_including_scheduler_and_detection',
         'ocr_scheduler_wait_ms': 'single_worker_executor_submission_to_execution_start',
         'ocr_execution_ms': 'predict_readout_including_detection_preprocessing_and_model_wait',

@@ -13,6 +13,7 @@ from archive_browse import page, token
 from archive_readable import raw_json
 from measurement_records import build_records, capture_clock, measurement_value, number, RULE_VERSION
 from evidence_timeline import acquisition
+from archive_progress import advance
 
 KINDS = {'Bindings': '二维码与绑定', 'VideoReadings': '视频面板读数',
          'VoicePhotoReadings': '语音照片读数', 'PhotoReadings': '上传照片读数'}
@@ -40,16 +41,139 @@ def aware(value):
 
 def latest_rows(rows):
     latest, versions = {}, {}
-    for row in sorted(rows, key=lambda r: r['seq']):
+    for number, row in enumerate(sorted(rows, key=lambda r: r['seq']), 1):
+        advance('preparing_event_versions', number, len(rows))
         key = (row['entity'], row['entity_id'])
         current = dict(row)
         for field in ('published_at', 'readable_at', 'readability_basis', 'publication_started_at', 'receipt_publication_ms'):
             current.setdefault(field, None)
-        latest[key] = current | {'doc': json.loads(row['document'])}
+        latest[key] = current
         versions.setdefault(key, []).append({'sequence': row['seq'], 'receipt': row['receipt_path'],
             'queued_at': row['recorded_at'], 'published_at': current['published_at'],
             'readable_at': current['readable_at'], 'readability_basis': current['readability_basis']})
+    for number, (key, row) in enumerate(latest.items(), 1):
+        advance('decoding_latest_events', number, len(latest))
+        latest[key] = row | {'doc': json.loads(row['document'])}
     return latest, versions
+
+
+def event_rows(conn, sequences, paths):
+    """Load complete histories of changed events, without loading unrelated JSON.
+
+    Only entity IDs and sequence numbers are enumerated across the archive.
+    Previously published aliases supply reverse event membership. Business
+    tables supply additional IDs while an event is first being published;
+    the values used below always come from the latest ARCHIVED snapshot.
+    Photograph identities and their job source IDs are retained by the project.
+    """
+    metadata = {}
+    for row in conn.execute(
+        'SELECT entity,entity_id,max(seq) AS seq FROM archive_outbox '
+        'WHERE archived_at IS NOT NULL GROUP BY entity,entity_id'):
+        advance('selecting_event_entities')
+        metadata[(row['entity'], row['entity_id'])] = row['seq']
+    entities_by_alias = {}
+    for entity, ident in metadata:
+        advance('selecting_event_aliases')
+        entities_by_alias['Records/' + ''.join(word.title() for word in entity.split('_')) + '/' + token(ident) + '/Record.json'] = (entity, ident)
+    members = {}
+    aliases = paths.data['aliases']
+
+    def alias_target(target):
+        seen = set()
+        while target in aliases and target not in seen:
+            seen.add(target)
+            target = aliases[target]
+        return target
+
+    for alias, target in aliases.items():
+        advance('selecting_event_members')
+        entity_key = entities_by_alias.get(alias)
+        if entity_key is None:
+            continue
+        target = alias_target(target)
+        members.setdefault(target.rsplit('/', 1)[0], set()).add(entity_key)
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    wanted, todo, visited = set(), [], set()
+
+    def add(entity, ident):
+        key = (entity, ident)
+        if key in metadata and key not in wanted:
+            wanted.add(key)
+            todo.append(key)
+
+    for sequence in sequences:
+        advance('selecting_pending_events')
+        row = conn.execute('SELECT entity,entity_id FROM archive_outbox WHERE seq=? AND archived_at IS NOT NULL',
+                           (sequence,)).fetchone()
+        if row:
+            add(row['entity'], row['entity_id'])
+
+    captures, measurements = set(), set()
+    while todo:
+        advance('selecting_event_closure', len(visited), None)
+        key = todo.pop()
+        if key in visited:
+            continue
+        visited.add(key)
+        entity, ident = key
+        row = conn.execute('SELECT document FROM archive_outbox WHERE seq=?', (metadata[key],)).fetchone()
+        doc = json.loads(row['document'])
+        event_keys = []
+        capture = None
+        measurement = None
+        if entity in {'bindings', 'scene_visits', 'binding_handoffs'}:
+            capture = doc.get('scan_id')
+            event_keys.append(entity + ':' + ident)
+        elif entity == 'scans':
+            capture = doc.get('capture_id') or ident
+        elif entity == 'jobs':
+            capture = doc.get('capture_id')
+            measurement = doc.get('measurement_id')
+            for job_id in (doc.get('recognition_root_job_id'), doc.get('supersedes_job_id')):
+                add('jobs', job_id)
+        elif entity in {'photo_measurements', 'experiment_records'}:
+            measurement = doc.get('measurement_id')
+            for job_id in doc.get('job_ids', []) + doc.get('superseded_job_ids', []):
+                add('jobs', job_id)
+            for source in doc.get('sources', []):
+                add('scans', source.get('capture_id'))
+        if capture:
+            add('scans', capture)
+            event_keys.append('capture:' + capture)
+            if capture not in captures:
+                captures.add(capture)
+                if 'jobs' in tables:
+                    # This lookup uses jobs_capture_lookup; retrieve IDs only.
+                    for related in conn.execute("SELECT id FROM jobs WHERE json_extract(document,'$.capture_id')=?", (capture,)):
+                        advance()
+                        add('jobs', related['id'])
+                for table in ('bindings', 'scene_visits', 'binding_handoffs'):
+                    if table in tables:
+                        for related in conn.execute(f"SELECT id FROM {table} WHERE json_extract(document,'$.scan_id')=?", (capture,)):
+                            advance()
+                            add(table, related['id'])
+        if measurement:
+            add('photo_measurements', measurement)
+            event_keys.append('measurement:' + measurement)
+            if measurement not in measurements:
+                measurements.add(measurement)
+                if 'experiment_records' in tables:
+                    for related in conn.execute("SELECT id FROM experiment_records WHERE json_extract(document,'$.measurement_id')=?", (measurement,)):
+                        advance()
+                        add('experiment_records', related['id'])
+        alias = 'Records/' + ''.join(word.title() for word in entity.split('_')) + '/' + token(ident) + '/Record.json'
+        directories = {alias_target(aliases[alias]).rsplit('/', 1)[0]} if alias in aliases else set()
+        directories.update(paths.data['events'][event] for event in event_keys if event in paths.data['events'])
+        for directory in directories:
+            for related_entity, related_id in members.get(directory, ()):
+                add(related_entity, related_id)
+    rows = []
+    for number, (entity, ident) in enumerate(sorted(wanted), 1):
+        advance('loading_event_versions', number, len(wanted))
+        rows.extend(conn.execute('SELECT * FROM archive_outbox WHERE entity=? AND entity_id=? '
+                                 'AND archived_at IS NOT NULL ORDER BY seq', (entity, ident)).fetchall())
+    return rows
 
 
 def clock_for(doc, capture):
@@ -64,8 +188,12 @@ def prepare(rows, paths):
     captures = {i: r['doc'] for (e, i), r in latest.items() if e == 'scans'}
     jobs = {i: r for (e, i), r in latest.items() if e == 'jobs'}
     groups = {r['doc']['measurement_id']: r for (e, _), r in latest.items() if e == 'photo_measurements'}
+    measurement_keys = {}
     # A confirmed record supersedes its draft view; both immutable histories remain linked.
     for (entity, _), row in latest.items():
+        advance('preparing_measurement_groups')
+        if entity in {'photo_measurements', 'experiment_records'}:
+            measurement_keys.setdefault(row['doc']['measurement_id'], set()).add((entity, row['entity_id']))
         if entity == 'experiment_records':
             mid = row['doc']['measurement_id']
             current = groups.get(mid)
@@ -99,8 +227,7 @@ def prepare(rows, paths):
             if ('scans', sid) in latest:
                 keys.add(('scans', sid))
         if group:
-            keys.update(k for k, r in latest.items() if k[0] in {'photo_measurements', 'experiment_records'}
-                        and r['doc']['measurement_id'] == group['measurement_id'])
+            keys.update(measurement_keys.get(group['measurement_id'], ()))
         history = sorted((v for k in keys for v in versions.get(k, [])), key=lambda v: v['sequence'])
         bundles.append({'key': key, 'kind': kind, 'directory': directory, 'file': file,
             'camera_id': camera, 'event_at': timestamp if basis else None, 'time_basis': basis,
@@ -110,10 +237,12 @@ def prepare(rows, paths):
         used.update(source_ids)
 
     for (entity, ident), row in latest.items():
+        advance('preparing_binding_events')
         if entity in {'bindings', 'scene_visits', 'binding_handoffs'}:
             add(entity + ':' + ident, 'Bindings', [row], [row['doc'].get('scan_id')])
     grouped_jobs = set()
     for mid, row in groups.items():
+        advance('preparing_group_events')
         group = row['doc']
         member_ids = list(dict.fromkeys(group['job_ids'] + group.get('superseded_job_ids',[])))
         linked = [jobs[jid] for jid in member_ids if jid in jobs]
@@ -123,14 +252,17 @@ def prepare(rows, paths):
         add('measurement:' + mid, kind, [row] + linked, ids, linked, group)
     standalone = {}
     for jid, row in jobs.items():
+        advance('preparing_standalone_jobs')
         if jid not in grouped_jobs:
             standalone.setdefault(row['doc'].get('capture_id') or row['entity_id'], []).append(row)
     for cid, linked in standalone.items():
+        advance('preparing_capture_events')
         doc = linked[0]['doc']; source = captures.get(cid, {})
         kind = 'VideoReadings' if doc.get('request_trigger') == 'video_stream' else (
             'VoicePhotoReadings' if doc.get('external_photo') or source.get('external_photo') else 'PhotoReadings')
         add('capture:' + cid, kind, linked, [cid], linked)
     for cid, source in captures.items():
+        advance('preparing_source_events')
         if cid in used:
             continue
         kind = 'Bindings' if source.get('matches') or source.get('scene_matches') else (

@@ -24,7 +24,7 @@ ARCHIVE_DIRECTORY = 'FieldRecognitionArchive'
 TASK_STAGES = ('write_to_detect_ms', 'file_stability_ms', 'ingest_wait_ms', 'file_read_ms',
     'import_ms', 'queue_wait_ms', 'ocr_wait_ms', 'ocr_scheduler_wait_ms', 'ocr_execution_ms',
     'panel_detection_ms', 'ocr_ms', 'ocr_model_lock_wait_ms', 'ocr_model_prepare_ms',
-    'ocr_model_call_ms', 'vision_ms', 'processing_ms', 'result_generation_ms',
+    'ocr_model_call_ms', 'vision_queue_wait_ms', 'vision_ms', 'processing_ms', 'result_generation_ms',
     'result_finalize_ms', 'archive_publication_ms', 'archive_readability_ms',
     'write_to_result_ms', 'write_to_readable_result_ms')
 ARCHIVE_STAGES = ('archive_queue_wait_ms', 'receipt_publication_ms', 'archive_queue_ms',
@@ -132,13 +132,38 @@ def inject_group(root, camera_id, images, *, clock=time.monotonic, moment=None):
         'measurement_start': 'writer_client_completed_all_three_photo_writes'}
 
 
-def parse_visible(root, first_reads, *, clock=time.monotonic):
-    """Parse physical files only; HTTP Result aliases must not count as readings."""
+def parse_visible(root, first_reads, *, clock=time.monotonic, groups=None, reader_state=None):
+    """Read current physical bytes; optionally limit polling to active events.
+
+    System receipts are never business Evidence/Result files. A focused reader
+    retains only small event identity headers, so completed events can be pruned
+    during discovery. Active Evidence and Results are read afresh even when file
+    metadata is unchanged: cached bytes cannot prove a current manifest snapshot.
+    Omit groups to preserve the full business-file observation mode.
+    """
     evidence, results = [], {}
     base = archive_root(Path(root).resolve())
-    for path in sorted(base.glob('**/*.json')):
-        if path.name != 'Evidence.json' and not re.fullmatch(r'Result(?:\d+)?\.json', path.name):
+    focused = groups is not None
+    groups = list(groups) if focused else None
+    if focused and not groups:
+        return evidence, results
+    state = reader_state if reader_state is not None else {}
+    identities = state.setdefault('event_identities', {}) if focused else {}
+
+    def interested(directory):
+        header = identities.get(str(directory))
+        return header is None or any(group_match(group, header) for group in groups)
+
+    candidates = []
+    for directory, children, filenames in os.walk(base, followlinks=False):
+        directory = Path(directory)
+        children[:] = [name for name in children if name != '.System'
+                       and (not focused or interested(directory / name))]
+        if focused and not interested(directory):
             continue
+        candidates.extend(directory / name for name in filenames
+                          if name == 'Evidence.json' or re.fullmatch(r'Result(?:\d+)?\.json', name))
+    for path in sorted(candidates):
         try:
             path.resolve().relative_to(base.resolve())
             raw = path.read_bytes()
@@ -151,6 +176,21 @@ def parse_visible(root, first_reads, *, clock=time.monotonic):
         stamp = first_reads.setdefault((str(path), digest), clock())
         entry = (path, value, digest, stamp)
         if path.name == 'Evidence.json':
+            if focused:
+                decision = value.get('decision')
+                context = decision.get('context') if isinstance(decision, dict) else None
+                context = context if isinstance(context, dict) else {}
+                mapping = source_mapping(value)
+                # Do not freeze an early incomplete event with no tracking IDs.
+                # A later publication may supply its first source relationship.
+                # Standalone group_id can be an internal capture ID before its
+                # source receipt arrives; it cannot prove a foreign event yet.
+                if context.get('burst_id') or mapping:
+                    identities[str(path.parent)] = {'camera_id': value.get('camera_id'),
+                        'group_id': value.get('group_id'),
+                        'decision': {'context': {'burst_id': context.get('burst_id')}},
+                        'sources': [{'capture_id': local, 'external_photo': {'capture_id': source}}
+                                    for local, source in mapping.items()]}
             evidence.append(entry)
         else:
             results[path.relative_to(base).as_posix()] = entry

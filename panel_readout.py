@@ -61,7 +61,10 @@ def primary_unbound_photo(core, document, panel, *, valid, clock, pause, started
                     vision_display_rules=rules,
                     fallback={'status': 'waiting', 'trigger': 'primary_photo'})
     save(core, document)
-    if not acquire_primary_slot(core, valid, clock=clock, pause=pause):
+    slot_started = clock()
+    acquired = acquire_primary_slot(core, valid, clock=clock, pause=pause)
+    record_duration(document, 'vision_queue_wait_ms', slot_started, clock())
+    if not acquired:
         document['fallback'].update(status='failed', error='vision_slot_timeout')
         return False
     try:

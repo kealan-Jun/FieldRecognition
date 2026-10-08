@@ -83,8 +83,86 @@ def test_shutdown_is_incomplete_and_simultaneous_check_is_skipped(archive):
     app, client, root = archive
     scan(client); app.archive_store.step()
     checker = app.archive_store.integrity
-    with checker.lock:
+    with checker.run_lock:
         assert checker.run_once() is None
     checker.stop.set()
     report = checker.run_once()
     assert report['status'] == 'interrupted' and report['verified_receipts'] == 0
+
+
+def test_historical_hashing_does_not_block_new_event_publication(archive, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    app, client, root = archive
+    scan(client)
+    app.archive_store.step(100)
+    checker = app.archive_store.integrity
+    paused, resume = threading.Event(), threading.Event()
+    real_wait = checker.stop.wait
+
+    def pause_once(seconds):
+        if not paused.is_set():
+            paused.set()
+            assert resume.wait(5)
+        return real_wait(seconds)
+
+    monkeypatch.setattr(checker.stop, 'wait', pause_once)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(checker.run_once)
+        try:
+            assert paused.wait(3)
+            assert checker.lock.acquire(blocking=False)
+            checker.lock.release()
+            assert checker.run_once() is None
+            scan(client, camera='DuringIntegrity')
+            app.archive_store.step(100)
+            assert list(root.glob('*_DuringIntegrity/Bindings/*/Binding.json'))
+            assert checker.running
+        finally:
+            resume.set()
+        report = future.result(timeout=5)
+    assert report['status'] == 'completed' and report['issue_count'] == 0
+    assert report['expected_receipts'] == 1  # A frozen acknowledgement snapshot.
+
+
+@pytest.mark.parametrize('change', ['rename', 'rewrite'])
+def test_open_integrity_descriptor_survives_moves_and_detects_in_place_changes(archive, monkeypatch, change):
+    from concurrent.futures import ThreadPoolExecutor
+    import hashlib
+    import os
+    import threading
+    from archive_integrity import IntegrityError
+    app, _, root = archive
+    checker = app.archive_store.integrity
+    path = root / 'test-object.bin'
+    root.mkdir(parents=True, exist_ok=True)
+    raw = b'a' * (1024 * 1024 + 17)
+    path.write_bytes(raw)
+    paused, resume = threading.Event(), threading.Event()
+
+    def pause_once(_):
+        if not paused.is_set():
+            paused.set()
+            assert resume.wait(3)
+        return False
+
+    monkeypatch.setattr(checker.stop, 'wait', pause_once)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(checker.digest, lambda: path)
+        try:
+            assert paused.wait(3)
+            with checker.lock:
+                if change == 'rename':
+                    path.rename(root / 'moved-object.bin')
+                else:
+                    stamp = path.stat().st_mtime_ns
+                    path.write_bytes(b'b' * len(raw))
+                    os.utime(path, ns=(stamp + 1_000_000, stamp + 1_000_000))
+        finally:
+            resume.set()
+        if change == 'rewrite':
+            with pytest.raises(IntegrityError, match='changed_during_check'):
+                future.result(timeout=3)
+        else:
+            digest, size, _ = future.result(timeout=3)
+            assert digest == hashlib.sha256(raw).hexdigest() and size == len(raw)

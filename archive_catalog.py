@@ -6,11 +6,13 @@ import re
 from zoneinfo import ZoneInfo
 
 from readout_timing import elapsed_ms
+from archive_progress import advance
 
 
 def build_index(rows, instance, timestamp, integrity):
     items = []
     for row in rows:
+        advance('building_navigation')
         doc = json.loads(row['document'])
         occurred = next((doc.get(k) for k in ('finished_at', 'ended_at', 'started_at', 'submitted_at', 'received_at', 'registered_at')
                         if doc.get(k)), row['recorded_at'])
@@ -60,6 +62,13 @@ def build_index(rows, instance, timestamp, integrity):
 def render_index(index):
     static = Path(__file__).parent / 'static'
     # Inline data permits opening the NAS HTML directly without a running server or fetch/file CORS.
-    data = json.dumps(index, ensure_ascii=False, separators=(',', ':')).replace('&', '\\u0026').replace('<', '\\u003c')
+    chunks = []
+    encoder = json.JSONEncoder(ensure_ascii=False, separators=(',', ':'))
+    for number, chunk in enumerate(encoder.iterencode(index), 1):
+        chunks.append(chunk)
+        if number % 1024 == 0:
+            advance('rendering_navigation')
+    advance('rendering_navigation')
+    data = ''.join(chunks).replace('&', '\\u0026').replace('<', '\\u003c')
     return ((static / 'archive.html').read_text().replace('/*ARCHIVE_SCRIPT*/', (static / 'archive.js').read_text())
             .replace('/*ARCHIVE_DATA*/', data)).encode()
