@@ -174,3 +174,30 @@ def test_failed_timing_echo_retries_without_requiring_historical_navigation(arch
     assert event['archive']['readable_at'] == status['readable_at']
     with app.db() as conn:
         assert json.loads(conn.execute("SELECT value FROM archive_meta WHERE key='event_confirmation_pending'").fetchone()[0]) == []
+
+
+@pytest.mark.parametrize('interrupt_business', [False, True])
+def test_configuration_receipt_does_not_block_navigation_or_acknowledge_unpublished_events(
+        archive, monkeypatch, interrupt_business):
+    app, client, root = archive
+    capture = scan(client)
+    with app.db() as conn:
+        auxiliary = conn.execute('INSERT INTO archive_outbox(entity,entity_id,document,recorded_at) VALUES(?,?,?,?)',
+            ('automation_settings', 'TestCamera', json.dumps({'camera_id': 'TestCamera', 'status': 'paused'}), app.now())).lastrowid
+    if interrupt_business:
+        monkeypatch.setattr(app.archive_store, '_publish_ready_events', lambda: None)
+    app.archive_store.step(100)
+    with app.db() as conn:
+        row = conn.execute('SELECT * FROM archive_outbox WHERE seq=?', (auxiliary,)).fetchone()
+        business = receipt_status(conn, 'scans', capture['scan_id'])
+    assert row['archived_at'] and row['published_at']
+    if interrupt_business:
+        assert row['readable_at'] is None and business['readable_at'] is None
+        assert not (root / '.System/Index.json').exists()
+    else:
+        assert row['readable_at'] and business['readable_at']
+        assert row['readability_basis'] == 'archive_writer_derived_views_published'
+        index = json.loads((root / '.System/Index.json').read_text())
+        indexed = next(item for item in index['items'] if item['sequence'] == auxiliary)
+        assert indexed['archive_readable_at'] == row['readable_at']
+        assert not app.archive_store.snapshot()['navigation_pending']

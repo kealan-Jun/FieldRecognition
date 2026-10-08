@@ -17,6 +17,8 @@ from archive_progress import advance
 TABLES = {'scans': 'id', 'bindings': 'id', 'scene_visits': 'id', 'jobs': 'id', 'automation_settings': 'camera',
           'photo_measurements': 'id', 'experiment_records': 'id'}
 TABLES['binding_handoffs'] = 'id'
+EVENT_ENTITIES = ('scans', 'bindings', 'scene_visits', 'binding_handoffs', 'jobs',
+                  'photo_measurements', 'experiment_records')
 
 
 def publication_timing(row):
@@ -400,8 +402,10 @@ class ArchiveStore:
         with self.core['db']() as conn:
             confirmation = conn.execute("SELECT value FROM archive_meta WHERE key='event_confirmation_pending'").fetchone()
             confirmations = set(json.loads(confirmation[0])) if confirmation else set()
+            event_marks = ','.join('?' for _ in EVENT_ENTITIES)
             pending = conn.execute('SELECT * FROM archive_outbox WHERE published_at IS NOT NULL '
-                                   'AND readable_at IS NULL ORDER BY seq').fetchall()
+                                   f'AND readable_at IS NULL AND entity IN ({event_marks}) ORDER BY seq',
+                                   EVENT_ENTITIES).fetchall()
             if confirmations:
                 marks = ','.join('?' for _ in confirmations)
                 known = {row['seq'] for row in pending}
@@ -574,8 +578,10 @@ class ArchiveStore:
             if pending_receipts or published_sequences or (confirmation and json.loads(confirmation[0])):
                 self._publish_ready_events()
             with self.core['db']() as conn:
+                event_marks = ','.join('?' for _ in EVENT_ENTITIES)
                 remaining_views = conn.execute('SELECT 1 FROM archive_outbox WHERE published_at IS NOT NULL '
-                                               'AND readable_at IS NULL LIMIT 1').fetchone()
+                                               f'AND readable_at IS NULL AND entity IN ({event_marks}) LIMIT 1',
+                                               EVENT_ENTITIES).fetchone()
                 remaining_confirmation = conn.execute("SELECT value FROM archive_meta WHERE key='event_confirmation_pending'").fetchone()
                 pending_receipts = conn.execute('SELECT 1 FROM archive_outbox WHERE archived_at IS NULL LIMIT 1').fetchone()
             if not pending_receipts and not remaining_views and not (
@@ -587,7 +593,7 @@ class ArchiveStore:
             with self.core['db']() as conn:
                 updated = conn.execute(f"""UPDATE archive_outbox SET readable_at=?,readability_basis=?
                                  WHERE seq IN ({placeholders}) AND published_at IS NOT NULL
-                                   AND readable_at IS NULL""",
+                                   AND readable_at IS NULL AND entity='automation_settings'""",
                              (readable_at, 'archive_writer_derived_views_published', *published_sequences)).rowcount
                 # Force a second derived-view pass so Evidence.json and the
                 # index expose the readability confirmation just established.
