@@ -108,6 +108,9 @@ class ArchiveStore:
         self.stop = threading.Event()
         self.lock = threading.Lock()
         self.worker = None
+        # Three current-event selections share the writer with one oldest due
+        # historical version. Retain the quota across batch boundaries.
+        self.priority_selections = 0
         self.browse_digests = {}
         self.status = {'status': 'disabled', 'last_error': None, 'last_archived_at': None}
         base = Path(__file__).parent
@@ -139,6 +142,9 @@ class ArchiveStore:
             for name, declaration in [('publication_started_at', 'TEXT'), ('receipt_publication_ms', 'REAL')]:
                 if name not in columns:
                     conn.execute(f'ALTER TABLE archive_outbox ADD COLUMN {name} {declaration}')
+            # Legacy ledgers acquire retry_after above before its index exists.
+            conn.execute('CREATE INDEX IF NOT EXISTS archive_pending_due ON archive_outbox(retry_after,seq) '
+                         'WHERE archived_at IS NULL')
             conn.execute('INSERT OR IGNORE INTO archive_meta VALUES(?,?)', ('source_instance', str(uuid.uuid4())))
             self.instance = conn.execute("SELECT value FROM archive_meta WHERE key='source_instance'").fetchone()[0]
             for table, key in TABLES.items():
@@ -212,7 +218,7 @@ class ArchiveStore:
             raise FileNotFoundError('Archive directory unavailable')
         return root
 
-    def _artifact(self, root, relative, expected):
+    def _artifact(self, root, relative, expected, *, paths=None):
         if not re.fullmatch(r'[a-f0-9]{64}', expected or ''):
             raise ValueError('Missing artifact SHA-256')
         data_root = self.core['DATA'].resolve()
@@ -229,19 +235,25 @@ class ArchiveStore:
             raise ValueError('Artifact SHA-256 mismatch')
         destination = Path('Objects') / expected[:2] / (expected + source.suffix)
         from archive_paths import ArchivePaths
-        return ArchivePaths(root).asset(destination.as_posix(), raw)
+        if paths is None:
+            return ArchivePaths(root).asset(destination.as_posix(), raw)
+        return paths.asset(destination.as_posix(), raw, save=False)
 
-    def _capture_artifacts(self, root, capture):
+    def _capture_artifacts(self, root, capture, *, paths=None):
         ident = str(uuid.UUID(capture['capture_id']))
-        result = {'image': self._artifact(root, Path('Images') / (ident + '.png'), capture['image_sha256'])}
+        result = {'image': self._artifact(root, Path('Images') / (ident + '.png'), capture['image_sha256'], paths=paths)}
         if capture.get('original_blob'):
-            result['original'] = self._artifact(root, capture['original_blob'], capture['source_sha256'])
+            result['original'] = self._artifact(root, capture['original_blob'], capture['source_sha256'], paths=paths)
         else:
             result['original_status'] = 'not_retained_by_earlier_version'
         return result
 
     def publish(self, row):
+        from archive_paths import ArchivePaths
         root = self._root()
+        # Reuse this publication's ledger, never a previous publication's
+        # object bytes or validation. Every artifact still uses immutable_write.
+        paths = ArchivePaths(root)
         doc = json.loads(row['document'])
         artifacts = {}
         capture_id = doc.get('capture_id') if row['entity'] in {'scans', 'jobs'} else doc.get('scan_id')
@@ -254,22 +266,22 @@ class ArchiveStore:
                 if not capture_row:
                     raise ValueError('Source capture receipt missing')
                 capture = json.loads(capture_row[0])
-            artifacts = self._capture_artifacts(root, capture)
+            artifacts = self._capture_artifacts(root, capture, paths=paths)
         if doc.get('crop_image_sha256'):
             ident = str(uuid.UUID(doc['job_id']))
-            artifacts['panel'] = self._artifact(root, Path('Images') / (ident + '.png'), doc['crop_image_sha256'])
+            artifacts['panel'] = self._artifact(root, Path('Images') / (ident + '.png'), doc['crop_image_sha256'], paths=paths)
         for region in doc.get('panel_regions', []):
             if region.get('image_sha256'):
                 ident = str(uuid.UUID(region['evidence_id']))
-                artifacts['panel_' + ident] = self._artifact(root, Path('Images') / (ident + '.png'), region['image_sha256'])
+                artifacts['panel_' + ident] = self._artifact(root, Path('Images') / (ident + '.png'), region['image_sha256'], paths=paths)
         if row['entity'] in {'photo_measurements', 'experiment_records'}:
             for source in doc.get('sources', []):
-                for kind, artifact in self._capture_artifacts(root, source).items():
+                for kind, artifact in self._capture_artifacts(root, source, paths=paths).items():
                     artifacts[source['capture_id'] + '_' + kind] = artifact
                 for region in source.get('panel_regions', []):
                     if region.get('image_sha256'):
                         ident = str(uuid.UUID(region['evidence_id']))
-                        artifacts['panel_' + ident] = self._artifact(root, Path('Images') / (ident + '.png'), region['image_sha256'])
+                        artifacts['panel_' + ident] = self._artifact(root, Path('Images') / (ident + '.png'), region['image_sha256'], paths=paths)
         receipt = {'schema': 'field-recognition-receipt/1', 'source_instance': self.instance,
                    'sequence': row['seq'], 'entity': row['entity'], 'entity_id': row['entity_id'],
                    'recorded_at': row['recorded_at'], 'document': doc, 'artifacts': artifacts,
@@ -282,6 +294,7 @@ class ArchiveStore:
         timestamp = self.event_time(doc, row['recorded_at'])
         day = datetime.fromisoformat(timestamp).astimezone(ZoneInfo('Asia/Shanghai')).date().isoformat()
         relative = Path('.System/Receipts') / camera / day / self.instance / f'{row["seq"]:012d}-{digest}.json'
+        paths.save()  # The receipt must never acknowledge an unpersisted artifact location.
         immutable_write(root / relative, raw)
         return relative.as_posix()
 
@@ -289,6 +302,171 @@ class ArchiveStore:
     def event_time(doc, fallback):
         return next((doc.get(key) for key in ('finished_at', 'ended_at', 'started_at', 'submitted_at', 'received_at', 'registered_at')
                      if doc.get(key)), fallback)
+
+    def event_dependencies(self, conn, row):
+        """Latest immutable snapshots needed before publishing this event.
+
+        Old progress versions remain queued independently. IDs from the current
+        business tables discover siblings, but their documents never substitute
+        for the outbox snapshots being published.
+        """
+        tables = {item[0] for item in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        wanted, todo, captures, measurements = {}, [], set(), set()
+        complete = True
+
+        def add(entity, ident):
+            nonlocal complete
+            if not ident or (entity, ident) in wanted:
+                return
+            latest = conn.execute('SELECT * FROM archive_outbox WHERE entity=? AND entity_id=? '
+                                  'ORDER BY seq DESC LIMIT 1', (entity, ident)).fetchone()
+            if latest is None:
+                complete = False
+                return
+            wanted[(entity, ident)] = latest
+            todo.append(latest)
+
+        add(row['entity'], row['entity_id'])
+        while todo:
+            current = todo.pop()
+            doc = json.loads(current['document'])
+            entity = current['entity']
+            capture, measurement = None, None
+            if entity in {'bindings', 'scene_visits', 'binding_handoffs'}:
+                capture = doc.get('scan_id')
+            elif entity == 'scans':
+                capture = doc.get('capture_id') or current['entity_id']
+            elif entity == 'jobs':
+                capture, measurement = doc.get('capture_id'), doc.get('measurement_id')
+                for previous in (doc.get('recognition_root_job_id'), doc.get('supersedes_job_id')):
+                    add('jobs', previous)
+            elif entity in {'photo_measurements', 'experiment_records'}:
+                measurement = doc.get('measurement_id')
+                for job_id in doc.get('job_ids', []) + doc.get('superseded_job_ids', []):
+                    add('jobs', job_id)
+                for source in doc.get('sources', []):
+                    add('scans', source.get('capture_id'))
+            if capture and capture not in captures:
+                captures.add(capture)
+                add('scans', capture)
+                if 'jobs' in tables:
+                    for sibling in conn.execute("SELECT id FROM jobs WHERE json_extract(document,'$.capture_id')=?", (capture,)):
+                        add('jobs', sibling['id'])
+            if measurement and measurement not in measurements:
+                measurements.add(measurement)
+                add('photo_measurements', measurement)
+                if 'experiment_records' in tables:
+                    for record in conn.execute("SELECT id FROM experiment_records WHERE json_extract(document,'$.measurement_id')=?", (measurement,)):
+                        add('experiment_records', record['id'])
+        return list(wanted.values()) if complete else None
+
+    def _next_receipt(self, conn):
+        """Reselect after every row; newest results cannot wait behind a batch."""
+        due = time.time()
+        oldest = conn.execute('SELECT * FROM archive_outbox WHERE archived_at IS NULL AND retry_after<=? '
+                              'ORDER BY seq LIMIT 1', (due,)).fetchone()
+        if oldest is None:
+            return None, False
+        if self.priority_selections < 3:
+            from archive_events import processing_outcome
+            roots = conn.execute("""SELECT * FROM archive_outbox AS candidate
+                WHERE (archived_at IS NULL OR readable_at IS NULL) AND retry_after<=?
+                  AND entity IN ('jobs','photo_measurements','experiment_records')
+                  AND json_extract(document,'$.status') IN ('completed','failed','cancelled','interrupted','confirmed')
+                  AND NOT EXISTS (SELECT 1 FROM archive_outbox AS newer
+                    WHERE newer.entity=candidate.entity AND newer.entity_id=candidate.entity_id AND newer.seq>candidate.seq)
+                ORDER BY seq""", (due,)).fetchall()
+            for root in roots:
+                if root['entity'] == 'jobs' and not processing_outcome(json.loads(root['document']))['terminal']:
+                    continue
+                dependencies = self.event_dependencies(conn, root)
+                if dependencies is None:
+                    continue
+                waiting = [item for item in dependencies if item['archived_at'] is None]
+                # Respect failed dependencies' backoff; another event or the
+                # oldest historical receipt can continue making progress.
+                if not waiting or any(item['retry_after'] > due for item in waiting):
+                    continue
+                order = {'scans': 0, 'jobs': 1, 'photo_measurements': 2, 'experiment_records': 3}
+                selected = min(waiting, key=lambda item: (order.get(item['entity'], 4), item['seq']))
+                self.priority_selections += 1
+                return selected, True
+        self.priority_selections = 0
+        return oldest, False
+
+    def _publish_ready_events(self):
+        """Independent event failures never stop receipt or other event delivery."""
+        from archive_migration import publish_events
+        with self.core['db']() as conn:
+            confirmation = conn.execute("SELECT value FROM archive_meta WHERE key='event_confirmation_pending'").fetchone()
+            confirmations = set(json.loads(confirmation[0])) if confirmation else set()
+            pending = conn.execute('SELECT * FROM archive_outbox WHERE published_at IS NOT NULL '
+                                   'AND readable_at IS NULL ORDER BY seq').fetchall()
+            if confirmations:
+                marks = ','.join('?' for _ in confirmations)
+                known = {row['seq'] for row in pending}
+                pending += [row for row in conn.execute(f'SELECT * FROM archive_outbox WHERE seq IN ({marks}) '
+                                                        'AND published_at IS NOT NULL', tuple(confirmations))
+                            if row['seq'] not in known]
+            groups, checked_entities = [], {}
+            for row in pending:
+                key = (row['entity'], row['entity_id'])
+                if key not in checked_entities:
+                    dependencies = self.event_dependencies(conn, row)
+                    checked_entities[key] = ({(item['entity'], item['entity_id']) for item in dependencies}
+                        if dependencies is not None and all(item['archived_at'] is not None for item in dependencies)
+                        else None)
+                keys = checked_entities[key]
+                if keys is None:
+                    continue
+                # Sibling/retry/group dependencies may overlap without having
+                # identical roots. Merge their connected closures as one unit.
+                merged = {'keys': set(keys), 'sequences': {row['seq']}}
+                while True:
+                    overlap = next((group for group in groups if group['keys'] & merged['keys']), None)
+                    if overlap is None:
+                        break
+                    merged['keys'].update(overlap['keys'])
+                    merged['sequences'].update(overlap['sequences'])
+                    groups.remove(overlap)
+                groups.append(merged)
+            retries = dict(conn.execute("SELECT key,value FROM archive_meta WHERE key GLOB 'view_retry:*'"))
+        for group in sorted(groups, key=lambda value: min(value['sequences'])):
+            if self.stop.is_set():
+                return
+            key = 'view_retry:' + hashlib.sha256(canonical(sorted(group['keys']))).hexdigest()
+            previous = json.loads(retries[key]) if key in retries else {}
+            if previous.get('retry_after', 0) > time.time():
+                continue
+            if not self.integrity.lock.acquire(timeout=5):
+                with self.lock:
+                    self.status.update(status='waiting_integrity')
+                return
+            try:
+                with self.lock:
+                    self.status.update(status='indexing')
+                try:
+                    publish_events(self, sequences=group['sequences'])
+                except Exception as exc:
+                    attempts = previous.get('attempts', 0) + 1
+                    failure = {'error': type(exc).__name__, 'attempts': attempts,
+                        'retry_after': time.time() + min(900, 15 * 2 ** min(attempts - 1, 6)),
+                        'recorded_at': self.core['now'](), 'sequences': sorted(group['sequences'])}
+                    with self.core['db']() as conn:
+                        conn.execute('INSERT OR REPLACE INTO archive_meta VALUES(?,?)', (key, json.dumps(failure)))
+                    with self.lock:
+                        self.status.update(status='retrying', last_error=type(exc).__name__)
+                else:
+                    with self.core['db']() as conn:
+                        conn.execute('DELETE FROM archive_meta WHERE key=?', (key,))
+                        # Membership can grow between attempts; successful
+                        # delivery also clears older obligations for these seeds.
+                        for old_key, raw in retries.items():
+                            sequences = set(json.loads(raw).get('sequences', []))
+                            if sequences and sequences <= group['sequences']:
+                                conn.execute('DELETE FROM archive_meta WHERE key=?', (old_key,))
+            finally:
+                self.integrity.lock.release()
 
     def write_index(self):
         from archive_migration import publish_events, rebuild
@@ -334,13 +512,19 @@ class ArchiveStore:
         if not self.enabled():
             return
         with self.core['db']() as conn:
-            rows = conn.execute('SELECT * FROM archive_outbox WHERE archived_at IS NULL AND retry_after<=? ORDER BY seq LIMIT ?',
-                                (time.time(), batch_size)).fetchall()
-        if not rows:
-            self._root()  # Report a disconnected target even when the queue is empty.
-        for row in rows:
+            waiting_view = conn.execute('SELECT 1 FROM archive_outbox WHERE published_at IS NOT NULL '
+                                        'AND readable_at IS NULL LIMIT 1').fetchone()
+            confirmation = conn.execute("SELECT value FROM archive_meta WHERE key='event_confirmation_pending'").fetchone()
+        if waiting_view or (confirmation and json.loads(confirmation[0])):
+            self._publish_ready_events()
+        for _ in range(batch_size):
             if self.stop.is_set():
                 return
+            with self.core['db']() as conn:
+                row, priority = self._next_receipt(conn)
+            if row is None:
+                self._root()  # Report a disconnected target even when the queue is empty.
+                break
             try:
                 publication_started_at = self.core['now']()
                 publication_started = time.monotonic()
@@ -366,6 +550,8 @@ class ArchiveStore:
                     'group_id': (doc.get('measurement_context') or {}).get('burst_id') or doc.get('measurement_id'),
                     'duration_ms': publication_ms,
                     'clock_basis': 'process_monotonic', 'scope': 'receipt_and_artifacts'}
+            if priority:
+                self._publish_ready_events()
         self.integrity.publish_pending()
         with self.core['db']() as conn:
             # Include publications whose view pass was interrupted in an earlier
@@ -377,6 +563,7 @@ class ArchiveStore:
             version = conn.execute("SELECT value FROM archive_meta WHERE key='index_version'").fetchone()
             audit = conn.execute("SELECT value FROM archive_meta WHERE key='index_integrity'").fetchone()
             confirmation = conn.execute("SELECT value FROM archive_meta WHERE key='event_confirmation_pending'").fetchone()
+            pending_receipts = conn.execute('SELECT 1 FROM archive_outbox WHERE archived_at IS NULL LIMIT 1').fetchone()
         root = self._root()
         index_ready = False
         if (published_sequences or (confirmation and json.loads(confirmation[0]))
@@ -384,7 +571,16 @@ class ArchiveStore:
                 or not audit or audit[0] != (self.integrity.snapshot()['report_path'] or '')
                 or not (root / 'Readme.html').is_file() or not (root / '.System/Audit.html').is_file() or not (root / '.System/Index.json').is_file()
                 or not (root / '.System/MigrationMap.json').is_file()):
-            index_ready = self.write_index() is not None
+            if pending_receipts or published_sequences or (confirmation and json.loads(confirmation[0])):
+                self._publish_ready_events()
+            with self.core['db']() as conn:
+                remaining_views = conn.execute('SELECT 1 FROM archive_outbox WHERE published_at IS NOT NULL '
+                                               'AND readable_at IS NULL LIMIT 1').fetchone()
+                remaining_confirmation = conn.execute("SELECT value FROM archive_meta WHERE key='event_confirmation_pending'").fetchone()
+                pending_receipts = conn.execute('SELECT 1 FROM archive_outbox WHERE archived_at IS NULL LIMIT 1').fetchone()
+            if not pending_receipts and not remaining_views and not (
+                    remaining_confirmation and json.loads(remaining_confirmation[0])):
+                index_ready = self.write_index() is not None
         if index_ready and published_sequences:
             readable_at = self.core['now']()
             placeholders = ','.join('?' for _ in published_sequences)
@@ -401,8 +597,11 @@ class ArchiveStore:
                 self.write_index()
         with self.core['db']() as conn:
             failed = conn.execute('SELECT last_error FROM archive_outbox WHERE archived_at IS NULL AND last_error IS NOT NULL LIMIT 1').fetchone()
+            view_retries = [json.loads(row[0]) for row in conn.execute("SELECT value FROM archive_meta WHERE key GLOB 'view_retry:*'")]
         with self.lock:
-            self.status.update(status='retrying' if failed else 'ready', last_error=failed[0] if failed else None)
+            error = failed[0] if failed else view_retries[0]['error'] if view_retries else None
+            self.status.update(status='retrying' if error else 'ready', last_error=error,
+                               pending_event_view_retries=len(view_retries))
 
     def start(self):
         if self.enabled():

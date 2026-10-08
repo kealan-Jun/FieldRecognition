@@ -244,6 +244,7 @@ def test_readability_retries_after_interrupted_views_without_fabricating_legacy_
         conn.execute('UPDATE archive_outbox SET published_at=NULL,readable_at=NULL,readability_basis=NULL')
     fresh = scan(client)
     with monkeypatch.context() as patch:
+        patch.setattr(app.archive_store, '_publish_ready_events', lambda: None)
         patch.setattr(app.archive_store, 'write_index', lambda: None)
         app.archive_store.step(batch_size=100)
     with app.db() as conn:

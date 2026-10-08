@@ -152,11 +152,17 @@ def test_failed_timing_echo_retries_without_requiring_historical_navigation(arch
         return real(paths, views, **kwargs)
     with monkeypatch.context() as patch:
         patch.setattr(ArchivePaths, 'retire_views', fail_echo)
-        with pytest.raises(OSError):
-            app.archive_store.step(100)
+        app.archive_store.step(100)
+        state = app.archive_store.snapshot()
+        assert state['status'] == 'retrying'
+        assert state['pending_event_view_retries'] == 1
     with app.db() as conn:
         status = receipt_status(conn, 'scans', capture['scan_id'])
         pending = json.loads(conn.execute("SELECT value FROM archive_meta WHERE key='event_confirmation_pending'").fetchone()[0])
+        for retry in conn.execute("SELECT key,value FROM archive_meta WHERE key GLOB 'view_retry:*'").fetchall():
+            doc = json.loads(retry['value'])
+            doc['retry_after'] = 0  # Deterministically advance the isolated retry.
+            conn.execute('UPDATE archive_meta SET value=? WHERE key=?', (json.dumps(doc), retry['key']))
     assert status['readable_at'] and status['sequence'] in pending
     def fail_rebuild(*args):
         raise OSError('historical navigation still unavailable')

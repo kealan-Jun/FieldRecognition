@@ -20,16 +20,16 @@ def validate_name(relative):
         raise ValueError('Invalid archive path')
 
 
-def checked(root, relative):
+def checked(root, relative, *, resolved_root=None):
     validate_name(relative)
     path = (root / relative).resolve()
-    path.relative_to(root.resolve())
+    path.relative_to(root.resolve() if resolved_root is None else resolved_root)
     advance()
     return path
 
 
-def load(root):
-    path = checked(root, LEDGER)
+def load(root, *, resolved_root=None):
+    path = checked(root, LEDGER, resolved_root=resolved_root)
     if not path.exists():
         return {'schema': 'field-recognition-paths/1', 'aliases': {}, 'assets': {}, 'events': {}, 'views': {}}
     value = json.loads(path.read_text())
@@ -38,94 +38,130 @@ def load(root):
     return value
 
 
-def resolve_name(root, relative, aliases=None):
-    aliases = load(root)['aliases'] if aliases is None else aliases
+def resolve_entry(root, relative, aliases=None, *, resolved_root=None):
+    """Resolve once per operation; never cache existence or alias results."""
+    aliases = load(root, resolved_root=resolved_root)['aliases'] if aliases is None else aliases
     seen = set()
     while True:
-        path = checked(root, relative)
+        path = checked(root, relative, resolved_root=resolved_root)
+        present = path.is_file()
         # During an interrupted move the old file is still authoritative.
-        if path.is_file() or relative not in aliases:
-            return relative
+        if present or relative not in aliases:
+            return relative, path, present
         if relative in seen:
             raise ValueError('Archive alias cycle')
         seen.add(relative)
         relative = aliases[relative]
 
 
+def resolve_name(root, relative, aliases=None):
+    return resolve_entry(root, relative, aliases)[0]
+
+
 def resolve_file(root, relative):
-    return checked(root, resolve_name(root, relative))
+    return resolve_entry(root, relative)[1]
 
 
 class ArchivePaths:
     def __init__(self, root):
-        self.root = root
-        self.data = load(root)
-        self.saved = json.dumps(self.data, sort_keys=True)
+        from archive_store import canonical
+        # The root is stable for this single-writer operation. Every child path
+        # still undergoes a real resolve before filesystem access.
+        self.root = Path(root).resolve()
+        self.data = load(self.root, resolved_root=self.root)
+        self.saved = canonical(self.data)
 
-    def save(self):
-        from archive_store import canonical, replace_view
-        snapshot = json.dumps(self.data, sort_keys=True)
-        if snapshot == self.saved and checked(self.root, LEDGER).is_file():
-            return
-        replace_view(checked(self.root, LEDGER), canonical(self.data))
-        self.saved = snapshot
+    def _checked(self, relative):
+        return checked(self.root, relative, resolved_root=self.root)
 
-    def alias(self, source, target):
-        checked(self.root, source); checked(self.root, target)
+    def _resolve(self, relative):
+        return resolve_entry(self.root, relative, self.data['aliases'], resolved_root=self.root)
+
+    def _set_alias(self, source, target):
+        validate_name(source); validate_name(target)
         if source != target:
             self.data['aliases'][source] = target
 
+    def save(self):
+        from archive_store import canonical, replace_view
+        snapshot = canonical(self.data)
+        path = self._checked(LEDGER)
+        if snapshot == self.saved and path.is_file():
+            return
+        replace_view(path, snapshot)
+        self.saved = snapshot
+
+    def alias(self, source, target):
+        self._checked(source); self._checked(target)
+        self._set_alias(source, target)
+
     def name(self, relative):
-        return resolve_name(self.root, relative, self.data['aliases'])
+        return self._resolve(relative)[0]
 
     def move(self, source, target):
-        source_path, target_path = checked(self.root, source), checked(self.root, target)
+        source_path, target_path = self._checked(source), self._checked(target)
+        self._move(source, target, source_path, target_path)
+
+    def _move(self, source, target, source_path, target_path):
         if source == target:
             return
         if source_path.is_file() and target_path.exists():
             if source_path.read_bytes() != target_path.read_bytes():
                 raise ValueError('Archive migration destination conflict')
-        self.alias(source, target)
+        self._set_alias(source, target)
         self.save()  # Must precede rename or removal of a duplicate.
         if source_path.is_file():
             target_path.parent.mkdir(parents=True, exist_ok=True)
             if target_path.exists():
+                # The target may have appeared since the pre-journal check.
+                # An external conflicting file must never make us delete source.
+                if source_path.read_bytes() != target_path.read_bytes():
+                    raise ValueError('Archive migration destination conflict')
                 source_path.unlink()
             else:
                 source_path.rename(target_path)
 
-    def asset(self, logical, raw):
-        """Stage new bytes once; a completed bundle supplies their final location."""
+    def asset(self, logical, raw, *, save=True):
+        """Stage bytes; row writers may save once before publishing their receipt.
+
+        Deferral changes only the in-memory ledger. Every object is still written
+        immutably, and path moves continue to commit their own rename journal.
+        """
         from archive_store import immutable_write
         digest = hashlib.sha256(raw).hexdigest()
         stored = self.data['assets'].get(digest)
-        relative = self.name(stored['path'] if stored else logical)
-        if not checked(self.root, relative).is_file():
+        relative, path, present = self._resolve(stored['path'] if stored else logical)
+        if not present:
             relative = '.System/PendingAssets/' + digest + Path(logical).suffix
-        immutable_write(checked(self.root, relative), raw)
+            path = self._checked(relative)
+        immutable_write(path, raw)
         result = {'path': relative, 'sha256': digest, 'size_bytes': len(raw)}
         self.data['assets'][digest] = result
-        self.alias(logical, relative)
-        self.save()
+        if logical != relative:
+            self._checked(logical)
+        self._set_alias(logical, relative)
+        if save:
+            self.save()
         return result
 
     def place(self, artifact, target):
         """Move a hash-addressed image into its event; aliases preserve all receipts."""
         digest = artifact['sha256']
         stored = self.data['assets'].get(digest, artifact)
-        source = self.name(stored['path'])
-        path = checked(self.root, source)
-        if source == target and self.data['assets'].get(digest) == (artifact | {'path': target}):
-            if path.stat().st_size != artifact['size_bytes']:
-                raise ValueError('Archive evidence size changed')
-            self.alias(artifact['path'], target)
-            return self.data['assets'][digest]
-        # Metadata is not evidence of a successful copy.
+        source, path, _ = self._resolve(stored['path'])
+        target_path = path if source == target else self._checked(target)
+        # Always validate actual bytes, including an unchanged physical place.
+        # Size/mtime and the ledger cannot establish an immutable object digest.
         raw = path.read_bytes()
         if hashlib.sha256(raw).hexdigest() != digest or len(raw) != artifact['size_bytes']:
             raise ValueError('Cannot migrate corrupt archive evidence')
-        self.move(source, target)
-        self.alias(artifact['path'], target)
+        if artifact['path'] not in (source, target):
+            self._checked(artifact['path'])
+        if source == target and self.data['assets'].get(digest) == (artifact | {'path': target}):
+            self._set_alias(artifact['path'], target)
+            return self.data['assets'][digest]
+        self._move(source, target, path, target_path)
+        self._set_alias(artifact['path'], target)
         self.data['assets'][digest] = artifact | {'path': target}
         self.save()
         return self.data['assets'][digest]
@@ -143,7 +179,7 @@ class ArchivePaths:
             number = len(slots) + 1
             name = 'Result.json' if number == 1 else f'Result{number:02d}.json'
             slots[instrument] = directory + '/' + name
-        checked(self.root, slots[instrument])
+        self._checked(slots[instrument])
         return slots[instrument]
 
     def retire_views(self, views, *, partial=False):
@@ -153,14 +189,14 @@ class ArchivePaths:
         for relative, digest in previous.items():
             if partial or relative in views:
                 continue
-            path = checked(self.root, relative)
+            path = self._checked(relative)
             if path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == digest:
                 path.unlink()
         # Result files precede Evidence manifests. This is a publication order,
         # not an atomic multi-file transaction; readers must verify manifest hashes.
         ordered = sorted(views.items(), key=lambda item: PurePosixPath(item[0]).name == 'Evidence.json')
         for relative, raw in ordered:
-            path = checked(self.root, relative)
+            path = self._checked(relative)
             if previous.get(relative) == hashlib.sha256(raw).hexdigest() and path.is_file():
                 continue
             if not path.is_file() or path.read_bytes() != raw:

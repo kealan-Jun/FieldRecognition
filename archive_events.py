@@ -395,7 +395,7 @@ def photo_readme(content, *, jobs=(), measurement_files=(), records=(), aggregat
     return page('未绑定照片读数候选 · 待核实' if unbound else '照片逐张读数与合并结果', body)
 
 
-def make_views(bundles, paths, receipts, *, preserve_asset_locations=False):
+def make_views(bundles, paths, receipts, *, preserve_asset_locations=False, placed_assets=None):
     views, days = {}, {}
     owners = {}
     # Choose one physical location per hash, even if QR and readout share a photograph.
@@ -416,7 +416,10 @@ def make_views(bundles, paths, receipts, *, preserve_asset_locations=False):
             stored = paths.data['assets'].get(digest, {}).get('path', '')
             if preserve_asset_locations and stored and not stored.startswith(('.System/PendingAssets/', 'Objects/')):
                 owners[digest] = stored
-    placed = {}
+    # The timing confirmation repeats this derivation while the same writer
+    # still holds the migration gate. Reuse only assets placed in that pass;
+    # a later publication must validate/place its own dependencies again.
+    placed = {} if placed_assets is None else placed_assets
     for bundle in bundles:
         for digest, (_, item) in bundle['artifacts'].items():
             if digest not in placed:
@@ -482,6 +485,8 @@ def make_views(bundles, paths, receipts, *, preserve_asset_locations=False):
                               'readability_basis': latest_member['readability_basis']}
         from archive_store import publication_timing
         content['archive'].update(publication_timing(latest_member))
+        if 'archive_history' in bundle:
+            content['archive']['history'] = bundle['archive_history']
         if bundle['kind'] == 'Bindings':
             content['binding'] = doc
         else:
