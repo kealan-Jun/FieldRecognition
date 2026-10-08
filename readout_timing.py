@@ -50,7 +50,8 @@ def update_timing(document, *, preserve_recorded_durations=False):
     video = document.get('video_observation') or {}
     if video.get('observed_at'):
         timing['frame_observed_at'] = video['observed_at']
-    for key in ('ocr_started_at', 'ocr_finished_at'):
+    for key in ('ocr_started_at', 'ocr_finished_at', 'ocr_scheduled_at',
+                'ocr_execution_started_at', 'ocr_execution_finished_at'):
         if local.get(key):
             timing[key] = local[key]
     fallback = document.get('fallback') or {}
@@ -68,6 +69,8 @@ def update_timing(document, *, preserve_recorded_durations=False):
         'queue_wait_ms': ('queued_at', 'run_started_at'),
         'ocr_wait_ms': ('run_started_at', 'ocr_started_at'),
         'ocr_ms': ('ocr_started_at', 'ocr_finished_at'),
+        'ocr_scheduler_wait_ms': ('ocr_scheduled_at', 'ocr_execution_started_at'),
+        'ocr_execution_ms': ('ocr_execution_started_at', 'ocr_execution_finished_at'),
         'processing_ms': ('run_started_at', 'result_finished_at'),
         'result_generation_ms': ('result_generation_started_at', 'result_generated_at'),
         'result_finalize_ms': ('result_generated_at', 'result_finished_at'),
@@ -86,6 +89,11 @@ def update_timing(document, *, preserve_recorded_durations=False):
     timing['duration_clock_basis'] = {name: 'wall_clock_timestamp_difference'
                                     for name, value in timing['durations_ms'].items() if value is not None}
     measured = dict(timing.get('monotonic_durations_ms') or {})
+    for name in ('ocr_scheduler_wait_ms', 'ocr_execution_ms', 'ocr_model_lock_wait_ms',
+                 'ocr_model_prepare_ms', 'ocr_model_call_ms'):
+        timing['durations_ms'].setdefault(name, recorded.get(name))
+        if local.get(name) is not None:
+            measured[name] = local[name]
     if detection.get('duration_ms') is not None:
         measured['panel_detection_ms'] = detection['duration_ms']
     if fallback.get('duration_ms') is not None and fallback.get('clock_basis') == 'process_monotonic':
@@ -100,6 +108,22 @@ def update_timing(document, *, preserve_recorded_durations=False):
             timing['durations_ms'][name] = round(value, 2)
             timing['duration_clock_basis'][name] = 'process_monotonic'
     timing['ocr_scope'] = 'localized_region_processing_including_preprocessing_and_model_wait' if local.get('panel_detection') else 'model_call_including_lock_and_model_wait'
+    timing['duration_scopes'] = {
+        'ocr_wait_ms': 'run_start_to_reported_ocr_start_including_scheduler_and_detection',
+        'ocr_scheduler_wait_ms': 'single_worker_executor_submission_to_execution_start',
+        'ocr_execution_ms': 'predict_readout_including_detection_preprocessing_and_model_wait',
+        'ocr_model_lock_wait_ms': 'sum_of_model_adapter_lock_waits',
+        'ocr_model_prepare_ms': 'sum_of_model_preparation_including_load_or_remote_health_checks',
+        'ocr_model_call_ms': 'sum_of_model_adapter_calls_excluding_local_lock_and_preparation',
+    }
+    timing['ocr_stage_relationship'] = 'execution_includes_detection_and_model_stages; overlapping_stages_must_not_be_added'
+    if local.get('ocr_model_call_count') is not None:
+        timing['ocr_model_call_count'] = local['ocr_model_call_count']
+    scopes = local.get('ocr_model_call_scopes')
+    if scopes is None and local.get('ocr_model_call_scope'):
+        scopes = [local['ocr_model_call_scope']]
+    if scopes is not None:
+        timing['ocr_model_call_scopes'] = scopes
     timing['source_clock_basis'] = {
         'nas_file_mtime': 'NAS file mtime; clocks not independently synchronized',
         'agent_receipt': 'Agent-declared write time; clock not independently verified',

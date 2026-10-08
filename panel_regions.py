@@ -42,6 +42,15 @@ def predict(core, image, x=0, y=0, *, video=False, allowed_instrument_ids=()):
     diagnostics['binding_matched_count'] = len(detection['boxes']) - len(detection['skipped_unbound_panels'])
     detection['duration_ms'] = round((time.monotonic() - begin) * 1000, 3)
     ocr_started = time.monotonic()
+    model_calls = []
+
+    def predict_panel(*args, **kwargs):
+        # Refinement can invoke OCR several times. Collect each adapter call once,
+        # rather than adding nested panel_ocr/digit_ocr copies of the same receipt.
+        result = core['predict_panel'](*args, **kwargs)
+        model_calls.append(result)
+        return result
+
     roles = roles_for_boxes(detection['boxes'])
     regions, lines, ordinals = [], [], {}
     for box in detection['boxes']:
@@ -55,14 +64,14 @@ def predict(core, image, x=0, y=0, *, video=False, allowed_instrument_ids=()):
         cx,cy = max(0,x1-pad),max(0,y1-pad)
         ex,ey = min(image.shape[1],x2+pad),min(image.shape[0],y2+pad)
         panel = image[cy:ey,cx:ex].copy()
-        local = core['predict_panel'](panel, x+cx, y+cy)
+        local = predict_panel(panel, x+cx, y+cy)
         if box['class_id'] == 1 and not video:
             from lcd_digits import refine_lcd
             instrument = core.get('get_instrument',lambda _:{})(box['instrument_id']) or {}
-            local = refine_lcd(core['predict_panel'], panel, local, x+cx, y+cy,
+            local = refine_lcd(predict_panel, panel, local, x+cx, y+cy,
                                source_image=image, source_offset=(x,y), instrument=instrument)
         else:
-            local = refine_digits(core['predict_panel'], panel, local, x+cx, y+cy,
+            local = refine_digits(predict_panel, panel, local, x+cx, y+cy,
                                   source_image=image,source_offset=(x,y))
         if box['class_id'] == 0:
             from led_digits import verify_digits
@@ -93,6 +102,13 @@ def predict(core, image, x=0, y=0, *, video=False, allowed_instrument_ids=()):
         'ocr_started_at':regions[0]['local_ocr'].get('ocr_started_at', detection['finished_at']) if regions else detection['finished_at'],
         'ocr_finished_at':core['now'](), 'ocr_elapsed_ms':ocr_elapsed_ms,
         'wall_seconds':round(time.monotonic()-begin,3), 'panel_selection':'detected_display_regions'}
+    result['ocr_model_call_count'] = (sum(call['ocr_model_call_count'] for call in model_calls)
+        if all(call.get('ocr_model_call_count') is not None for call in model_calls) else None)
+    for name in ('ocr_model_lock_wait_ms', 'ocr_model_prepare_ms', 'ocr_model_call_ms'):
+        values = [call.get(name) for call in model_calls]
+        result[name] = round(sum(values), 3) if all(value is not None for value in values) else None
+    result['ocr_model_call_scopes'] = sorted({call['ocr_model_call_scope'] for call in model_calls
+                                              if call.get('ocr_model_call_scope')})
     if not regions:
         result.update(panel_selection='no_bound_panel', recognition_skipped=True,
             skip_reason='no_active_instrument_binding' if not allowed else 'no_visible_bound_panel')

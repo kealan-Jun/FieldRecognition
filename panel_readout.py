@@ -175,10 +175,20 @@ def run(core, document, *, clock=time.monotonic, pause=time.sleep):
         else:
             predictor = partial(core['predict_readout'], binding_snapshots=document.get('all_binding_snapshots', document.get('binding_snapshots', [])),
                                 field_rules=document.get('field_rules')) if 'predict_readout' in core else core['predict_panel']
+            scheduled = clock()
+            scheduled_at = core['now']()
             def predict_request(pixels, offset_x, offset_y):
                 from remote_ocr import inference_request
+                execution_started = clock()
+                execution_started_at = core['now']()
                 with inference_request(document['job_id']):
-                    return predictor(pixels, offset_x, offset_y)
+                    result = dict(predictor(pixels, offset_x, offset_y))
+                result.update(ocr_scheduled_at=scheduled_at,
+                    ocr_execution_started_at=execution_started_at, ocr_execution_finished_at=core['now'](),
+                    ocr_scheduler_wait_ms=round((execution_started-scheduled)*1000, 3),
+                    ocr_execution_ms=round((clock()-execution_started)*1000, 3),
+                    ocr_execution_scope='predict_readout_including_detection_preprocessing_and_model_wait')
+                return result
             future = core['ocr_pool'].submit(predict_request, panel, x, y)
         video_elapsed = (document.get('video_observation') or {}).get('no_digits_elapsed_seconds', 0)
         deadline = started + (max(0, vision.no_digits_seconds() - video_elapsed) if configured else 90)

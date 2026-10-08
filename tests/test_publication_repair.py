@@ -164,7 +164,7 @@ def make_group(tmp_path):
 
 def test_latency_separates_result_evidence_first_parse_and_group_task_denominators(tmp_path):
     root, group = make_group(tmp_path)
-    path = root / 'archive' / 'Day' / 'Event'
+    path = root / 'FieldRecognitionArchive' / 'Day' / 'Event'
     path.mkdir(parents=True)
     raw = b'{"values":[{"value":63}]}'
     result_name = 'Day/Event/Result.json'
@@ -172,7 +172,8 @@ def test_latency_separates_result_evidence_first_parse_and_group_task_denominato
     reads = {}
     parse_visible(root, reads, clock=lambda: 6)
     evidence = {'group_id': group['group_id'], 'processing_terminal': True, 'processing_outcome': 'succeeded',
-        'task_outcomes': [{'task_id': f'task-{i}', 'outcome': 'succeeded'} for i in range(3)],
+        'task_outcomes': [{'task_id': f'task-{i}', 'capture_id': group['source_capture_ids'][i],
+                           'terminal': True, 'outcome': 'succeeded'} for i in range(3)],
         'measurement_files': [{'result': result_name, 'sha256': hashlib.sha256(raw).hexdigest()}]}
     (path / 'Evidence.json').write_text(json.dumps(evidence))
     observe(group, parse_visible(root, reads, clock=lambda: 8), clock=lambda: 9)
@@ -190,9 +191,11 @@ def test_latency_separates_result_evidence_first_parse_and_group_task_denominato
 
 def test_partial_or_mismatched_result_does_not_finish_waiting(tmp_path):
     root, group = make_group(tmp_path)
-    path = root / 'archive' / 'Day' / 'Event'; path.mkdir(parents=True)
+    path = root / 'FieldRecognitionArchive' / 'Day' / 'Event'; path.mkdir(parents=True)
     (path / 'Result.json').write_bytes(b'{"values":')
     evidence = {'group_id': group['group_id'], 'processing_terminal': True, 'processing_outcome': 'succeeded',
+        'task_outcomes': [{'task_id': f'task-{i}', 'capture_id': group['source_capture_ids'][i],
+                           'terminal': True, 'outcome': 'succeeded'} for i in range(3)],
         'measurement_files': [{'result': 'Day/Event/Result.json', 'sha256': '0' * 64}]}
     (path / 'Evidence.json').write_text(json.dumps(evidence))
     observe(group, parse_visible(root, {}, clock=lambda: 8), clock=lambda: 9)
@@ -201,6 +204,8 @@ def test_partial_or_mismatched_result_does_not_finish_waiting(tmp_path):
     observe(group, parse_visible(root, {}, clock=lambda: 8), clock=lambda: 9)
     assert group['outcome'] == 'pending'  # Valid JSON from another generation is insufficient.
     evidence.update(processing_outcome='skipped', measurement_files=[])
+    for task in evidence['task_outcomes']:
+        task['outcome'] = 'skipped'
     (path / 'Evidence.json').write_text(json.dumps(evidence))
     observe(group, parse_visible(root, {}, clock=lambda: 8), clock=lambda: 9)
     assert group['outcome'] == 'skipped' and group['result_status'] == 'absent_terminal'

@@ -779,11 +779,31 @@ def predict_panel(panel, x=0, y=0):
     started = time.monotonic()
     ocr_started_at = now()
     invoked = False
+    lock_acquired = prepared = call_started = call_finished = None
+    model_call_scope = None
+
+    def stages():
+        return {
+            'ocr_model_lock_wait_ms': round((lock_acquired-started)*1000, 3) if lock_acquired is not None else None,
+            'ocr_model_prepare_ms': round((prepared-lock_acquired)*1000, 3) if prepared is not None else None,
+            'ocr_model_call_ms': round((call_finished-call_started)*1000, 3) if call_finished is not None else None,
+            'ocr_model_call_count': int(call_started is not None),
+            'ocr_model_call_scope': model_call_scope,
+        }
+
     try:
         with ocr_lock:
+            lock_acquired = time.monotonic()
             model = load_ocr()
             invoked = not hasattr(model, 'last_receipt')
-            output = list(model.predict(panel))
+            prepared = time.monotonic()
+            model_call_scope = ('adapter_call_including_remote_queue_and_transport' if hasattr(model, 'last_receipt')
+                                else 'local_model_predict_iteration')
+            call_started = time.monotonic()
+            try:
+                output = list(model.predict(panel))
+            finally:
+                call_finished = time.monotonic()
             receipt = getattr(model, 'last_receipt', None)
             invoked = bool(receipt['execution']['actual_model_invocation']) if receipt else invoked
             lines = []
@@ -797,6 +817,7 @@ def predict_panel(panel, x=0, y=0):
         return {'status': 'completed', 'lines': lines, 'model': ocr_state['engine'],
                 'ocr_started_at': ocr_started_at, 'ocr_finished_at': now(),
                 'actual_model_invocation': True, 'device': OCR_DEVICE,
+                **stages(),
                 **({'remote_inference': receipt} if receipt else {}),
                 'wall_seconds': round(time.monotonic() - started, 3)}
     except Exception as exc:
@@ -808,6 +829,7 @@ def predict_panel(panel, x=0, y=0):
         return {'status': 'failed', 'lines': [], 'error': type(exc).__name__,
                 'ocr_started_at': ocr_started_at, 'ocr_finished_at': now(),
                 'model': ocr_state['engine'], 'device': OCR_DEVICE, 'actual_model_invocation': invoked,
+                **stages(),
                 'wall_seconds': round(time.monotonic() - started, 3)}
 
 

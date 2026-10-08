@@ -43,7 +43,7 @@ def latest_rows(rows):
     for row in sorted(rows, key=lambda r: r['seq']):
         key = (row['entity'], row['entity_id'])
         current = dict(row)
-        for field in ('published_at', 'readable_at', 'readability_basis'):
+        for field in ('published_at', 'readable_at', 'readability_basis', 'publication_started_at', 'receipt_publication_ms'):
             current.setdefault(field, None)
         latest[key] = current | {'doc': json.loads(row['document'])}
         versions.setdefault(key, []).append({'sequence': row['seq'], 'receipt': row['receipt_path'],
@@ -314,7 +314,9 @@ def make_views(bundles, paths, receipts, *, preserve_asset_locations=False):
         for job in bundle['jobs']:
             row = job
             job = copy.deepcopy(row['doc'])
-            job['archive'] = {'published_at': row['published_at'], 'readable_at': row['readable_at']}
+            from archive_store import publication_timing
+            job['archive'] = {'queued_at': row['recorded_at'], 'published_at': row['published_at'],
+                              'readable_at': row['readable_at'], 'readability_basis': row['readability_basis']} | publication_timing(row)
             if job.get('submitted_at'):
                 from readout_timing import update_timing
                 update_timing(job, preserve_recorded_durations=True)
@@ -322,7 +324,7 @@ def make_views(bundles, paths, receipts, *, preserve_asset_locations=False):
                 'operator','wearer_id','operator_basis','attribution_status','attribution_reason',
                 'binding_snapshot_version','binding_effective_at','binding_time_basis',
                 'allowed_instrument_ids','allowed_instrument_ids_basis',
-                'local_ocr', 'fallback', 'panel_regions', 'recognition_versions', 'panel_detection', 'timing',
+                'local_ocr', 'fallback', 'panel_regions', 'recognition_versions', 'panel_detection', 'timing', 'archive',
                 'instrument', 'all_binding_snapshots', 'binding_snapshots', 'workbench', 'workbenches', 'ownership_conflicts',
                 'frame_metadata', 'video_observation', 'model', 'device', 'submitted_at', 'finished_at', 'request_trigger',
                 'field_rules','recognition_root_job_id','recognition_revision','supersedes_job_id','reprocessing','display_fields',
@@ -346,6 +348,8 @@ def make_views(bundles, paths, receipts, *, preserve_asset_locations=False):
                               'published_at': latest_member['published_at'],
                               'readable_at': latest_member['readable_at'],
                               'readability_basis': latest_member['readability_basis']}
+        from archive_store import publication_timing
+        content['archive'].update(publication_timing(latest_member))
         if bundle['kind'] == 'Bindings':
             content['binding'] = doc
         else:

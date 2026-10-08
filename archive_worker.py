@@ -28,15 +28,17 @@ class ArchiveWorker:
             self.archive_store.integrity.start()
             try:
                 while not self.stop.is_set():
+                    delay=3
                     try:
                         with observe(lambda progress: heartbeat(self.db,'archive',self.archive_store.snapshot() | progress)):
                             self._process_batch()
                         status=self.archive_store.snapshot()
+                        delay=self.archive_store.next_poll_seconds()
                     except Exception as exc:
                         status={'status':'retrying','last_error':type(exc).__name__}
                     heartbeat(self.db,'archive',status)
                     if not persistent:break
-                    self.stop.wait(3)
+                    self.stop.wait(delay)
             finally:
                 self.archive_store.close()
                 heartbeat(self.db,'archive',{'status':'stopped'})

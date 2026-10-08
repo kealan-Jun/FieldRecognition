@@ -57,3 +57,30 @@ def test_clock_basis_does_not_claim_cross_machine_visibility_is_monotonic():
     timing = update_timing(doc)
     assert timing['duration_clock_basis']['write_to_readable_result_ms'] == 'wall_clock_timestamp_difference'
     assert 'not independently synchronized' in timing['source_clock_basis']
+
+
+def test_ocr_scheduler_and_nested_model_stages_keep_independent_monotonic_measurements():
+    doc = {'submitted_at': '2026-09-18T01:00:00+00:00', 'local_ocr': {
+        'ocr_scheduler_wait_ms': 2000, 'ocr_execution_ms': 850,
+        'ocr_model_lock_wait_ms': 100, 'ocr_model_prepare_ms': 50, 'ocr_model_call_ms': 500,
+        'ocr_model_call_count': 3,
+        'ocr_model_call_scopes': ['adapter_call_including_remote_queue_and_transport']}}
+    timing = update_timing(doc)
+    assert timing['durations_ms']['ocr_scheduler_wait_ms'] == 2000
+    assert timing['durations_ms']['ocr_execution_ms'] == 850
+    assert timing['durations_ms']['ocr_model_call_ms'] == 500
+    assert timing['duration_clock_basis']['ocr_scheduler_wait_ms'] == 'process_monotonic'
+    assert timing['ocr_model_call_count'] == 3
+    assert timing['ocr_model_call_scopes'] == ['adapter_call_including_remote_queue_and_transport']
+    assert 'must_not_be_added' in timing['ocr_stage_relationship']
+
+
+def test_historical_ocr_does_not_invent_new_stage_measurements():
+    doc = {'submitted_at': '2026-09-18T01:00:00+00:00',
+           'local_ocr': {'wall_seconds': .1, 'status': 'completed'}}
+    timing = update_timing(doc)
+    assert timing['durations_ms']['ocr_ms'] == 100
+    for name in ('ocr_scheduler_wait_ms', 'ocr_execution_ms', 'ocr_model_lock_wait_ms',
+                 'ocr_model_prepare_ms', 'ocr_model_call_ms'):
+        assert timing['durations_ms'][name] is None
+    assert 'ocr_model_call_count' not in timing

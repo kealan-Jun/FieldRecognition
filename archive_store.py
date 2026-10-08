@@ -19,6 +19,20 @@ TABLES = {'scans': 'id', 'bindings': 'id', 'scene_visits': 'id', 'jobs': 'id', '
 TABLES['binding_handoffs'] = 'id'
 
 
+def publication_timing(row):
+    """Per-version measurements; old receipts cannot supply missing stages."""
+    keys = row.keys()
+    started = row['publication_started_at'] if 'publication_started_at' in keys else None
+    duration = row['receipt_publication_ms'] if 'receipt_publication_ms' in keys else None
+    wait = elapsed_ms(row['recorded_at'], started)
+    return {'publication_started_at': started, 'archive_queue_wait_ms': wait,
+            'receipt_publication_ms': duration,
+            'duration_clock_basis': {
+                **({'archive_queue_wait_ms': 'wall_clock_timestamp_difference'} if wait is not None else {}),
+                **({'receipt_publication_ms': 'process_monotonic'} if duration is not None else {})},
+            'receipt_publication_scope': 'source_artifact_validation_and_immutable_receipt_publication'}
+
+
 def receipt_status(conn, entity, entity_id, source_written_at=None):
     row = conn.execute('SELECT * FROM archive_outbox WHERE entity=? AND entity_id=? ORDER BY seq DESC LIMIT 1',
                        (entity, entity_id)).fetchone()
@@ -40,7 +54,7 @@ def receipt_status(conn, entity, entity_id, source_written_at=None):
             'archive_queue_ms': elapsed_ms(row['recorded_at'], queue_end),
             'write_to_archive_ms': elapsed_ms(source_written_at, queue_end),
             'archive_publication_ms': elapsed_ms(row['recorded_at'], published_at),
-            'archive_readability_ms': elapsed_ms(published_at, readable_at)}
+            'archive_readability_ms': elapsed_ms(published_at, readable_at)} | publication_timing(row)
 
 
 def canonical(value):
@@ -107,9 +121,13 @@ class ArchiveStore:
                     seq INTEGER PRIMARY KEY AUTOINCREMENT, entity TEXT NOT NULL, entity_id TEXT NOT NULL,
                     document TEXT NOT NULL, recorded_at TEXT NOT NULL, archived_at TEXT, receipt_path TEXT,
                     published_at TEXT, readable_at TEXT, readability_basis TEXT,
+                    publication_started_at TEXT, receipt_publication_ms REAL,
                     retry_after REAL NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT);
                 CREATE INDEX IF NOT EXISTS archive_entity_version ON archive_outbox(entity,entity_id,seq);
             ''')
+            # Several managed roles initialize this ledger together. Serialize
+            # column inspection and extension so they cannot add the same column.
+            conn.execute('BEGIN IMMEDIATE')
             columns = {row[1] for row in conn.execute('PRAGMA table_info(archive_outbox)')}
             for name, declaration in [('retry_after', 'REAL NOT NULL DEFAULT 0'),
                                       ('attempts', 'INTEGER NOT NULL DEFAULT 0'), ('last_error', 'TEXT')]:
@@ -118,6 +136,9 @@ class ArchiveStore:
             for name in ('published_at', 'readable_at', 'readability_basis'):
                 if name not in columns:
                     conn.execute(f'ALTER TABLE archive_outbox ADD COLUMN {name} TEXT')
+            for name, declaration in [('publication_started_at', 'TEXT'), ('receipt_publication_ms', 'REAL')]:
+                if name not in columns:
+                    conn.execute(f'ALTER TABLE archive_outbox ADD COLUMN {name} {declaration}')
             conn.execute('INSERT OR IGNORE INTO archive_meta VALUES(?,?)', ('source_instance', str(uuid.uuid4())))
             self.instance = conn.execute("SELECT value FROM archive_meta WHERE key='source_instance'").fetchone()[0]
             for table, key in TABLES.items():
@@ -298,6 +319,7 @@ class ArchiveStore:
                     raise NewReceipts()
 
             try:
+                yield_to_receipts()
                 with checkpoint(yield_to_receipts):
                     result = rebuild(self, rows)
             except NewReceipts:
@@ -321,8 +343,10 @@ class ArchiveStore:
             if self.stop.is_set():
                 return
             try:
+                publication_started_at = self.core['now']()
                 publication_started = time.monotonic()
                 relative = self.publish(row)
+                publication_ms = round((time.monotonic()-publication_started)*1000, 2)
             except Exception as exc:
                 with self.core['db']() as conn:
                     conn.execute('UPDATE archive_outbox SET attempts=attempts+1,last_error=?,retry_after=? WHERE seq=?',
@@ -332,15 +356,16 @@ class ArchiveStore:
                 continue
             timestamp = self.core['now']()
             with self.core['db']() as conn:
-                conn.execute('UPDATE archive_outbox SET archived_at=?,published_at=?,receipt_path=?,last_error=NULL WHERE seq=?',
-                             (timestamp, timestamp, relative, row['seq']))
+                conn.execute('UPDATE archive_outbox SET archived_at=?,published_at=?,receipt_path=?,last_error=NULL,'
+                             'publication_started_at=?,receipt_publication_ms=? WHERE seq=?',
+                             (timestamp, timestamp, relative, publication_started_at, publication_ms, row['seq']))
             with self.lock:
                 self.status.update(last_archived_at=timestamp)
                 doc = json.loads(row['document'])
                 self.status['last_receipt_publication'] = {'sequence': row['seq'],
                     'entity': row['entity'], 'entity_id': row['entity_id'], 'task_id': doc.get('job_id'),
                     'group_id': (doc.get('measurement_context') or {}).get('burst_id') or doc.get('measurement_id'),
-                    'duration_ms': round((time.monotonic()-publication_started)*1000, 2),
+                    'duration_ms': publication_ms,
                     'clock_basis': 'process_monotonic', 'scope': 'receipt_and_artifacts'}
         self.integrity.publish_pending()
         with self.core['db']() as conn:
@@ -352,9 +377,11 @@ class ArchiveStore:
             indexed = conn.execute("SELECT value FROM archive_meta WHERE key='index_count'").fetchone()
             version = conn.execute("SELECT value FROM archive_meta WHERE key='index_version'").fetchone()
             audit = conn.execute("SELECT value FROM archive_meta WHERE key='index_integrity'").fetchone()
+            confirmation = conn.execute("SELECT value FROM archive_meta WHERE key='event_confirmation_pending'").fetchone()
         root = self._root()
         index_ready = False
-        if (published_sequences or not indexed or int(indexed[0]) != archived or not version or version[0] != self.index_version
+        if (published_sequences or (confirmation and json.loads(confirmation[0]))
+                or not indexed or int(indexed[0]) != archived or not version or version[0] != self.index_version
                 or not audit or audit[0] != (self.integrity.snapshot()['report_path'] or '')
                 or not (root / 'Readme.html').is_file() or not (root / '.System/Audit.html').is_file() or not (root / '.System/Index.json').is_file()
                 or not (root / '.System/MigrationMap.json').is_file()):
@@ -384,14 +411,26 @@ class ArchiveStore:
             self.worker.start()
             self.integrity.start()
 
+    def next_poll_seconds(self):
+        # Drain due batches immediately. Deferred failures retain their backoff;
+        # an unavailable target never causes a busy retry loop.
+        if not self.enabled():
+            return 3
+        with self.core['db']() as conn:
+            due = conn.execute('SELECT 1 FROM archive_outbox WHERE archived_at IS NULL AND retry_after<=? LIMIT 1',
+                               (time.time(),)).fetchone()
+        return 0 if due else 0.5
+
     def _run(self):
         while not self.stop.is_set():
+            delay = 3
             try:
                 self.step()
+                delay = self.next_poll_seconds()
             except Exception as exc:
                 with self.lock:
                     self.status.update(status='retrying', last_error=type(exc).__name__)
-            self.stop.wait(3)
+            self.stop.wait(delay)
 
     def close(self):
         self.integrity.close()

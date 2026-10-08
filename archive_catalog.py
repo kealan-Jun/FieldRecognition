@@ -49,6 +49,8 @@ def build_index(rows, instance, timestamp, integrity):
             'archive_queue_ms': elapsed_ms(row['recorded_at'], published_at or row['archived_at']),
             'write_to_archive_ms': elapsed_ms((doc.get('timing') or {}).get('source_written_at'), published_at or row['archived_at']),
             'archive_readability_ms': elapsed_ms(published_at, readable_at)})
+        from archive_store import publication_timing
+        items[-1].update(publication_timing(row))
     return {'schema': 'field-recognition-index/2', 'timezone': 'Asia/Shanghai', 'source_instance': instance,
             'updated_at': timestamp, 'archived_receipts': len(items), 'listed_receipts': len(items),
             'unique_records': len({(i['entity'], i['entity_id']) for i in items}), 'scope': 'all_acknowledged_versions',

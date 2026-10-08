@@ -2,6 +2,7 @@
 import hashlib
 import json
 from pathlib import Path
+import time
 
 from archive_events import make_views, prepare
 from archive_paths import ArchivePaths, checked, empty_directories
@@ -11,8 +12,13 @@ from archive_progress import advance
 def publish_events(archive, rows):
     """Deliver changed business files before scanning historical NAS content."""
     pending = {row['seq'] for row in rows if row['published_at'] and not row['readable_at']}
+    with archive.core['db']() as conn:
+        confirmation = conn.execute("SELECT value FROM archive_meta WHERE key='event_confirmation_pending'").fetchone()
+    confirmations = set(json.loads(confirmation[0])) if confirmation else set()
+    pending |= confirmations
     if not pending:
         return
+    started = time.monotonic()
     root = archive._root()
     paths = ArchivePaths(root)
     bundles, _ = prepare(rows, paths)
@@ -44,6 +50,29 @@ def publish_events(archive, rows):
         with archive.core['db']() as conn:
             conn.executemany("UPDATE archive_outbox SET readable_at=?,readability_basis=? WHERE seq=? AND readable_at IS NULL",
                              [(timestamp, 'archive_writer_event_files_published', seq) for seq in delivered])
+            # Confirmation and the durable echo obligation are committed together.
+            # If the NAS fails during echo, retry the partial event publication
+            # without depending on a successful historical navigation rebuild.
+            conn.execute("INSERT OR REPLACE INTO archive_meta VALUES('event_confirmation_pending',?)",
+                         (json.dumps(sorted(confirmations | delivered)),))
+        # Echo the confirmation into the same event files before slow historical
+        # navigation work. An interrupted rebuild must not leave readable_at
+        # hidden from the Evidence that was already published successfully.
+        with archive.core['db']() as conn:
+            refreshed = conn.execute('SELECT * FROM archive_outbox WHERE archived_at IS NOT NULL ORDER BY seq DESC').fetchall()
+        keys = {b['key'] for b in selected}
+        bundles, _ = prepare(refreshed, paths)
+        selected = [b for b in bundles if b['key'] in keys]
+        views = make_views(selected, paths, receipts, preserve_asset_locations=True)
+        paths.retire_views({name: raw for name, raw in views.items()
+                            if name != 'Readme.html' and '/DailyReport/' not in name}, partial=True)
+        with archive.core['db']() as conn:
+            conn.execute("INSERT OR REPLACE INTO archive_meta VALUES('event_confirmation_pending',?)",
+                         (json.dumps(sorted(confirmations - delivered)),))
+    with archive.lock:
+        archive.status['last_event_publication'] = {'duration_ms': round((time.monotonic()-started)*1000, 2),
+            'clock_basis': 'process_monotonic', 'scope': 'changed_event_files_and_timing_confirmation',
+            'events': len(selected), 'receipts': len(delivered)}
     advance('business_files_published', len(selected), len(selected))
 
 

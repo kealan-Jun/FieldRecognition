@@ -27,7 +27,7 @@
    .venv/bin/python scripts/measure_publication_latency.py init --root tmp/latency-site-check
    ```
 
-2. 按 `docs/ProductionRuntime.md` 的服务配置机制启动独立测试实例，使用独立数据根/数据库、独立端口、`FIELD_RECORD_MODE=test`、独立相机标识，照片根和归档根分别指向上述根中的 `voice_photos`、`archive`；清除生产 Receiver/相机快照地址，不复用生产 DB 或服务。目录自动发现必须启用 `FIELD_PHOTO_RECEIPT_REQUIRED=1`。在这个实例中登记测试人员与仪器，再用实际解码的二维码建立绑定；先核对任务的绑定快照与 `allowed_instrument_ids`。如果是在 NAS 上复测，初始化位置必须是授权的独立测试目录，原始现场目录只作只读来源。
+2. 按 `docs/ProductionRuntime.md` 的服务配置机制启动独立测试实例，使用独立数据根/数据库、独立端口、`FIELD_RECORD_MODE=test`、独立相机标识，照片根和归档根分别指向上述根中的 `voice_photos`、`FieldRecognitionArchive`（归档目录末级名称必须如此，不能直接使用 `archive`）；清除生产 Receiver/相机快照地址，不复用生产 DB 或服务。目录自动发现必须启用 `FIELD_PHOTO_RECEIPT_REQUIRED=1`。在这个实例中登记测试人员与仪器，再用实际解码的二维码建立绑定；先核对任务的绑定快照与 `allowed_instrument_ids`。如果是在 NAS 上复测，初始化位置必须是授权的独立测试目录，原始现场目录只作只读来源。
 
 3. 在写入和观察的同一客户端进程中运行，例如（替换三个真实可读路径和独立测试相机 ID）：
 
@@ -43,6 +43,8 @@
 4. 检查每组 `t0`：三张副本全部写完并完成本客户端 fsync/rename 后记录；分别核对 `evidence_first_parse_ms`、`result_first_parse_ms`、`evidence_terminal_parse_ms`、`manifest_verified_ms`。Result 的首次解析可早于 Evidence，脚本预先观测 Result 并在得到清单后核对归属和哈希。多仪器各 Result 另有逐文件首次解析时间；`result_first_parse_ms` 指首个结果文件，`manifest_verified_ms` 才代表终态清单全部一致可读。未识别的 Result HTTP 别名不计作物理读数文件。
 
 5. 分别核对 `group_count`、`expected_task_count`、`observed_task_count` 与组/任务成功、跳过、失败、超时数量。每个统计字段都有实际样本数；例如十组中一组合法跳过，Evidence 可能 n=10，Result 可能 n=9，不能把分母都写成三十个任务。脚本不输出缺乏样本支撑的分位数，不把十组均值当长期稳定性。
+
+2026-10-08 报告版本为 `field-publication-latency/2`，增加 `result_all_parse_ms`、`terminal_snapshot_readable_ms`、逐任务/组的阶段统计与时钟分层。整组三图须有三张源照片对应的独立终态任务；仅首张 Evidence 不算整组完成。首次终态后额外最多观察 5 秒归档确认回显（可用 `--metadata-timeout` 修改），保存同 generation 的新阶段数据；首次可读指标保持原值，元数据未回显独立标记缺测。新版本代码仍待按不停服约束部署，见 [三连拍时延修复](PublicationLatency20261008.md)。
 
 脚本的延迟用同进程单调时钟，UTC 仅为日志标签，因此不混用 NAS 服务端 mtime。fsync/rename 完成仅表示客户端调用完成；网络文件系统可见性、缓存、服务处理、轮询间隔都进入这条端到端观测，不等于存储服务器的物理落盘时刻。换到另一台机器观察时必须另行记录时钟同步条件，不能直接相减两个 monotonic 值。
 
