@@ -11,6 +11,26 @@ from field_recognition.measurements.reading_results import build_readings
 from tests.support.demo import app_client, scan, register  # noqa: F401
 
 
+def test_pixel_quality_causes_survive_reading_and_record_without_rejecting_a_correction():
+    doc = document()
+    line = doc["lines"][0]
+    line.update(
+        quality_issue="low_native_resolution",
+        quality_issues=["low_native_resolution", "possible_missing_digit"],
+    )
+    doc["readings"] = build_readings(doc)
+    reading = doc["readings"][0]
+    assert {"low_native_resolution", "possible_missing_digit"} <= set(reading["quality_issues"])
+    assert reading["normalized_value"]["value"] is None
+    records = build_records(doc)
+    assert records[0]["record"]["values"][0]["value"] is None
+    # Supplementary diagnostics alone cannot keep an explicitly corrected
+    # reading invalid after its primary issue has been cleared.
+    line.update(quality_issue=None, corrected=True)
+    doc["readings"] = build_readings(doc)
+    assert doc["readings"][0]["normalized_value"]["value"] == 179
+
+
 def test_explicit_fixed_decimal_rule_keeps_raw_digits_and_normalization_evidence():
     from field_recognition.recognition.panel_regions import validate_lines, reading_fallback_reason
     from field_recognition.measurements.measurement_records import apply_fixed_decimal

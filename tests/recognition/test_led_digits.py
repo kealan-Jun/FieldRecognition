@@ -4,7 +4,13 @@ import cv2
 import numpy as np
 import pytest
 
-from field_recognition.recognition.led_digits import PATTERNS, segment_check, verify_digits
+from field_recognition.measurements.measurement_records import measurement_value
+from field_recognition.recognition.led_digits import (
+    PATTERNS,
+    native_diagnostics,
+    segment_check,
+    verify_digits,
+)
 
 
 def display(text):
@@ -94,3 +100,99 @@ def test_plain_background_cannot_correct_ocr_and_offset_coordinates_are_supporte
         np.asarray(raw["digit_region"]["polygon"]) + [300, 400]
     ).tolist()
     assert verify_digits(image, raw, 300, 400)["lines"][0]["text"] == "72"
+
+
+def test_b_eight_correction_requires_complete_pixel_patterns_and_ocr_support():
+    image = display("78")
+    raw = local("1B", image)
+    before = copy.deepcopy(raw)
+    result = verify_digits(image, raw)
+    assert result["lines"][0]["text"] == "78"
+    assert result["lines"][0]["original_ocr_text"] == "1B"
+    assert result["lines"][0]["confidence"] is None
+    assert raw == before
+    assert not verify_digits(display("79"), local("1B", display("79")))["lines"]
+
+
+@pytest.mark.parametrize("text", ["BB", "8H", "8b", "8B rpm", "8.B", "+8B", "OFF"])
+def test_letters_units_and_noninteger_states_are_not_numeric_confusion_candidates(text):
+    image = display("88")
+    raw = local(text, image)
+    assert verify_digits(image, raw) is raw
+
+
+@pytest.mark.parametrize("text", ["358", "405", "581"])
+def test_visible_extra_low_resolution_group_marks_candidate_without_inventing_digit(text):
+    image = cv2.resize(display(text), None, fx=0.3, fy=0.3)
+    raw = local(text[1:], image)
+    raw["panel_ocr"] = {"lines": copy.deepcopy(raw["lines"])}
+    raw["digit_region"]["size"] = [image.shape[1] * 4, image.shape[0] * 4]
+    before = copy.deepcopy(raw)
+    result = verify_digits(image, raw)
+    line = result["lines"][0]
+    assert line["text"] == text[1:]
+    assert line["confidence"] is None
+    assert line["quality_issue"] == "low_native_resolution"
+    assert "possible_missing_digit" in line["quality_issues"]
+    assert result["pre_segment_lines"] == before["lines"]
+    assert result["panel_ocr"] == before["panel_ocr"] and raw == before
+    diagnosis = result["digit_segment_check"]["native_diagnostics"]
+    assert diagnosis["basis"] == "original_panel_pixels"
+    assert diagnosis["group_count"] == len(text)
+    assert diagnosis["glyph_height_range"][1] < 20
+    assert result["digit_consistency"]["status"] == "quality_issue"
+    # The existing consumer keeps candidate text while withholding a formal value.
+    normalized, _ = measurement_value(
+        "speed", {"value": line["text"], "quality_issue": line["quality_issue"]}, {}
+    )
+    assert normalized["value"] is None
+
+
+@pytest.mark.parametrize("text", ["87", "72", "358"])
+def test_low_resolution_alone_keeps_ocr_but_cannot_support_enlarged_pixel_repair(text):
+    image = cv2.resize(display(text), None, fx=0.3, fy=0.3)
+    raw = local(text, image)
+    raw["digit_region"]["size"] = [image.shape[1] * 4, image.shape[0] * 4]
+    result = verify_digits(image, raw)
+    assert result["lines"] == raw["lines"]
+    assert "digit_consistency" not in result
+    assert result["digit_segment_check"]["status"] == "inconclusive"
+    assert result["digit_segment_check"]["reason"] == "insufficient_native_resolution"
+    assert result["digit_segment_check"]["native_diagnostics"]["below_resolution_gate"]
+
+
+def test_low_resolution_geometry_is_not_a_colorless_or_flat_red_background_rejection():
+    for color in (128, (10, 15, 190)):
+        image = np.full((22, 38, 3), color, np.uint8)
+        raw = local("56", image)
+        assert native_diagnostics(image)["status"] == "inconclusive"
+        assert verify_digits(image, raw)["lines"] == raw["lines"]
+
+
+def test_visible_baseline_dot_blocks_integer_repair_without_inserting_decimal():
+    image = display("78")
+    cv2.rectangle(image, (48, 56), (51, 59), (235, 245, 255), -1)
+    raw = local("18", image)
+    result = verify_digits(image, raw)
+    assert result["lines"][0]["text"] == "18"
+    assert result["lines"][0]["quality_issue"] == "possible_decimal_point"
+    assert result["digit_segment_check"]["native_diagnostics"]["possible_decimal_point"]
+    assert "." not in result["lines"][0]["text"]
+
+
+@pytest.mark.parametrize("background", [190, 220])
+@pytest.mark.parametrize("scale", [0.25, 0.3])
+def test_inconclusive_native_color_diagnostics_cannot_bypass_original_stroke_height(
+    background, scale
+):
+    image = display("72")
+    image[(image == (15, 20, 125)).all(axis=2)] = (15, 20, background)
+    image = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
+    raw = local("12", image)
+    raw["digit_region"]["size"] = [image.shape[1] * 4, image.shape[0] * 4]
+    before = copy.deepcopy(raw)
+    result = verify_digits(image, raw)
+    assert result["lines"] == raw["lines"]
+    assert result.get("digit_consistency", {}).get("status") != "resolved"
+    assert result["digit_segment_check"]["status"] == "inconclusive"
+    assert raw == before

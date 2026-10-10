@@ -24,7 +24,361 @@ def extract_digits(image, region):
     return crop, transform
 
 
+def red_display_geometry(image, x=0, y=0):
+    """Locate a red character row using source pixels, without reading its value."""
+    if image.ndim != 3 or min(image.shape[:2]) < 8:
+        return None
+    blue, green, red = cv2.split(image.astype(np.int16))
+    red_mask = ((red - np.maximum(blue, green) > 18) & (red > 60)).astype(np.uint8)
+    connected = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    contours, _ = cv2.findContours(connected, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours = [c for c in contours if cv2.contourArea(c) >= 12]
+    if not contours:
+        return None
+    contours.sort(key=cv2.contourArea, reverse=True)
+    if len(contours) > 1 and cv2.contourArea(contours[1]) > cv2.contourArea(contours[0]) * 0.6:
+        return None  # More than one comparable row inside this authorized panel.
+    window = np.zeros(red_mask.shape, np.uint8)
+    cv2.drawContours(window, [contours[0]], -1, 1, cv2.FILLED)
+    channel = np.maximum(blue, green).astype(np.uint8)
+    values = channel[window.astype(bool)]
+    threshold, _ = cv2.threshold(values, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    if np.percentile(values, 95) - threshold < 15:
+        return None
+    foreground = ((channel > threshold) & window.astype(bool)).astype(np.uint8)
+    points = cv2.findNonZero(foreground)
+    if points is None or len(points) < 16:
+        return None
+    _, glyph_size, _ = cv2.minAreaRect(points)
+    if min(glyph_size) < 7:
+        return None
+    # Include the measured red window around the luminous row; a bright
+    # threshold alone could clip a faint leading digit from the source crop.
+    center, (width, height), angle = cv2.minAreaRect(contours[0])
+    if height > width:
+        width, height, angle = height, width, angle + 90
+    angle = (angle + 90) % 180 - 90
+    if abs(angle) > 45 or height < 7 or width < height * 1.1:
+        return None
+    radians = math.radians(angle)
+    along = np.array([math.cos(radians), math.sin(radians)])
+    down = np.array([-along[1], along[0]])
+    center = np.asarray(center)
+    # A source-pixel margin includes complete bars, including faint OFF stems.
+    width, height = width + 4, height + 4
+    quad = np.asarray(
+        [
+            center - along * width / 2 - down * height / 2,
+            center + along * width / 2 - down * height / 2,
+            center + along * width / 2 + down * height / 2,
+            center - along * width / 2 + down * height / 2,
+        ],
+        np.float32,
+    )
+    quad[:, 0] = np.clip(quad[:, 0], 0, image.shape[1] - 1)
+    quad[:, 1] = np.clip(quad[:, 1], 0, image.shape[0] - 1)
+    native_size = [max(8, round(width)), max(8, round(height))]
+    return {
+        "method": "source_red_character_geometry_v1",
+        "polygon": (quad + [x, y]).tolist(),
+        "native_size": native_size,
+        "roll_degrees": round(angle, 3),
+        "threshold": round(threshold, 3),
+        "foreground_pixel_count": int(len(points)),
+        "foreground_native_span": [round(float(v), 3) for v in glyph_size],
+    }
+
+
+def _off_shape(image):
+    """Check O/F/F bar direction at native resolution, independently of OCR."""
+    channel = np.maximum(image[:, :, 0], image[:, :, 1])
+    threshold, _ = cv2.threshold(channel, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    views = []
+    contrast = float(np.percentile(channel, 95)) - threshold
+    if contrast < 15:
+        return {"status": "inconclusive", "views": []}
+    for factor in (0.2, 0.4):
+        cut = threshold + contrast * factor
+        mask = (channel > cut).astype(np.uint8)
+        columns = np.flatnonzero(mask.sum(axis=0))
+        groups = np.split(columns, np.flatnonzero(np.diff(columns) > 1) + 1)
+        if len(groups) != 3:
+            continue
+        patterns, boxes = [], []
+        for group in groups:
+            left, right = int(group[0]), int(group[-1]) + 1
+            rows = np.flatnonzero(mask[:, left:right].sum(axis=1))
+            top, bottom = int(rows[0]), int(rows[-1]) + 1
+            glyph = mask[top:bottom, left:right]
+            h, w = glyph.shape
+            if h < 8 or not 0.3 <= w / h <= 0.95:
+                break
+            levels = []
+            for cx, cy in (
+                (0.5, 0.08),
+                (0.84, 0.25),
+                (0.84, 0.75),
+                (0.5, 0.92),
+                (0.16, 0.75),
+                (0.16, 0.25),
+                (0.5, 0.5),
+            ):
+                sx, ex = max(0, int((cx - 0.17) * w)), min(w, math.ceil((cx + 0.17) * w))
+                sy, ey = max(0, int((cy - 0.1) * h)), min(h, math.ceil((cy + 0.1) * h))
+                levels.append(float(glyph[sy:ey, sx:ex].mean()))
+            patterns.append("".join("1" if level >= 0.3 else "0" for level in levels))
+            boxes.append([left, top, w, h])
+        views.append(
+            {
+                "threshold": round(cut, 3),
+                "glyph_boxes": boxes,
+                "patterns": patterns,
+                "matches_off": patterns == ["1111110", "1000111", "1000111"],
+            }
+        )
+    return {
+        "status": "consistent"
+        if len(views) == 2 and all(v["matches_off"] for v in views)
+        else "inconclusive",
+        "views": views,
+    }
+
+
+def _red_recovery(predict, image, previous, x, y, readout_rejected=False):
+    started = time.monotonic()
+    geometry = red_display_geometry(image, x, y)
+    if geometry is None:
+        return previous
+    native_region = {
+        "polygon": (np.asarray(geometry["polygon"]) - [x, y]).tolist(),
+        "size": geometry["native_size"],
+    }
+    _, native_transform = extract_digits(image, native_region)
+    native = cv2.warpPerspective(
+        image,
+        native_transform,
+        tuple(geometry["native_size"]),
+        flags=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_REPLICATE,
+    )
+    off_shapes = {
+        degrees: _off_shape(native if degrees == 0 else cv2.rotate(native, cv2.ROTATE_180))
+        for degrees in (0, 180)
+    }
+    native_directions = [
+        degrees for degrees, shape in off_shapes.items() if shape["status"] == "consistent"
+    ]
+
+    def supported(text, degrees):
+        if text == "OFF":
+            return len(native_directions) <= 1 and (
+                not native_directions or degrees in native_directions
+            )
+        return degrees == 0 and not native_directions
+
+    # Keep a successful numeric path unless independent pixels show an OFF row.
+    if (
+        previous.get("lines")
+        and not readout_rejected
+        and not any(v["status"] == "consistent" for v in off_shapes.values())
+    ):
+        return previous
+    output = copy.deepcopy(previous)
+    output["red_display_geometry"] = geometry
+    output["red_display_off_shape"] = off_shapes
+    scale = min(8, max(1, 64 / geometry["native_size"][1]))
+    size = [
+        min(640, round(geometry["native_size"][0] * scale)),
+        min(192, round(geometry["native_size"][1] * scale)),
+    ]
+    crop, transform = extract_digits(image, dict(native_region, size=size))
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    # Negative grayscale makes illuminated bars dark without adding strokes.
+    gray = cv2.cvtColor(255 - gray, cv2.COLOR_GRAY2BGR)
+    attempts, accepted = [], []
+    for degrees in (0, 180):
+        for name, view in (("color", crop), ("negative_gray", gray)):
+            view = view if degrees == 0 else cv2.rotate(view, cv2.ROTATE_180)
+            receipt = predict(view, 0, 0)
+            attempt = {
+                "view": name,
+                "orientation_degrees": degrees,
+                "size": size,
+                "ocr": copy.deepcopy(receipt),
+            }
+            attempts.append(attempt)
+            options = [line for line in receipt.get("lines", []) if _red_candidate(line, size)]
+            if len(options) == 1:
+                accepted.append((degrees, name, options[0]))
+        same = [a for a in accepted if a[0] == degrees]
+        if (
+            len(same) == 2
+            and same[0][2]["text"].strip().upper() == same[1][2]["text"].strip().upper()
+        ):
+            # A rotated number alone cannot establish the physical direction.
+            if supported(same[0][2]["text"].strip().upper(), degrees):
+                break
+    output["red_display_ocr_attempts"] = attempts
+    output["red_display_recovery_seconds"] = round(time.monotonic() - started, 3)
+    output["red_display_orientation"] = {"status": "unconfirmed"}
+    finished = next(
+        (
+            a["ocr"]["ocr_finished_at"]
+            for a in reversed(attempts)
+            if a["ocr"].get("ocr_finished_at")
+        ),
+        None,
+    )
+    if finished:
+        output["ocr_finished_at"] = finished
+    matches = []
+    for degrees in (0, 180):
+        same = [a for a in accepted if a[0] == degrees]
+        if (
+            len(same) == 2
+            and same[0][2]["text"].strip().upper() == same[1][2]["text"].strip().upper()
+        ):
+            text = same[0][2]["text"].strip().upper()
+            if not supported(text, degrees):
+                continue
+            matches.append((degrees, same[0][2]))
+    if len(matches) == 1:
+        degrees, selected = matches[0]
+        source_lines = previous.get("lines", [])
+        if previous.get("digit_consistency", {}).get("status") == "disagreement":
+            source_lines = previous.get("panel_ocr", {}).get("lines", [])
+        original_texts = (
+            [
+                line.get("text", "").strip()
+                for line in source_lines
+                if READOUT.fullmatch(line.get("text", ""))
+            ]
+            if not readout_rejected
+            else []
+        )
+        selected_text = selected["text"].strip().upper()
+        if (
+            original_texts
+            and selected_text not in original_texts
+            and not (selected_text == "OFF" and off_shapes[degrees]["status"] == "consistent")
+        ):
+            output["lines"] = []
+            output["digit_consistency"] = {
+                "status": "disagreement",
+                "candidates": original_texts + [selected["text"]],
+                "basis": "red_geometry_retry_conflicts_with_numeric_source",
+            }
+            return output
+        mapped = copy.deepcopy(selected)
+        points = np.asarray([mapped["polygon"]], np.float32)
+        if degrees:
+            points[:, :, 0] = size[0] - 1 - points[:, :, 0]
+            points[:, :, 1] = size[1] - 1 - points[:, :, 1]
+        mapped["polygon"] = (
+            cv2.perspectiveTransform(points, np.linalg.inv(transform))[0] + [x, y]
+        ).tolist()
+        output["digit_region"] = dict(
+            geometry, status="located", size=size, method="source_red_character_geometry_v1"
+        )
+        if selected["text"].strip().upper() == "OFF":
+            output["lines"] = []
+            native_confirmed = off_shapes[degrees]["status"] == "consistent"
+            output["display_state"] = {
+                "text": "OFF",
+                "basis": "native_off_bars_and_ocr_views"
+                if native_confirmed
+                else "ocr_only_with_source_geometry",
+                "verification": "native_corroborated" if native_confirmed else "ocr_only",
+                "raw_text": selected["text"],
+                "source": "local_ocr.red_display_ocr_attempts",
+                "confidence": selected["confidence"],
+                "polygon": mapped["polygon"],
+            }
+            if original_texts and native_confirmed:
+                if output.get("digit_consistency"):
+                    output["digit_consistency_before_red_display"] = copy.deepcopy(
+                        output["digit_consistency"]
+                    )
+                output["digit_consistency"] = {
+                    "status": "resolved",
+                    "candidates": original_texts + [selected["text"]],
+                    "basis": "native_off_bars_and_two_ocr_views",
+                }
+            output["red_display_orientation"] = {
+                "status": "consistent"
+                if off_shapes[degrees]["status"] == "consistent"
+                else "ocr_only",
+                "orientation_degrees": degrees,
+                "basis": "native_off_bars_and_two_ocr_views"
+                if off_shapes[degrees]["status"] == "consistent"
+                else "two_ocr_views_direction_unverified",
+            }
+        elif not previous.get("digit_consistency", {}).get("status") == "disagreement":
+            output["lines"] = [mapped]
+    elif native_directions and previous.get("lines"):
+        output["lines"] = []
+        output["digit_consistency"] = {
+            "status": "disagreement",
+            "candidates": list(
+                dict.fromkeys(
+                    [line["text"] for line in previous["lines"]] + [a[2]["text"] for a in accepted]
+                )
+            ),
+            "basis": "native_off_bars_conflict_with_numeric_ocr",
+        }
+    return output
+
+
+def _red_candidate(line, size):
+    text = line.get("text")
+    if not isinstance(text, str) or not (READOUT.fullmatch(text) or text.strip().upper() == "OFF"):
+        return False
+    try:
+        confidence = float(line.get("confidence") or 0)
+        polygon = np.asarray(line.get("polygon"), dtype=float)
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        math.isfinite(confidence)
+        and confidence >= 0.6
+        and polygon.shape == (4, 2)
+        and np.isfinite(polygon).all()
+        and np.all(polygon >= -1)
+        and np.all(polygon <= np.asarray(size) + 1)
+        and cv2.isContourConvex(polygon.astype(np.float32))
+        and cv2.contourArea(polygon.astype(np.float32)) >= 4
+    )
+
+
 def refine_digits(
+    predict,
+    image,
+    initial,
+    x=0,
+    y=0,
+    *,
+    source_image=None,
+    source_offset=(0, 0),
+    recover_small=False,
+    recover_red=False,
+    red_readout_rejected=False,
+):
+    result = _refine_numeric_digits(
+        predict,
+        image,
+        initial,
+        x,
+        y,
+        source_image=source_image,
+        source_offset=source_offset,
+        recover_small=recover_small,
+    )
+    if recover_red and initial.get("status") == "completed":
+        return _red_recovery(predict, image, result, x, y, red_readout_rejected)
+    return result
+
+
+def _refine_numeric_digits(
     predict,
     image,
     initial,

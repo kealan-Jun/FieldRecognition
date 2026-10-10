@@ -11,9 +11,7 @@ import re
 import cv2
 import numpy as np
 
-from field_recognition.recognition.digit_regions import extract_digits
-
-VERSION = "red-led-segments/1"
+VERSION = "red-led-segments/2"
 SEGMENTS = (
     (0.2, 0, 0.8, 0.2),
     (0.65, 0.15, 1, 0.48),
@@ -37,10 +35,134 @@ PATTERNS = {
 }
 
 
+def native_diagnostics(image):
+    """Describe visible strokes without decoding or enlarging native pixels."""
+    evidence = {
+        "basis": "original_panel_pixels",
+        "native_size": [int(image.shape[1]), int(image.shape[0])],
+        "minimum_glyph_height": 20,
+        "status": "inconclusive",
+        "views": [],
+    }
+    if image.ndim != 3 or min(image.shape[:2]) < 8:
+        return evidence
+    blue, green, red = cv2.split(image.astype(np.float32))
+    channel = np.maximum(blue, green)
+    color = (red - channel > 60) & (red > 180)
+    if np.count_nonzero(color) >= 40:
+        threshold, _ = cv2.threshold(
+            channel[color].astype(np.uint8), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+        )
+        if threshold < 20 or float(np.percentile(channel[color], 95)) - threshold < 15:
+            return evidence
+        factors = (0.60, 0.70, 0.75)
+        evidence["appearance"] = "red_bars"
+    else:
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        surround = ((hsv[:, :, 0] < 15) | (hsv[:, :, 0] > 165)) & (hsv[:, :, 1] > 80)
+        if surround.mean() < 0.15:
+            return evidence
+        channel = green
+        threshold, _ = cv2.threshold(
+            channel.astype(np.uint8), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+        )
+        if threshold < 10 or float(np.percentile(channel, 95)) - threshold < 20:
+            return evidence
+        color = np.ones(channel.shape, dtype=bool)
+        factors = (0.85, 1.0, 1.15)
+        evidence["appearance"] = "bright_bars_on_red"
+    for factor in factors:
+        mask = ((channel > threshold * factor) & color).astype(np.uint8)
+        _, labels, stats, _ = cv2.connectedComponentsWithStats(mask)
+        for index, (_, _, _, _, area) in enumerate(stats[1:], 1):
+            if area < 2:
+                mask[labels == index] = 0
+        columns = np.flatnonzero(mask.sum(axis=0))
+        if not len(columns):
+            continue
+        groups = np.split(columns, np.flatnonzero(np.diff(columns) > 1) + 1)
+        if not 2 <= len(groups) <= 6:
+            continue
+        boxes = []
+        for group in groups:
+            left, right = int(group[0]), int(group[-1]) + 1
+            rows = np.flatnonzero(mask[:, left:right].sum(axis=1))
+            boxes.append([left, int(rows[0]), right - left, int(rows[-1] - rows[0]) + 1])
+        height = max(box[3] for box in boxes)
+        tall = [box for box in boxes if box[3] >= height * 0.65]
+        possible_dot = len(tall) >= 2 and any(
+            box[3] <= height * 0.25
+            and box[2] <= height * 0.25
+            and box[1] + box[3] >= min(b[1] for b in tall) + height * 0.75
+            and min(b[0] for b in tall) < box[0] < max(b[0] + b[2] for b in tall)
+            for box in boxes
+        )
+        if possible_dot:
+            boxes = tall
+        if (
+            height < image.shape[0] * 0.25
+            or any(box[3] < height * 0.65 for box in boxes)
+            # Gaps inside a single disconnected glyph are not extra digits.
+            or any(b[0] - (a[0] + a[2]) < max(2, height * 0.10) for a, b in zip(boxes, boxes[1:]))
+            or max(b[1] + b[3] / 2 for b in boxes) - min(b[1] + b[3] / 2 for b in boxes)
+            > height * 0.4
+        ):
+            continue
+        evidence["views"].append(
+            {
+                "threshold": round(threshold * factor, 2),
+                "group_count": len(boxes),
+                "glyph_boxes": boxes,
+                "possible_decimal_point": possible_dot,
+            }
+        )
+    counts = [view["group_count"] for view in evidence["views"]]
+    stable = next((count for count in counts if counts.count(count) >= 2), None)
+    if stable is not None:
+        boxes = [
+            box
+            for view in evidence["views"]
+            if view["group_count"] == stable
+            for box in view["glyph_boxes"]
+        ]
+        evidence.update(
+            status="measured",
+            group_count=stable,
+            glyph_height_range=[min(b[3] for b in boxes), max(b[3] for b in boxes)],
+            below_resolution_gate=any(b[3] < 20 for b in boxes),
+            merged_glyphs_possible=any(b[2] / b[3] > 0.95 for b in boxes),
+            possible_decimal_point=sum(
+                bool(view["possible_decimal_point"])
+                for view in evidence["views"]
+                if view["group_count"] == stable
+            )
+            >= 2,
+        )
+    return evidence
+
+
+def _local_confusion(value, text):
+    """Only bounded OCR character confusions supported by complete pixel digits."""
+    return bool(
+        re.fullmatch(r"[\dB]{2,6}", text)
+        and re.search(r"\d", text)
+        and text.count("B") <= 1
+        and len(value) == len(text)
+        and all(
+            a == b or {a, b} == {"1", "7"} or (a == "8" and b == "B") for a, b in zip(value, text)
+        )
+    )
+
+
 def segment_check(crop, digits):
     hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
     red = ((hsv[:, :, 0] < 15) | (hsv[:, :, 0] > 165)) & (hsv[:, :, 1] > 80)
-    evidence = {"rule_version": VERSION, "status": "inconclusive", "views": []}
+    evidence = {
+        "rule_version": VERSION,
+        "status": "inconclusive",
+        "minimum_glyph_height": 20,
+        "views": [],
+    }
     if red.mean() < 0.15 or min(crop.shape[:2]) < 12:
         return evidence
     channel = crop[:, :, 1]  # Bright LED segments against their red display surround.
@@ -53,7 +175,7 @@ def segment_check(crop, digits):
         glyphs = [
             (x, y, w, h)
             for x, y, w, h, area in stats[1:]
-            if h >= crop.shape[0] * 0.35 and 0.30 <= w / h <= 0.85 and area >= w * h * 0.12
+            if h >= max(20, crop.shape[0] * 0.35) and 0.30 <= w / h <= 0.85 and area >= w * h * 0.12
         ]
         glyphs.sort()
         if len(glyphs) != digits or any(a[0] + a[2] > b[0] for a, b in zip(glyphs, glyphs[1:])):
@@ -96,10 +218,8 @@ def segment_check(crop, digits):
 def verify_digits(image, local, x=0, y=0):
     lines = local.get("lines", [])
     region = local.get("digit_region") or {}
-    if region.get("status") != "located":
-        return local
     if lines and (
-        len(lines) != 1 or not re.fullmatch(r"\d{2,6}", lines[0].get("text", "").strip())
+        len(lines) != 1 or not re.fullmatch(r"[\dB]{2,6}", lines[0].get("text", "").strip())
     ):
         return local
     raw_lines = [
@@ -107,12 +227,21 @@ def verify_digits(image, local, x=0, y=0):
         for key in ("panel_ocr", "digit_ocr", "digit_ocr_check")
         for line in local.get(key, {}).get("lines", [])
     ]
+    raw_lines.extend(
+        line
+        for attempt in local.get("red_display_ocr_attempts", [])
+        for line in attempt.get("ocr", {}).get("lines", [])
+    )
     texts = [line.get("text", "").strip() for line in raw_lines or lines]
     if any(re.search(r"[+\-.,°/]", text) or text.upper() == "OFF" for text in texts):
         return local
+    if not any(re.fullmatch(r"[\dB]{1,6}", text) and re.search(r"\d", text) for text in texts):
+        return local
     from field_recognition.recognition.red_segments import check as check_fragmented, corroborates
 
+    native = native_diagnostics(image)
     fragmented = check_fragmented(image)
+    fragmented["native_diagnostics"] = native
     if fragmented["status"] in {"consistent", "disagreement"}:
         output = copy.deepcopy(local)
         output.update(
@@ -121,8 +250,9 @@ def verify_digits(image, local, x=0, y=0):
             digit_consistency_before_segments=copy.deepcopy(local.get("digit_consistency")),
         )
         numeric = [text for text in texts if re.fullmatch(r"\d{1,6}", text)]
-        resolved = fragmented["status"] == "consistent" and corroborates(
-            fragmented["text"], numeric
+        resolved = fragmented["status"] == "consistent" and (
+            corroborates(fragmented["text"], numeric)
+            or any(_local_confusion(fragmented["text"], text) for text in texts)
         )
         output["digit_consistency"] = {
             "status": "resolved" if resolved else "disagreement",
@@ -162,21 +292,88 @@ def verify_digits(image, local, x=0, y=0):
                 }
             ]
         return output
+    if region.get("status") != "located":
+        return local
     if len(lines) != 1:
         return local
     original = lines[0].get("text", "").strip()
-    if not re.fullmatch(r"\d{2,6}", original):
+    if not re.fullmatch(r"[\dB]{2,6}", original):
         return local
-    # Check only the already localized number window, never the rest of the photo.
-    polygon = (np.asarray(region["polygon"]) - [x, y]).tolist()
-    crop, _ = extract_digits(image, region | {"polygon": polygon})
+    issues = []
+    if native.get("status") == "measured":
+        if native["possible_decimal_point"]:
+            issues.append("possible_decimal_point")
+        if native["group_count"] > len(original):
+            issues.append("possible_missing_digit")
+        if native["merged_glyphs_possible"]:
+            issues.append("ambiguous_led_glyphs")
+        if issues and native["below_resolution_gate"]:
+            issues.insert(0, "low_native_resolution")
+    if issues:
+        output = copy.deepcopy(local)
+        output.update(
+            digit_segment_check=fragmented,
+            pre_segment_lines=copy.deepcopy(lines),
+            digit_consistency_before_segments=copy.deepcopy(local.get("digit_consistency")),
+            digit_consistency={
+                "status": "quality_issue",
+                "basis": VERSION,
+                "candidates": list(dict.fromkeys(texts)),
+                "quality_issues": issues,
+            },
+        )
+        # Preserve the candidate text, but prevent its model confidence from
+        # turning insufficient native evidence into a normalized measurement.
+        output["lines"] = [
+            lines[0] | {"quality_issue": issues[0], "quality_issues": issues, "confidence": None}
+        ]
+        return output
+    if native.get("below_resolution_gate"):
+        # Low resolution alone does not reject an otherwise agreeing OCR
+        # candidate, but enlarged pixels cannot support a character repair.
+        output = copy.deepcopy(local)
+        fragmented["reason"] = "insufficient_native_resolution"
+        output["digit_segment_check"] = fragmented
+        return output
+    # The localized window's saved size is often enlarged for OCR. Derive its
+    # physical size from the source polygon instead, and never add resolution
+    # for a segment correction, even when color diagnostics are inconclusive.
+    points = np.asarray(region["polygon"], np.float32) - np.asarray([x, y], np.float32)
+    native_size = [
+        int(
+            np.floor(
+                (np.linalg.norm(points[1] - points[0]) + np.linalg.norm(points[2] - points[3])) / 2
+            )
+        ),
+        int(
+            np.floor(
+                (np.linalg.norm(points[3] - points[0]) + np.linalg.norm(points[2] - points[1])) / 2
+            )
+        ),
+    ]
+    if min(native_size) < 2:
+        return local
+    width, height = native_size
+    target = np.asarray(
+        [[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]], np.float32
+    )
+    transform = cv2.getPerspectiveTransform(points, target)
+    crop = cv2.warpPerspective(
+        image,
+        transform,
+        tuple(native_size),
+        flags=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_REPLICATE,
+    )
     check = segment_check(crop, len(original))
+    check["native_diagnostics"] = native
+    check["native_window_size"] = native_size
     output = copy.deepcopy(local)
     output["digit_segment_check"] = check
     if check["status"] == "consistent" and check["text"] != original:
-        # Resolve only the known OCR 1/7 ambiguity when every segment is clear.
+        # Resolve only bounded 1/7 or B/8 ambiguity when every segment is clear.
         # Other differences stay unresolved for the normal fallback/draft path.
-        resolved = all(a == b or {a, b} == {"1", "7"} for a, b in zip(original, check["text"]))
+        resolved = _local_confusion(check["text"], original)
         output["digit_consistency"] = {
             "status": "resolved" if resolved else "disagreement",
             "candidates": [original, check["text"]],

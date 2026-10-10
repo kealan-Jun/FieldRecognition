@@ -54,6 +54,75 @@ def test_small_detector_border_overlap_keeps_temperature_and_speed_roles():
     assert roles_for_boxes(boxes) == {}  # Overlapping instances cannot be guessed apart.
 
 
+def orientation_pair(degrees=(180, 180), statuses=("consistent", "consistent")):
+    return [
+        {
+            "class_id": 0,
+            "instrument_id": A,
+            "panel_id": f"panel-0-{i}",
+            "measurement_name": name,
+            "local_ocr": {
+                "red_display_orientation": {"status": status, "orientation_degrees": degree},
+                "red_display_geometry": {
+                    "roll_degrees": 0,
+                    "native_size": [40, 20],
+                    "polygon": [[x, 10], [x + 40, 10], [x + 40, 30], [x, 30]],
+                },
+            },
+        }
+        for i, (x, name, degree, status) in enumerate(
+            zip((10, 70), ("温度", "转速"), degrees, statuses)
+        )
+    ]
+
+
+def test_physical_pair_roles_reverse_only_with_both_native_off_direction_evidences():
+    pair = orientation_pair()
+    proof = panel_regions._orient_pair_roles(pair)
+    assert [region["measurement_name"] for region in pair] == ["转速", "温度"]
+    assert proof[0]["orientation_degrees"] == 180 and proof[0]["status"] == "consistent"
+    assert proof[0]["supporting_views"] == ["panel-0-0", "panel-0-1"]
+    assert all(region["source_orientation"] == proof[0] for region in pair)
+
+
+@pytest.mark.parametrize(
+    "degrees,statuses",
+    [
+        ((180, None), ("consistent", "unconfirmed")),
+        ((180, 0), ("consistent", "consistent")),
+        ((180, 180), ("ocr_only", "ocr_only")),
+    ],
+)
+def test_one_panel_or_ocr_only_rotation_does_not_guess_pair_roles(degrees, statuses):
+    pair = orientation_pair(degrees, statuses)
+    proof = panel_regions._orient_pair_roles(pair)
+    assert [region["measurement_name"] for region in pair] == [None, None]
+    assert proof[0]["status"] == "unconfirmed"
+
+
+def test_off_direction_from_separate_rows_cannot_establish_one_physical_pair():
+    pair = orientation_pair()
+    pair[1]["local_ocr"]["red_display_geometry"]["polygon"] = [
+        [70, 60],
+        [110, 60],
+        [110, 80],
+        [70, 80],
+    ]
+    proof = panel_regions._orient_pair_roles(pair)
+    assert proof[0]["status"] == "unconfirmed"
+    assert all(region["measurement_name"] is None for region in pair)
+
+
+def test_upright_or_unconfirmed_geometry_preserves_existing_pair_roles():
+    for degrees, statuses in (
+        ((0, 0), ("consistent", "consistent")),
+        ((None, None), ("unconfirmed", "unconfirmed")),
+    ):
+        pair = orientation_pair(degrees, statuses)
+        assert panel_regions._orient_pair_roles(pair) == []
+        assert [region["measurement_name"] for region in pair] == ["温度", "转速"]
+
+
 def test_two_panels_keep_separate_bindings_polygons_and_archived_crops(archive, monkeypatch):
     app, client, root = archive
     monkeypatch.setenv("FIELD_CAMERA_ID", "TestCamera")

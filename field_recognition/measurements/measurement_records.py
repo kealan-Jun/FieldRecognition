@@ -204,6 +204,11 @@ def measurement_value(name, reading, instrument):
 def field_issues(name, reading, instrument):
     """Only enforce registered facts; never repair decimals or invent limits."""
     issues = [reading["quality_issue"]] if reading.get("quality_issue") else []
+    # Keep supporting causes while the primary issue is active. A corrected
+    # reading clears that primary issue; stale diagnostics must not reject it.
+    extra = reading.get("quality_issues")
+    if issues and isinstance(extra, list):
+        issues.extend(issue for issue in extra if isinstance(issue, str) and issue)
     unit, basis = unit_evidence(name, reading, instrument)
     if name in UNITS and basis == "unit_conflict":
         issues.append(basis)

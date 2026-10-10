@@ -50,8 +50,127 @@ def has_display_color(hsv, box):
     return float(np.mean(color & (saturation >= 30) & (value >= 35))) >= 0.06
 
 
+def window_pixels(hsv, coords):
+    """Independent sparse red glyph/dark-window evidence, not an OCR identity."""
+    x1, y1, x2, y2 = [round(v) for v in coords]
+    pad = max(2, math.ceil(min(x2 - x1, y2 - y1) * 0.15))
+    if x1 - pad < 0 or y1 - pad < 0 or x2 + pad > hsv.shape[1] or y2 + pad > hsv.shape[0]:
+        return None
+    if min(x2 - x1, y2 - y1) < 8:
+        return None
+    # Detector boxes can tightly bound illuminated characters. Inspect the
+    # surrounding window on original pixels without widening the OCR/evidence crop.
+    crop = hsv[y1 - pad : y2 + pad, x1 - pad : x2 + pad]
+    hue, saturation, value = cv2.split(crop)
+    red = ((hue <= 12) | (hue >= 170)) & (saturation >= 30) & (value >= 35)
+    # Relative contrast survives exposure changes; a uniform red object cannot
+    # supply a distinct dark-window population merely by being bright or dim.
+    contrast = float(np.percentile(value, 90) - np.percentile(value, 10))
+    threshold, _ = cv2.threshold(value, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+    red_fraction, dark_fraction = float(red.mean()), float((value <= threshold).mean())
+    ys, xs = np.where(red)
+    if (
+        not 0.06 <= red_fraction <= 0.5
+        or dark_fraction < 0.25
+        or contrast < 35
+        or not xs.size
+        or np.ptp(xs) < 0.2 * crop.shape[1]
+        or np.ptp(ys) < 0.25 * crop.shape[0]
+    ):
+        return None
+    return {
+        "red_fraction": round(red_fraction, 4),
+        "dark_fraction": round(dark_fraction, 4),
+        "value_contrast": round(contrast, 2),
+        "dark_threshold": threshold,
+        "evidence_bbox": [x1 - pad, y1 - pad, x2 + pad, y2 + pad],
+    }
+
+
+def photo_pair_context(image, hsv, anchor, infer, imgsz, confidence):
+    """Two bounded model views corroborate one missing partner on source pixels."""
+    from field_recognition.recognition.panel_layout import roles_for_boxes
+
+    diagnostics = {"attempted": False, "passes": [], "excluded_candidates": []}
+    result = {"box": None, "speed_ms": {}, "diagnostics": diagnostics}
+    anchor_pixels = window_pixels(hsv, anchor["xyxy"])
+    if not anchor_pixels or anchor["confidence"] < confidence:
+        diagnostics["reason"] = "anchor_window_evidence_missing"
+        return result
+    x1, y1, x2, y2 = anchor["xyxy"]
+    width, height = x2 - x1, y2 - y1
+    left, top = max(0, math.floor(x1 - 2 * width)), max(0, math.floor(y1 - height))
+    right = min(image.shape[1], math.ceil(x2 + 2 * width))
+    bottom = min(image.shape[0], math.ceil(y2 + height))
+    crop = image[top:bottom, left:right].copy()
+    diagnostics.update(attempted=True, context_bbox=[left, top, right, bottom])
+    candidates = []
+    for name, pixels in (("pair_original", crop), ("pair_gamma", cv2.LUT(crop, GAMMA_LUT))):
+        detection = infer(pixels, min(imgsz, 320), confidence)
+        diagnostics["passes"].append({"view": name, "candidate_count": len(detection["boxes"])})
+        for key, value in detection.get("speed_ms", {}).items():
+            result["speed_ms"][key] = result["speed_ms"].get(key, 0) + value
+        for item in detection["boxes"]:
+            box = dict(item, view=name)
+            box["xyxy"] = [
+                item["xyxy"][0] + left,
+                item["xyxy"][1] + top,
+                item["xyxy"][2] + left,
+                item["xyxy"][3] + top,
+            ]
+            bx1, by1, bx2, by2 = box["xyxy"]
+            reason = (
+                "wrong_pair_class"
+                if box["class_id"] != anchor["class_id"]
+                else "pair_context_out_of_bounds"
+                if not (left <= bx1 < bx2 <= right and top <= by1 < by2 <= bottom)
+                else "below_recovery_confidence"
+                if box["confidence"] < confidence
+                else "duplicate_region"
+                if iou(box["xyxy"], anchor["xyxy"]) >= 0.4
+                else "pair_window_size_mismatch"
+                if not (0.6 <= (bx2 - bx1) / width <= 1.7 and 0.65 <= (by2 - by1) / height <= 1.5)
+                else "pair_layout_unconfirmed"
+                if len(roles_for_boxes([anchor, box])) != 2
+                else "pair_window_evidence_missing"
+                if not (pixels_evidence := window_pixels(hsv, box["xyxy"]))
+                else None
+            )
+            if reason:
+                diagnostics["excluded_candidates"].append(box | {"reason": reason})
+            else:
+                candidates.append(box | {"window_pixels": pixels_evidence})
+    consensus = []
+    for box in sorted(candidates, key=lambda b: b["confidence"], reverse=True):
+        if any(iou(box["xyxy"], b["xyxy"]) >= 0.5 for b in consensus):
+            continue
+        support = sorted({b["view"] for b in candidates if iou(box["xyxy"], b["xyxy"]) >= 0.5})
+        if len(support) != 2:
+            diagnostics["excluded_candidates"].append(
+                box | {"reason": "insufficient_supporting_views"}
+            )
+            continue
+        consensus.append(box | {"supporting_views": support})
+    diagnostics["reason"] = (
+        "recovered"
+        if len(consensus) == 1
+        else "ambiguous_pair_partner"
+        if consensus
+        else "no_pair_consensus"
+    )
+    if len(consensus) == 1:
+        box = consensus[0]
+        result["box"] = {k: v for k, v in box.items() if k not in {"view", "window_pixels"}} | {
+            "localization_method": "photo_pair_context_v1",
+            "pair_anchor_xyxy": list(anchor["xyxy"]),
+            "pair_window_pixels": {"anchor": anchor_pixels, "partner": box["window_pixels"]},
+            "pair_layout_basis": "model_horizontal_pair_contract",
+        }
+    return result
+
+
 def detect(image, infer, *, imgsz=960, confidence=0.25, photo=False):
-    """Four live-video forwards; photo closeups allow eight additional forwards."""
+    """Four video forwards; photos allow two local and eight closeup forwards."""
     height, width = image.shape[:2]
     primary = infer(image, imgsz, confidence)
     accepted = [dict(b, localization_method="original") for b in primary["boxes"]]
@@ -136,6 +255,26 @@ def detect(image, infer, *, imgsz=960, confidence=0.25, photo=False):
             | {"localization_method": VERSION, "supporting_views": supporting}
         )
         recovery["recovered_count"] += 1
+    anchors = [b for b in accepted if b["class_id"] == 0]
+    if photo and len(anchors) == 1 and len(accepted) < 6:
+        pair = photo_pair_context(image, hsv, anchors[0], infer, imgsz, confidence)
+        pair_diagnostics = pair["diagnostics"]
+        diagnostics["photo_pair_context"] = pair_diagnostics
+        recovery["passes"] += len(pair_diagnostics["passes"])
+        diagnostics["passes"].extend(pair_diagnostics["passes"])
+        diagnostics["raw_candidate_count"] += sum(
+            p["candidate_count"] for p in pair_diagnostics["passes"]
+        )
+        diagnostics["excluded_candidates"].extend(pair_diagnostics["excluded_candidates"])
+        for key, value in pair["speed_ms"].items():
+            speed[key] = speed.get(key, 0) + value
+        if pair["box"]:
+            if any(iou(pair["box"]["xyxy"], b["xyxy"]) >= 0.4 for b in accepted):
+                pair_diagnostics["reason"] = "duplicate_existing_region"
+                exclude(pair["box"], "duplicate_existing_region")
+            else:
+                accepted.append(pair["box"])
+                recovery["recovered_count"] += 1
     if photo and sum(b["class_id"] == 0 for b in accepted) < 2:
         # Close photographs can exceed the scale seen during training. Two
         # padded views must agree; this never runs on the live video path.

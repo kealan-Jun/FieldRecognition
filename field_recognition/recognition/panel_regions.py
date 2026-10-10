@@ -7,9 +7,65 @@ import uuid
 import re
 
 import cv2
+import numpy as np
 from field_recognition.measurements.readout_rules import NUMBER, READOUT, fallback_reason
 from field_recognition.recognition.pipeline_context import ReadoutPipeline
 from field_recognition.recognition.digit_regions import refine_digits, extract_digits
+
+
+def _orient_pair_roles(regions):
+    """Use both source OFF rows to establish a device direction, never a number."""
+    groups = {}
+    for region in regions:
+        if region["class_id"] == 0:
+            groups.setdefault(region["instrument_id"], []).append(region)
+    evidence = []
+    for pair in groups.values():
+        if len(pair) != 2:
+            continue
+        directions = [r["local_ocr"].get("red_display_orientation", {}) for r in pair]
+        degrees = [
+            d.get("orientation_degrees") if d.get("status") in {"consistent", "ocr_only"} else None
+            for d in directions
+        ]
+        if 180 not in degrees:
+            continue
+        item = {
+            "panel_ids": [r["panel_id"] for r in pair],
+            "basis": "whole_pair_native_off_bars_and_ocr_views",
+            "status": "unconfirmed",
+        }
+        geometries = [r["local_ocr"].get("red_display_geometry", {}) for r in pair]
+        if (
+            degrees == [180, 180]
+            and all(d.get("status") == "consistent" for d in directions)
+            and all(r["measurement_name"] for r in pair)
+        ):
+            rolls = [g["roll_degrees"] for g in geometries]
+            centers = [np.asarray(g["polygon"]).mean(axis=0) for g in geometries]
+            radians = np.deg2rad(sum(rolls) / 2)
+            normal = np.asarray([-np.sin(radians), np.cos(radians)])
+            # Both rows must occupy one horizontal physical pair in source
+            # coordinates. Opposite/missing direction and separate rows abstain.
+            if abs(rolls[0] - rolls[1]) <= 12 and abs(
+                np.dot(centers[1] - centers[0], normal)
+            ) <= min(g["native_size"][1] for g in geometries):
+                pair[0]["measurement_name"], pair[1]["measurement_name"] = (
+                    pair[1]["measurement_name"],
+                    pair[0]["measurement_name"],
+                )
+                item.update(
+                    status="consistent",
+                    orientation_degrees=180,
+                    supporting_views=[r["panel_id"] for r in pair],
+                )
+        if item["status"] != "consistent":
+            for region in pair:
+                region["measurement_name"] = None
+        for region in pair:
+            region["source_orientation"] = copy.deepcopy(item)
+        evidence.append(item)
+    return evidence
 
 
 def predict(core, image, x=0, y=0, *, video=False, allowed_instrument_ids=()):
@@ -107,6 +163,20 @@ def predict(core, image, x=0, y=0, *, video=False, allowed_instrument_ids=()):
                 instrument=instrument,
             )
         else:
+            # A syntactically numeric OCR token (e.g. "5G") can still violate
+            # the registered field rule. Retry its source pixels, not a guessed
+            # character substitution, while preserving the untouched receipt.
+            raw_checked = (
+                validate_lines(
+                    copy.deepcopy(local.get("lines", [])),
+                    roles.get(
+                        ((str(box["class_id"]), box.get("instrument_id")), tuple(box["xyxy"]))
+                    ),
+                    core.get("get_instrument", lambda _: {})(box["instrument_id"]) or {},
+                )
+                if box["class_id"] == 0 and not video
+                else []
+            )
             local = refine_digits(
                 predict_panel,
                 panel,
@@ -115,6 +185,8 @@ def predict(core, image, x=0, y=0, *, video=False, allowed_instrument_ids=()):
                 y + cy,
                 source_image=image,
                 source_offset=(x, y),
+                recover_red=box["class_id"] == 0 and not video,
+                red_readout_rejected=any(line.get("quality_issue") for line in raw_checked),
             )
         if box["class_id"] == 0:
             from field_recognition.recognition.led_digits import verify_digits
@@ -123,6 +195,7 @@ def predict(core, image, x=0, y=0, *, video=False, allowed_instrument_ids=()):
             raw_lines = local.get("panel_ocr", {}).get("lines", [])
             if (
                 not local.get("lines")
+                and not local.get("display_state")
                 and len(raw_lines) == 1
                 and raw_lines[0].get("text", "").strip().upper() == "OFF"
                 and (raw_lines[0].get("confidence") or 0) >= 0.6
@@ -157,12 +230,18 @@ def predict(core, image, x=0, y=0, *, video=False, allowed_instrument_ids=()):
             "digit_region": local.get("digit_region"),
             "display_state": local.get("display_state"),
         }
+        regions.append(region)
+    if not video:
+        orientations = _orient_pair_roles(regions)
+        if orientations:
+            diagnostics["source_orientations"] = orientations
+    for region in regions:
+        local = region["local_ocr"]
         local["lines"] = validate_lines(
             [dict(line, panel_id=region["panel_id"]) for line in local.get("lines", [])],
             region["measurement_name"],
-            core.get("get_instrument", lambda _: {})(box["instrument_id"]) or {},
+            core.get("get_instrument", lambda _: {})(region["instrument_id"]) or {},
         )
-        regions.append(region)
         lines.extend(local["lines"])
     diagnostics["ocr_input_region_count"] = len(regions)
     ocr_elapsed_ms = round((time.monotonic() - ocr_started) * 1000, 3) if regions else None
