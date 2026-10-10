@@ -1,0 +1,486 @@
+{
+  "demo_only": true,
+  "candidate_source": "preset_fixture",
+  "ocr_executed": false,
+  "real_instrument_accuracy": "NOT_PROVEN",
+  "note": "合成图片、预置读数与声明时间；未连接真实相机或 NAS。绑定、候选与草稿为预置展示关系，未执行业务绑定、确认或归档事务。",
+  "qr_decode": {
+    "payload": "{\"v\":1,\"type\":\"instrument\",\"id\":\"demo-stirrer-01\"}",
+    "method": "OpenCV QRCodeDetector on synthetic input-1.png"
+  },
+  "measurement": {
+    "measurement_id": "demo-measurement-01",
+    "camera_id": "DemoCamera01",
+    "status": "draft",
+    "record_mode": "test",
+    "revision": 1,
+    "created_at": "2026-10-10T10:30:00.000+08:00",
+    "context": {
+      "burst_id": "DEMO-BURST-01",
+      "expected_photos": 3,
+      "experiment_context_ref": "演示步骤 · 面板观察"
+    },
+    "job_ids": [
+      "demo-job-1",
+      "demo-job-2",
+      "demo-job-3"
+    ],
+    "sources": [
+      {
+        "capture_id": "demo-capture-1",
+        "job_id": "demo-job-1",
+        "image_url": "/api/images/demo-panel-1",
+        "original_url": "/api/captures/demo-capture-1/original",
+        "captured_at": "2026-10-10T10:30:00.000+08:00",
+        "operator": "演示人员",
+        "binding_snapshots": [
+          {
+            "binding_id": "demo-binding-01",
+            "camera_id": "DemoCamera01",
+            "instrument": {
+              "id": "demo-stirrer-01",
+              "name": "演示搅拌器",
+              "scene": "演示实验台",
+              "model": "SYNTHETIC",
+              "type_id": "builtin-stirrer-v1",
+              "device_category": "instrument",
+              "measurement_ranges": {}
+            },
+            "operator": "演示人员",
+            "started_at": "2026-10-10T10:29:00+08:00",
+            "ended_at": null,
+            "image_url": "/api/images/demo-panel-1",
+            "qr_payload": "{\"v\":1,\"type\":\"instrument\",\"id\":\"demo-stirrer-01\"}",
+            "demo_only": true
+          }
+        ],
+        "acquisition": {
+          "time": {
+            "captured_at": "2026-10-10T10:30:00.000+08:00",
+            "quality": "source_declared"
+          }
+        },
+        "measurements": [
+          {
+            "instrument_id": "demo-stirrer-01",
+            "instrument_name": "演示搅拌器",
+            "record": {
+              "values": [
+                {
+                  "name": "温度",
+                  "value": 24.5,
+                  "unit": "°C"
+                },
+                {
+                  "name": "转速",
+                  "value": 1200,
+                  "unit": "rpm"
+                }
+              ]
+            }
+          }
+        ],
+        "archive": {
+          "status": "pending"
+        },
+        "image_sha256": "5b54857bf47a29d0b056266e0bd398702824b3501b4af31746e17e0207d27692",
+        "source_ref": "synthetic://readme-demo/input-1.png",
+        "source_sha256": "5b54857bf47a29d0b056266e0bd398702824b3501b4af31746e17e0207d27692",
+        "frame_metadata": null,
+        "demo_only": true,
+        "candidate_source": "preset_fixture"
+      },
+      {
+        "capture_id": "demo-capture-2",
+        "job_id": "demo-job-2",
+        "image_url": "/api/images/demo-panel-2",
+        "original_url": "/api/captures/demo-capture-2/original",
+        "captured_at": "2026-10-10T10:30:01.000+08:00",
+        "operator": "演示人员",
+        "binding_snapshots": [
+          {
+            "binding_id": "demo-binding-01",
+            "camera_id": "DemoCamera01",
+            "instrument": {
+              "id": "demo-stirrer-01",
+              "name": "演示搅拌器",
+              "scene": "演示实验台",
+              "model": "SYNTHETIC",
+              "type_id": "builtin-stirrer-v1",
+              "device_category": "instrument",
+              "measurement_ranges": {}
+            },
+            "operator": "演示人员",
+            "started_at": "2026-10-10T10:29:00+08:00",
+            "ended_at": null,
+            "image_url": "/api/images/demo-panel-1",
+            "qr_payload": "{\"v\":1,\"type\":\"instrument\",\"id\":\"demo-stirrer-01\"}",
+            "demo_only": true
+          }
+        ],
+        "acquisition": {
+          "time": {
+            "captured_at": "2026-10-10T10:30:01.000+08:00",
+            "quality": "source_declared"
+          }
+        },
+        "measurements": [
+          {
+            "instrument_id": "demo-stirrer-01",
+            "instrument_name": "演示搅拌器",
+            "record": {
+              "values": [
+                {
+                  "name": "温度",
+                  "value": 24.5,
+                  "unit": "°C"
+                },
+                {
+                  "name": "转速",
+                  "value": 1200,
+                  "unit": "rpm"
+                }
+              ]
+            }
+          }
+        ],
+        "archive": {
+          "status": "pending"
+        },
+        "image_sha256": "9144da3194f3dea8b01c915ecf4839c6f8646e0d24cef1147f67d90f58691632",
+        "source_ref": "synthetic://readme-demo/input-2.png",
+        "source_sha256": "9144da3194f3dea8b01c915ecf4839c6f8646e0d24cef1147f67d90f58691632",
+        "frame_metadata": null,
+        "demo_only": true,
+        "candidate_source": "preset_fixture"
+      },
+      {
+        "capture_id": "demo-capture-3",
+        "job_id": "demo-job-3",
+        "image_url": "/api/images/demo-panel-3",
+        "original_url": "/api/captures/demo-capture-3/original",
+        "captured_at": "2026-10-10T10:30:02.000+08:00",
+        "operator": "演示人员",
+        "binding_snapshots": [
+          {
+            "binding_id": "demo-binding-01",
+            "camera_id": "DemoCamera01",
+            "instrument": {
+              "id": "demo-stirrer-01",
+              "name": "演示搅拌器",
+              "scene": "演示实验台",
+              "model": "SYNTHETIC",
+              "type_id": "builtin-stirrer-v1",
+              "device_category": "instrument",
+              "measurement_ranges": {}
+            },
+            "operator": "演示人员",
+            "started_at": "2026-10-10T10:29:00+08:00",
+            "ended_at": null,
+            "image_url": "/api/images/demo-panel-1",
+            "qr_payload": "{\"v\":1,\"type\":\"instrument\",\"id\":\"demo-stirrer-01\"}",
+            "demo_only": true
+          }
+        ],
+        "acquisition": {
+          "time": {
+            "captured_at": "2026-10-10T10:30:02.000+08:00",
+            "quality": "source_declared"
+          }
+        },
+        "measurements": [
+          {
+            "instrument_id": "demo-stirrer-01",
+            "instrument_name": "演示搅拌器",
+            "record": {
+              "values": [
+                {
+                  "name": "温度",
+                  "value": 24.5,
+                  "unit": "°C"
+                },
+                {
+                  "name": "转速",
+                  "value": 1200,
+                  "unit": "rpm"
+                }
+              ]
+            }
+          }
+        ],
+        "archive": {
+          "status": "pending"
+        },
+        "image_sha256": "a67c66c5f28ef8ba82063449885e394ec809393b49fd633dacc986d4b1a479be",
+        "source_ref": "synthetic://readme-demo/input-3.png",
+        "source_sha256": "a67c66c5f28ef8ba82063449885e394ec809393b49fd633dacc986d4b1a479be",
+        "frame_metadata": null,
+        "demo_only": true,
+        "candidate_source": "preset_fixture"
+      }
+    ],
+    "fields": [
+      {
+        "name": "温度",
+        "value": 24.5,
+        "unit": "°C",
+        "field_id": "demo-field-1",
+        "instrument": {
+          "id": "demo-stirrer-01",
+          "name": "演示搅拌器",
+          "scene": "演示实验台",
+          "model": "SYNTHETIC",
+          "type_id": "builtin-stirrer-v1",
+          "device_category": "instrument",
+          "measurement_ranges": {}
+        },
+        "original_candidates": [
+          {
+            "capture_id": "demo-capture-1",
+            "raw_text": "24.5",
+            "raw_value": 24.5,
+            "unit": "°C",
+            "unit_basis": null,
+            "confidence": null,
+            "panel_image_url": "/api/images/demo-panel-1",
+            "candidate_source": "preset_fixture"
+          },
+          {
+            "capture_id": "demo-capture-2",
+            "raw_text": "24.5",
+            "raw_value": 24.5,
+            "unit": "°C",
+            "unit_basis": null,
+            "confidence": null,
+            "panel_image_url": "/api/images/demo-panel-2",
+            "candidate_source": "preset_fixture"
+          },
+          {
+            "capture_id": "demo-capture-3",
+            "raw_text": "24.5",
+            "raw_value": 24.5,
+            "unit": "°C",
+            "unit_basis": null,
+            "confidence": null,
+            "panel_image_url": "/api/images/demo-panel-3",
+            "candidate_source": "preset_fixture"
+          }
+        ],
+        "agreement": {
+          "matching_photos": 3,
+          "photos_with_region": 3
+        }
+      },
+      {
+        "name": "转速",
+        "value": 1200,
+        "unit": "rpm",
+        "field_id": "demo-field-2",
+        "instrument": {
+          "id": "demo-stirrer-01",
+          "name": "演示搅拌器",
+          "scene": "演示实验台",
+          "model": "SYNTHETIC",
+          "type_id": "builtin-stirrer-v1",
+          "device_category": "instrument",
+          "measurement_ranges": {}
+        },
+        "original_candidates": [
+          {
+            "capture_id": "demo-capture-1",
+            "raw_text": "1200",
+            "raw_value": 1200,
+            "unit": "rpm",
+            "unit_basis": null,
+            "confidence": null,
+            "panel_image_url": "/api/images/demo-panel-1",
+            "candidate_source": "preset_fixture"
+          },
+          {
+            "capture_id": "demo-capture-2",
+            "raw_text": "1200",
+            "raw_value": 1200,
+            "unit": "rpm",
+            "unit_basis": null,
+            "confidence": null,
+            "panel_image_url": "/api/images/demo-panel-2",
+            "candidate_source": "preset_fixture"
+          },
+          {
+            "capture_id": "demo-capture-3",
+            "raw_text": "1200",
+            "raw_value": 1200,
+            "unit": "rpm",
+            "unit_basis": null,
+            "confidence": null,
+            "panel_image_url": "/api/images/demo-panel-3",
+            "candidate_source": "preset_fixture"
+          }
+        ],
+        "agreement": {
+          "matching_photos": 3,
+          "photos_with_region": 3
+        }
+      }
+    ],
+    "instrument_completeness": [],
+    "blockers": [
+      "演示数据：未执行 OCR，仅展示候选复核流程"
+    ],
+    "demo_only": true,
+    "candidate_source": "preset_fixture",
+    "ocr_executed": false
+  },
+  "jobs": [
+    {
+      "job_id": "demo-job-1",
+      "status": "completed",
+      "camera_id": "DemoCamera01",
+      "binding_id": "demo-binding-01",
+      "instrument": {
+        "id": "demo-stirrer-01",
+        "name": "演示搅拌器",
+        "scene": "演示实验台",
+        "model": "SYNTHETIC",
+        "type_id": "builtin-stirrer-v1",
+        "device_category": "instrument",
+        "measurement_ranges": {}
+      },
+      "image_url": "/api/images/demo-panel-1",
+      "image_sha256": "5b54857bf47a29d0b056266e0bd398702824b3501b4af31746e17e0207d27692",
+      "external_photo": {
+        "captured_at": "2026-10-10T10:30:00.000+08:00"
+      },
+      "submitted_at": "2026-10-10T10:30:00.000+08:00",
+      "finished_at": null,
+      "record_scope": "test_only",
+      "recognition_revision": 1,
+      "display_fields": [
+        {
+          "name": "温度",
+          "value": 24.5,
+          "unit": "°C",
+          "instrument_name": "演示搅拌器",
+          "raw_text": "24.5"
+        },
+        {
+          "name": "转速",
+          "value": 1200,
+          "unit": "rpm",
+          "instrument_name": "演示搅拌器",
+          "raw_text": "1200"
+        }
+      ],
+      "lines": [],
+      "timing": {
+        "durations_ms": {}
+      },
+      "archive": {
+        "status": "pending"
+      },
+      "demo_only": true,
+      "candidate_source": "preset_fixture",
+      "ocr_executed": false
+    },
+    {
+      "job_id": "demo-job-2",
+      "status": "completed",
+      "camera_id": "DemoCamera01",
+      "binding_id": "demo-binding-01",
+      "instrument": {
+        "id": "demo-stirrer-01",
+        "name": "演示搅拌器",
+        "scene": "演示实验台",
+        "model": "SYNTHETIC",
+        "type_id": "builtin-stirrer-v1",
+        "device_category": "instrument",
+        "measurement_ranges": {}
+      },
+      "image_url": "/api/images/demo-panel-2",
+      "image_sha256": "9144da3194f3dea8b01c915ecf4839c6f8646e0d24cef1147f67d90f58691632",
+      "external_photo": {
+        "captured_at": "2026-10-10T10:30:01.000+08:00"
+      },
+      "submitted_at": "2026-10-10T10:30:01.000+08:00",
+      "finished_at": null,
+      "record_scope": "test_only",
+      "recognition_revision": 1,
+      "display_fields": [
+        {
+          "name": "温度",
+          "value": 24.5,
+          "unit": "°C",
+          "instrument_name": "演示搅拌器",
+          "raw_text": "24.5"
+        },
+        {
+          "name": "转速",
+          "value": 1200,
+          "unit": "rpm",
+          "instrument_name": "演示搅拌器",
+          "raw_text": "1200"
+        }
+      ],
+      "lines": [],
+      "timing": {
+        "durations_ms": {}
+      },
+      "archive": {
+        "status": "pending"
+      },
+      "demo_only": true,
+      "candidate_source": "preset_fixture",
+      "ocr_executed": false
+    },
+    {
+      "job_id": "demo-job-3",
+      "status": "completed",
+      "camera_id": "DemoCamera01",
+      "binding_id": "demo-binding-01",
+      "instrument": {
+        "id": "demo-stirrer-01",
+        "name": "演示搅拌器",
+        "scene": "演示实验台",
+        "model": "SYNTHETIC",
+        "type_id": "builtin-stirrer-v1",
+        "device_category": "instrument",
+        "measurement_ranges": {}
+      },
+      "image_url": "/api/images/demo-panel-3",
+      "image_sha256": "a67c66c5f28ef8ba82063449885e394ec809393b49fd633dacc986d4b1a479be",
+      "external_photo": {
+        "captured_at": "2026-10-10T10:30:02.000+08:00"
+      },
+      "submitted_at": "2026-10-10T10:30:02.000+08:00",
+      "finished_at": null,
+      "record_scope": "test_only",
+      "recognition_revision": 1,
+      "display_fields": [
+        {
+          "name": "温度",
+          "value": 24.5,
+          "unit": "°C",
+          "instrument_name": "演示搅拌器",
+          "raw_text": "24.5"
+        },
+        {
+          "name": "转速",
+          "value": 1200,
+          "unit": "rpm",
+          "instrument_name": "演示搅拌器",
+          "raw_text": "1200"
+        }
+      ],
+      "lines": [],
+      "timing": {
+        "durations_ms": {}
+      },
+      "archive": {
+        "status": "pending"
+      },
+      "demo_only": true,
+      "candidate_source": "preset_fixture",
+      "ocr_executed": false
+    }
+  ]
+}
