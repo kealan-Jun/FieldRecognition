@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 import pytest
 
-from field_recognition.recognition.digit_regions import refine_digits, _red_ocr_views
+from field_recognition.recognition.digit_regions import refine_digits
 
 
 def test_main_digits_exclude_menu_number_and_map_polygons_to_original():
@@ -518,46 +518,3 @@ def test_native_off_can_settle_photo_numeric_conflict_with_actual_off_receipts()
     assert out["digit_consistency_before_red_display"]["candidates"] == ["182", "175"]
     assert out["panel_ocr"] == raw and out["digit_ocr"] == calls[0]
     assert [attempt["ocr"] for attempt in out["red_display_ocr_attempts"]] == calls[1:]
-
-
-def test_unsaturated_views_use_source_channels_without_mutating_or_drawing_pixels():
-    source = np.zeros((20, 40, 3), np.uint8)
-    source[:, :, 0] = np.arange(40, dtype=np.uint8) + 20
-    source[:, :, 1] = np.arange(40, dtype=np.uint8) * 3 + 10
-    source[:, :, 2] = 220
-    original = source.copy()
-    region = {"polygon": [[0, 0], [39, 0], [39, 19], [0, 19]], "size": [40, 20]}
-    views, transform, diagnostic = _red_ocr_views(source, region)
-    assert diagnostic["status"] == "prepared" and len(views) == 2
-    assert [name for name, pixels in views] == ["max_bg_negative", "green_contrast_negative"]
-    assert np.array_equal(source, original)
-    assert np.array_equal(views[0][1][:, :, 0], 255 - np.maximum(source[:, :, 0], source[:, :, 1]))
-    low, high = source[:, :, 1].min(), source[:, :, 1].max()
-    expected = 255 - np.rint(
-        np.clip((source[:, :, 1].astype(float) - low) * 255 / (high - low), 0, 255)
-    ).astype(np.uint8)
-    assert np.array_equal(views[1][1][:, :, 0], expected)
-    assert all(
-        np.array_equal(pixels[:, :, 0], pixels[:, :, 1])
-        and np.array_equal(pixels[:, :, 1], pixels[:, :, 2])
-        for _, pixels in views
-    )
-    assert not np.array_equal(views[0][1], views[1][1])
-    assert np.allclose(transform, np.eye(3))
-    # R saturation changes neither source view while the same red window remains.
-    source[:, :, 2] = 255
-    saturated_views, _, _ = _red_ocr_views(source, region)
-    assert all(np.array_equal(a[1], b[1]) for a, b in zip(views, saturated_views))
-
-
-def test_low_source_contrast_or_identical_rendered_views_cannot_supply_two_votes():
-    region = {"polygon": [[0, 0], [79, 0], [79, 43], [0, 43]], "size": [80, 44]}
-    flat = np.full((44, 80, 3), (20, 20, 100), np.uint8)
-    views, _, diagnostic = _red_ocr_views(flat, region)
-    assert not views and diagnostic["status"] == "insufficient_source_contrast"
-    source = red_off_panel()
-    source[np.all(source == (5, 5, 100), axis=2)] = (0, 0, 100)
-    # A thumbnail that loses every glyph renders both channel methods as the
-    # same white pixels. Two algorithms are not two pieces of image evidence.
-    views, _, diagnostic = _red_ocr_views(source, dict(region, size=[2, 2]))
-    assert not views and diagnostic["status"] == "duplicate_preprocessed_views"

@@ -367,8 +367,6 @@ def verify_digits(image, local, x=0, y=0):
             issues.append("ambiguous_led_glyphs")
         if issues and native["below_resolution_gate"]:
             issues.insert(0, "low_native_resolution")
-    elif native.get("low_resolution_collapsed_row"):
-        issues.extend(("low_native_resolution", "ambiguous_led_glyphs"))
     issues = list(dict.fromkeys(issues))
     if issues:
         output = copy.deepcopy(local)

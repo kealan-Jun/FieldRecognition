@@ -12,7 +12,6 @@ from field_recognition.measurements.readout_rules import READOUT
 from field_recognition.recognition.red_geometry import (
     extract_digits,
     red_display_geometry,
-    source_bar_geometry,
     _red_ocr_views,
 )
 
@@ -166,25 +165,13 @@ def _red_recovery(predict, image, previous, x, y, readout_rejected=False, *, sou
     started = time.monotonic()
     source_evidence = source_evidence or _native_off_geometry(image, x, y)
     if source_evidence is None:
-        geometry = source_bar_geometry(image, x, y)
-        if geometry is None:
-            return previous
-        native_region = {
-            "polygon": (np.asarray(geometry["polygon"]) - [x, y]).tolist(),
-            "size": geometry["native_size"],
-        }
-        # Numeric bar positions do not prove O/F/F patterns or direction. Do
-        # not run OFF verification on this different source window.
-        source_evidence = geometry, native_region, {}, []
+        return previous
     geometry, native_region, off_shapes, native_directions = source_evidence
-    numeric_only = geometry.get("purpose") == "numeric_retry_geometry_only"
 
     def supported(text, degrees):
         if text == "OFF":
-            return (
-                not numeric_only
-                and len(native_directions) <= 1
-                and (not native_directions or degrees in native_directions)
+            return len(native_directions) <= 1 and (
+                not native_directions or degrees in native_directions
             )
         return degrees == 0 and not native_directions
 
@@ -204,13 +191,6 @@ def _red_recovery(predict, image, previous, x, y, readout_rejected=False, *, sou
         "native_directions": native_directions,
         "rotated_retry_basis": "native_off_bars_required",
     }
-    if numeric_only:
-        output["red_display_off_basis"] = {
-            "status": "unavailable",
-            "reason": "numeric_source_geometry_only",
-            "native_off_measured": False,
-        }
-        output["red_display_retry_gate"]["off_state_allowed"] = False
     if previous.get("digit_consistency", {}).get("native_confirmation_required") and not (
         len(native_directions) == 1
     ):
@@ -308,10 +288,7 @@ def _red_recovery(predict, image, previous, x, y, readout_rejected=False, *, sou
             cv2.perspectiveTransform(points, np.linalg.inv(transform))[0] + [x, y]
         ).tolist()
         output["digit_region"] = dict(
-            geometry,
-            status="located",
-            size=size,
-            method=geometry.get("method", "source_red_character_geometry_v1"),
+            geometry, status="located", size=size, method="source_red_character_geometry_v1"
         )
         if selected["text"].strip().upper() == "OFF":
             output["lines"] = []

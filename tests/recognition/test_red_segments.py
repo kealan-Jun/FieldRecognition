@@ -310,24 +310,41 @@ def test_complete_native_recovery_does_not_reuse_a_superseded_quality_flag():
 
 
 @pytest.mark.parametrize("text", ["3856", "4058", "8970"])
-def test_stable_low_pixel_collapsed_row_preserves_ambiguity_without_decoding(text):
+def test_stable_low_pixel_collapsed_row_is_diagnostic_without_independent_conflict(text):
     image = cv2.resize(display(text, positions=[0, 18, 36, 54]), None, fx=0.3, fy=0.3)
     raw = local(image, "85", "85")
     raw["digit_region"]["size"] = [image.shape[1] * 8, image.shape[0] * 8]
     before = copy.deepcopy(raw)
     result = verify_digits(image, raw)
     line = result["lines"][0]
-    assert line["text"] == "85" and line["confidence"] is None
-    assert line["quality_issues"] == ["low_native_resolution", "ambiguous_led_glyphs"]
-    assert "possible_missing_digit" not in line["quality_issues"]
+    assert result["lines"] == before["lines"]
+    assert not line.get("quality_issue")
+    assert result.get("digit_consistency", {}).get("status") != "quality_issue"
     diagnosis = result["digit_segment_check"]["native_diagnostics"]
     assert diagnosis["status"] == "inconclusive" and "group_count" not in diagnosis
     assert diagnosis["low_resolution_collapsed_row"]
     assert len(diagnosis["collapsed_views"]) >= 2
     assert diagnosis["collapsed_row_height_range"][1] < 20
     normalized, _ = measurement_value("speed", line | {"value": line["text"]}, {})
-    assert normalized["value"] is None
+    assert normalized["value"] == 85
     assert raw == before and result["panel_ocr"] == before["panel_ocr"]
+
+
+def test_complete_ocr_1500_is_not_rejected_by_low_pixel_collapsed_projection_alone():
+    image = cv2.resize(display("1500", positions=[0, 24, 48, 72]), None, fx=0.3, fy=0.3)
+    raw = local(image, "1500", "1500")
+    before = copy.deepcopy(raw)
+    result = verify_digits(image, raw)
+    diagnosis = result["digit_segment_check"]["native_diagnostics"]
+    assert diagnosis["status"] == "inconclusive" and "group_count" not in diagnosis
+    assert diagnosis["low_resolution_collapsed_row"]
+    assert result["digit_segment_check"]["status"] == "inconclusive"
+    assert result["lines"] == before["lines"]
+    assert not result["lines"][0].get("quality_issue")
+    line = result["lines"][0]
+    normalized, _ = measurement_value("speed", line | {"value": line["text"]}, {})
+    assert normalized["value"] == 1500
+    assert raw == before
 
 
 def test_complete_native_pattern_precedes_coarse_projection_ambiguity(monkeypatch):
