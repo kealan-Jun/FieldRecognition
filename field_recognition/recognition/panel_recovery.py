@@ -91,7 +91,7 @@ def window_pixels(hsv, coords):
     }
 
 
-def photo_pair_context(image, hsv, anchor, infer, imgsz, confidence):
+def photo_pair_context(image, hsv, anchor, infer, imgsz, confidence, existing_boxes=()):
     """Two bounded model views corroborate one missing partner on source pixels."""
     from field_recognition.recognition.panel_layout import roles_for_boxes
 
@@ -103,6 +103,12 @@ def photo_pair_context(image, hsv, anchor, infer, imgsz, confidence):
         return result
     x1, y1, x2, y2 = anchor["xyxy"]
     width, height = x2 - x1, y2 - y1
+    # Quantize the crop construction once, covering all source pixels touched
+    # by the model box. Keep its original floats for geometry, OCR and evidence.
+    cx1, cy1, cx2, cy2 = math.floor(x1), math.floor(y1), math.ceil(x2), math.ceil(y2)
+    context_width, context_height = cx2 - cx1, cy2 - cy1
+    diagnostics["context_anchor_bbox"] = [cx1, cy1, cx2, cy2]
+    diagnostics["context_coordinate_basis"] = "source_pixel_floor_ceil"
     diagnostics["attempted"] = True
     candidates = []
     view_signatures = {}
@@ -112,10 +118,10 @@ def photo_pair_context(image, hsv, anchor, infer, imgsz, confidence):
         ("pair_gamma_medium", 6, 8, min(imgsz, 640)),
         ("pair_gamma_wide", 10, 12, imgsz),
     ):
-        left = max(0, math.floor(x1 - horizontal * width))
-        top = max(0, math.floor(y1 - vertical * height))
-        right = min(image.shape[1], math.ceil(x2 + horizontal * width))
-        bottom = min(image.shape[0], math.ceil(y2 + vertical * height))
+        left = max(0, cx1 - horizontal * context_width)
+        top = max(0, cy1 - vertical * context_height)
+        right = min(image.shape[1], cx2 + horizontal * context_width)
+        bottom = min(image.shape[0], cy2 + vertical * context_height)
         view_signatures[name] = (left, top, right, bottom, size)
         pixels = cv2.LUT(image[top:bottom, left:right], GAMMA_LUT)
         detection = infer(pixels, size, confidence)
@@ -150,6 +156,8 @@ def photo_pair_context(image, hsv, anchor, infer, imgsz, confidence):
                 if box["confidence"] < confidence
                 else "duplicate_region"
                 if iou(box["xyxy"], anchor["xyxy"]) >= 0.4
+                else "duplicate_existing_region"
+                if any(iou(box["xyxy"], b["xyxy"]) >= 0.4 for b in existing_boxes)
                 else "pair_window_size_mismatch"
                 if not (0.6 <= (bx2 - bx1) / width <= 1.7 and 0.65 <= (by2 - by1) / height <= 1.5)
                 # Wider chassis context can include another device in the same row.
@@ -165,6 +173,14 @@ def photo_pair_context(image, hsv, anchor, infer, imgsz, confidence):
                 diagnostics["excluded_candidates"].append(box | {"reason": reason})
             else:
                 candidates.append(box | {"window_pixels": pixels_evidence})
+        if name == "pair_gamma_medium" and not candidates:
+            # A second view cannot corroborate a new partner absent from the
+            # first eligible set. Do not count a skipped forward as evidence.
+            diagnostics["reason"] = "no_eligible_partner_first_view"
+            diagnostics["skipped_views"] = [
+                {"view": "pair_gamma_wide", "reason": "no_eligible_partner_first_view"}
+            ]
+            return result
     consensus = []
     for box in sorted(candidates, key=lambda b: b["confidence"], reverse=True):
         if any(iou(box["xyxy"], b["xyxy"]) >= 0.5 for b in consensus):
@@ -285,7 +301,7 @@ def detect(image, infer, *, imgsz=960, confidence=0.25, photo=False):
         recovery["recovered_count"] += 1
     anchors = [b for b in accepted if b["class_id"] == 0]
     if photo and len(anchors) == 1 and len(accepted) < 6:
-        pair = photo_pair_context(image, hsv, anchors[0], infer, imgsz, confidence)
+        pair = photo_pair_context(image, hsv, anchors[0], infer, imgsz, confidence, accepted)
         pair_diagnostics = pair["diagnostics"]
         diagnostics["photo_pair_context"] = pair_diagnostics
         recovery["passes"] += len(pair_diagnostics["passes"])
@@ -307,10 +323,13 @@ def detect(image, infer, *, imgsz=960, confidence=0.25, photo=False):
         # Close photographs can exceed the scale seen during training. Two
         # padded views must agree; this never runs on the live video path.
         closeups = []
+        closeup_diagnostics = {"executed_scales": [], "skipped_scales": []}
+        diagnostics["photo_closeup"] = closeup_diagnostics
         for scale in (0.35, 0.45):
             matrix = cv2.getRotationMatrix2D((width / 2, height / 2), 0, scale)
             pixels = cv2.warpAffine(image, matrix, (width, height), borderValue=(114, 114, 114))
             result = detect(pixels, infer, imgsz=imgsz, confidence=confidence)
+            closeup_diagnostics["executed_scales"].append(scale)
             recovery["passes"] += result["recovery"]["passes"]
             nested = result["diagnostics"]
             diagnostics["raw_candidate_count"] += nested["raw_candidate_count"]
@@ -329,9 +348,33 @@ def detect(image, infer, *, imgsz=960, confidence=0.25, photo=False):
                 speed[key] = speed.get(key, 0) + value
             for box in result["boxes"]:
                 if box["class_id"] == 0:
-                    closeups.append(
-                        dict(box, xyxy=source_box(box["xyxy"], matrix, width, height), view=scale)
+                    mapped = dict(
+                        box, xyxy=source_box(box["xyxy"], matrix, width, height), view=scale
                     )
+                    reason = (
+                        "candidate_limit"
+                        if len(accepted) >= 6
+                        else "region_too_small"
+                        if min(
+                            mapped["xyxy"][2] - mapped["xyxy"][0],
+                            mapped["xyxy"][3] - mapped["xyxy"][1],
+                        )
+                        < 4
+                        else "duplicate_region"
+                        if any(iou(mapped["xyxy"], b["xyxy"]) >= 0.4 for b in accepted)
+                        else "display_color_mismatch"
+                        if not has_display_color(hsv, mapped)
+                        else None
+                    )
+                    if reason:
+                        exclude(mapped, reason)
+                    else:
+                        closeups.append(mapped)
+            if scale == 0.35 and not closeups:
+                closeup_diagnostics["skipped_scales"].append(
+                    {"scale": 0.45, "reason": "no_eligible_new_window_first_scale"}
+                )
+                break
         for box in sorted(closeups, key=lambda b: b["confidence"], reverse=True):
             if len(accepted) >= 6 or any(iou(box["xyxy"], b["xyxy"]) >= 0.4 for b in accepted):
                 exclude(box, "candidate_limit" if len(accepted) >= 6 else "duplicate_region")

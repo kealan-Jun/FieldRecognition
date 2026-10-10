@@ -186,19 +186,30 @@ def predict(core, image, x=0, y=0, *, video=False, allowed_instrument_ids=()):
                 source_image=image,
                 source_offset=(x, y),
                 recover_red=box["class_id"] == 0 and not video,
-                red_readout_rejected=any(line.get("quality_issue") for line in raw_checked),
+                red_readout_rejected=any(line.get("quality_issue") for line in raw_checked)
+                and not any(
+                    READOUT.fullmatch(line.get("text", "")) and not line.get("quality_issue")
+                    for line in raw_checked
+                ),
+                require_native_conflict_confirmation=box["class_id"] == 0 and not video,
             )
         if box["class_id"] == 0:
             from field_recognition.recognition.led_digits import verify_digits
 
             local = verify_digits(panel, local, x + cx, y + cy)
             raw_lines = local.get("panel_ocr", {}).get("lines", [])
+            try:
+                raw_confidence = float(raw_lines[0].get("confidence") or 0) if raw_lines else 0
+            except (TypeError, ValueError):
+                raw_confidence = 0
             if (
                 not local.get("lines")
                 and not local.get("display_state")
+                and not local.get("display_state_rejection")
                 and len(raw_lines) == 1
                 and raw_lines[0].get("text", "").strip().upper() == "OFF"
-                and (raw_lines[0].get("confidence") or 0) >= 0.6
+                and np.isfinite(raw_confidence)
+                and raw_confidence >= 0.6
             ):
                 local["display_state"] = {
                     "text": "OFF",

@@ -190,11 +190,11 @@ def _red_ocr_views(image, region):
     return views, transform, dict(diagnostics, status="prepared")
 
 
-def _red_recovery(predict, image, previous, x, y, readout_rejected=False):
-    started = time.monotonic()
+def _native_off_geometry(image, x, y):
+    """Measure display direction before authorizing rotated OCR or an OFF state."""
     geometry = red_display_geometry(image, x, y)
     if geometry is None:
-        return previous
+        return None
     native_region = {
         "polygon": (np.asarray(geometry["polygon"]) - [x, y]).tolist(),
         "size": geometry["native_size"],
@@ -214,6 +214,15 @@ def _red_recovery(predict, image, previous, x, y, readout_rejected=False):
     native_directions = [
         degrees for degrees, shape in off_shapes.items() if shape["status"] == "consistent"
     ]
+    return geometry, native_region, off_shapes, native_directions
+
+
+def _red_recovery(predict, image, previous, x, y, readout_rejected=False, *, source_evidence=None):
+    started = time.monotonic()
+    source_evidence = source_evidence or _native_off_geometry(image, x, y)
+    if source_evidence is None:
+        return previous
+    geometry, native_region, off_shapes, native_directions = source_evidence
 
     def supported(text, degrees):
         if text == "OFF":
@@ -232,6 +241,19 @@ def _red_recovery(predict, image, previous, x, y, readout_rejected=False):
     output = copy.deepcopy(previous)
     output["red_display_geometry"] = geometry
     output["red_display_off_shape"] = off_shapes
+    orientations = (0, 180) if 180 in native_directions else (0,)
+    output["red_display_retry_gate"] = {
+        "orientation_degrees": list(orientations),
+        "native_directions": native_directions,
+        "rotated_retry_basis": "native_off_bars_required",
+    }
+    if previous.get("digit_consistency", {}).get("native_confirmation_required") and not (
+        len(native_directions) == 1
+    ):
+        # Further resized OCR cannot independently settle a real contradiction.
+        # The native segment verifier receives both unchanged OCR candidates.
+        output["red_display_retry_gate"]["skip_reason"] = "independent_native_confirmation_required"
+        return output
     scale = min(8, max(1, 64 / geometry["native_size"][1]))
     size = [
         min(640, round(geometry["native_size"][0] * scale)),
@@ -240,7 +262,7 @@ def _red_recovery(predict, image, previous, x, y, readout_rejected=False):
     views, transform, preprocessing = _red_ocr_views(image, dict(native_region, size=size))
     output["red_display_preprocessing"] = preprocessing
     attempts, accepted = [], []
-    for degrees in (0, 180):
+    for degrees in orientations:
         for name, view in views:
             view = view if degrees == 0 else cv2.rotate(view, cv2.ROTATE_180)
             receipt = predict(view, 0, 0)
@@ -276,7 +298,7 @@ def _red_recovery(predict, image, previous, x, y, readout_rejected=False):
     if finished:
         output["ocr_finished_at"] = finished
     matches = []
-    for degrees in (0, 180):
+    for degrees in orientations:
         same = [a for a in accepted if a[0] == degrees]
         if (
             len(same) == 2
@@ -406,7 +428,55 @@ def refine_digits(
     recover_small=False,
     recover_red=False,
     red_readout_rejected=False,
+    require_native_conflict_confirmation=False,
 ):
+    source_evidence = None
+    off_source = initial.get("lines", [])
+    if recover_red and initial.get("status") == "completed" and len(off_source) == 1:
+        raw_off = off_source[0]
+        try:
+            confidence = float(raw_off.get("confidence") or 0)
+        except (TypeError, ValueError):
+            confidence = 0
+        if (
+            isinstance(raw_off.get("text"), str)
+            and raw_off["text"].strip().upper() == "OFF"
+            and math.isfinite(confidence)
+            and confidence >= 0.6
+            and not red_readout_rejected
+        ):
+            source_evidence = _native_off_geometry(image, x, y)
+            directions = source_evidence[3] if source_evidence else []
+            if not directions or directions == [0]:
+                # This is the actual first-pass OFF receipt, not a synthetic
+                # consensus. Native direction may corroborate it or abstain.
+                output = copy.deepcopy(initial)
+                output.update(
+                    panel_ocr=copy.deepcopy(initial),
+                    lines=[],
+                    digit_region={"status": "not_located", "method": "dominant_numeric_line_v1"},
+                    display_state={
+                        "text": "OFF",
+                        "basis": "recognized_display_text",
+                        "verification": "native_corroborated" if directions else "ocr_only",
+                        "raw_text": raw_off["text"],
+                        "source": "local_ocr.panel_ocr",
+                        "confidence": raw_off["confidence"],
+                    },
+                    red_display_fastpath={"basis": "original_exact_off", "adapter_retries": 0},
+                )
+                if raw_off.get("polygon") is not None:
+                    output["display_state"]["polygon"] = copy.deepcopy(raw_off["polygon"])
+                if source_evidence:
+                    output["red_display_geometry"] = source_evidence[0]
+                    output["red_display_off_shape"] = source_evidence[2]
+                if directions:
+                    output["red_display_orientation"] = {
+                        "status": "consistent",
+                        "orientation_degrees": 0,
+                        "basis": "native_off_bars_and_original_ocr",
+                    }
+                return output
     result = _refine_numeric_digits(
         predict,
         image,
@@ -416,9 +486,26 @@ def refine_digits(
         source_image=source_image,
         source_offset=source_offset,
         recover_small=recover_small,
+        require_native_conflict_confirmation=(
+            require_native_conflict_confirmation and not red_readout_rejected
+        ),
     )
     if recover_red and initial.get("status") == "completed":
-        return _red_recovery(predict, image, result, x, y, red_readout_rejected)
+        if source_evidence and (180 in source_evidence[3] or len(source_evidence[3]) > 1):
+            result["display_state_rejection"] = {
+                "text": "OFF",
+                "basis": "native_off_direction_conflict",
+                "native_directions": source_evidence[3],
+            }
+        return _red_recovery(
+            predict,
+            image,
+            result,
+            x,
+            y,
+            red_readout_rejected,
+            source_evidence=source_evidence,
+        )
     return result
 
 
@@ -432,6 +519,7 @@ def _refine_numeric_digits(
     source_image=None,
     source_offset=(0, 0),
     recover_small=False,
+    require_native_conflict_confirmation=False,
 ):
     """Use measured glyph geometry; never insert a decimal point or a unit."""
     candidates = []
@@ -525,7 +613,11 @@ def _refine_numeric_digits(
         best is not None and original_valid and best["text"].strip() != selected["text"].strip()
     )
     alternative = None
-    if source_image is not None and (not best or conflict):
+    if (
+        source_image is not None
+        and (not best or conflict)
+        and not (conflict and require_native_conflict_confirmation)
+    ):
         offset = np.asarray(source_offset)
         lo, hi = polygon.min(0) - offset, polygon.max(0) - offset
         margin = (hi - lo) * 0.3
@@ -552,19 +644,28 @@ def _refine_numeric_digits(
                         (np.asarray(alternative["polygon"]) - 12) / 3 + [sx, sy] + offset
                     ).tolist()
     if conflict:
-        best = next(
-            (
-                candidate
-                for candidate in (selected, best)
-                if alternative and candidate["text"].strip() == alternative["text"].strip()
-            ),
-            None,
+        conflicting_text = best["text"]
+        best = (
+            None
+            if require_native_conflict_confirmation
+            else next(
+                (
+                    candidate
+                    for candidate in (selected, best)
+                    if alternative and candidate["text"].strip() == alternative["text"].strip()
+                ),
+                None,
+            )
         )
         output["digit_consistency"] = {
             "status": "resolved" if best else "disagreement",
-            "candidates": [selected["text"], lines[0]["text"]],
+            "candidates": [selected["text"], conflicting_text],
             "check_text": alternative and alternative["text"],
         }
+        if require_native_conflict_confirmation:
+            output["digit_consistency"].update(
+                basis="independent_native_confirmation_required", native_confirmation_required=True
+            )
     elif not best and alternative:
         # A failed perspective pass does not make the wider crop authoritative.
         # Keep conflicting complete readings unresolved (e.g. OFF -> 055/065).

@@ -240,7 +240,7 @@ def verify_digits(image, local, x=0, y=0):
     from field_recognition.recognition.red_segments import check as check_fragmented, corroborates
 
     native = native_diagnostics(image)
-    fragmented = check_fragmented(image)
+    fragmented = check_fragmented(image, native=native)
     fragmented["native_diagnostics"] = native
     if fragmented["status"] in {"consistent", "disagreement"}:
         output = copy.deepcopy(local)
@@ -264,12 +264,14 @@ def verify_digits(image, local, x=0, y=0):
             # Preserve the measured original-pixel window and all previous OCR
             # attempts. Never copy a neighbouring photo's reading or confidence.
             left, top, width, height = fragmented["crop"]
-            polygon = [
-                [left + x, top + y],
-                [left + x + width - 1, top + y],
-                [left + x + width - 1, top + y + height - 1],
-                [left + x, top + y + height - 1],
+            polygon = fragmented.get("polygon") or [
+                [left, top],
+                [left + width - 1, top],
+                [left + width - 1, top + height - 1],
+                [left, top + height - 1],
             ]
+            polygon = (np.asarray(polygon) + [x, y]).tolist()
+            width, height = fragmented.get("native_window_size", [width, height])
             value = fragmented["text"]
             output["digit_region_before_segments"] = copy.deepcopy(region)
             output["digit_region"] = {
@@ -291,6 +293,12 @@ def verify_digits(image, local, x=0, y=0):
                     "original_ocr_text": texts[0] if texts else None,
                 }
             ]
+        return output
+    if not lines:
+        # An upstream OCR conflict can remove candidates from formal lines;
+        # retain the independently measured rejection instead of losing it.
+        output = copy.deepcopy(local)
+        output["digit_segment_check"] = fragmented
         return output
     if region.get("status") != "located":
         return local

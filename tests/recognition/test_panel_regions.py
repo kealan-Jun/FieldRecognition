@@ -4,6 +4,7 @@ from tests.support.panel_regions import configure  # noqa: F401
 import copy
 import hashlib
 import json
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -40,6 +41,179 @@ def test_off_display_is_a_state_not_zero_or_a_fallback_miss(app_client, monkeypa
     assert result["lines"] == []
     assert result["panel_regions"][0]["display_state"]["text"] == "OFF"
     assert panel_regions.needs_fallback(result) is None
+
+
+@pytest.mark.parametrize("class_id,video", [(0, False), (0, True), (1, False), (2, False)])
+def test_native_conflict_gate_is_only_enabled_for_photo_red_panels(monkeypatch, class_id, video):
+    import field_recognition.recognition.lcd_digits as lcd_digits
+    import field_recognition.recognition.led_digits as led_digits
+
+    boxes = [
+        dict(class_id=class_id, instrument_id=A, confidence=0.8, xyxy=[left, 10, left + 40, 35])
+        for left in (10, 70)
+    ]
+    core = {
+        "panel_detector": SimpleNamespace(
+            enabled=lambda: True,
+            predict=lambda image, **kwargs: {"status": "completed", "boxes": copy.deepcopy(boxes)},
+        ),
+        "now": lambda: "test-time",
+        "ocr_state": {"engine": "test"},
+        "OCR_DEVICE": "cpu",
+        "predict_panel": lambda *args: {"status": "completed", "lines": []},
+    }
+    calls = []
+
+    def digits(predict, image, initial, *args, **kwargs):
+        calls.append(("digits", kwargs))
+        return initial
+
+    def lcd(predict, image, initial, *args, **kwargs):
+        calls.append(("lcd", kwargs))
+        return initial
+
+    monkeypatch.setattr(panel_regions, "refine_digits", digits)
+    monkeypatch.setattr(lcd_digits, "refine_lcd", lcd)
+    monkeypatch.setattr(led_digits, "verify_digits", lambda image, local, *args: local)
+    result = panel_regions.predict(
+        core, np.zeros((60, 130, 3), np.uint8), video=video, allowed_instrument_ids=[A]
+    )
+    assert len(result["panel_regions"]) == len(calls) == 2
+    for kind, options in calls:
+        if class_id == 1:
+            assert kind == "lcd" and "require_native_conflict_confirmation" not in options
+        else:
+            assert kind == "digits"
+            assert options["require_native_conflict_confirmation"] is (class_id == 0 and not video)
+            assert options["recover_red"] is (class_id == 0 and not video)
+
+
+def test_raw_off_direction_rejection_cannot_be_reintroduced_by_legacy_state_fallback(monkeypatch):
+    import field_recognition.recognition.led_digits as led_digits
+
+    receipt = {
+        "status": "completed",
+        "lines": [{"text": "OFF", "confidence": 0.9}],
+        "actual_model_invocation": True,
+        "ocr_model_call_count": 1,
+        "ocr_model_lock_wait_ms": 1.0,
+        "ocr_model_prepare_ms": 2.0,
+        "ocr_model_call_ms": 3.0,
+        "ocr_model_call_scope": "test-original",
+    }
+    core = {
+        "panel_detector": SimpleNamespace(
+            enabled=lambda: True,
+            predict=lambda image, **kwargs: {
+                "status": "completed",
+                "boxes": [dict(class_id=0, instrument_id=A, confidence=0.8, xyxy=[10, 10, 50, 35])],
+            },
+        ),
+        "now": lambda: "test-time",
+        "ocr_state": {"engine": "test"},
+        "OCR_DEVICE": "cpu",
+        "predict_panel": lambda *args: copy.deepcopy(receipt),
+    }
+    monkeypatch.setattr(
+        panel_regions,
+        "refine_digits",
+        lambda predict, image, initial, *args, **kwargs: dict(
+            initial,
+            lines=[],
+            panel_ocr=copy.deepcopy(initial),
+            display_state_rejection={"text": "OFF", "basis": "native_off_direction_conflict"},
+        ),
+    )
+    monkeypatch.setattr(led_digits, "verify_digits", lambda image, local, *args: local)
+    result = panel_regions.predict(
+        core, np.zeros((60, 80, 3), np.uint8), allowed_instrument_ids=[A]
+    )
+    region = result["panel_regions"][0]
+    assert not region["display_state"] and not region["measurement_name"]
+    assert region["local_ocr"]["panel_ocr"] == receipt
+    assert panel_regions.needs_fallback(result) == "no_text"
+    assert result["ocr_model_call_count"] == 1
+    assert result["ocr_model_call_ms"] == 3.0
+    assert result["ocr_model_prepare_ms"] == 2.0
+    assert result["ocr_model_lock_wait_ms"] == 1.0
+    assert result["ocr_model_call_scopes"] == ["test-original"]
+
+
+@pytest.mark.parametrize("text,confidence", [("OFF", float("inf")), ("OFF", "invalid")])
+def test_nonfinite_raw_off_cannot_be_reintroduced_by_legacy_state_fallback(
+    monkeypatch, text, confidence
+):
+    import field_recognition.recognition.led_digits as led_digits
+
+    core = {
+        "panel_detector": SimpleNamespace(
+            enabled=lambda: True,
+            predict=lambda image, **kwargs: {
+                "status": "completed",
+                "boxes": [dict(class_id=0, instrument_id=A, confidence=0.8, xyxy=[10, 10, 50, 35])],
+            },
+        ),
+        "now": lambda: "test-time",
+        "ocr_state": {"engine": "test"},
+        "OCR_DEVICE": "cpu",
+        "predict_panel": lambda *args: {
+            "status": "completed",
+            "lines": [{"text": text, "confidence": confidence}],
+        },
+    }
+    monkeypatch.setattr(
+        panel_regions,
+        "refine_digits",
+        lambda predict, image, initial, *args, **kwargs: dict(
+            initial, lines=[], panel_ocr=copy.deepcopy(initial)
+        ),
+    )
+    monkeypatch.setattr(led_digits, "verify_digits", lambda image, local, *args: local)
+    result = panel_regions.predict(
+        core, np.zeros((60, 80, 3), np.uint8), allowed_instrument_ids=[A]
+    )
+    assert result["panel_regions"][0]["display_state"] is None
+
+
+def test_one_rejected_token_does_not_hide_another_valid_original_numeric(monkeypatch):
+    import field_recognition.recognition.led_digits as led_digits
+
+    boxes = [
+        dict(class_id=0, instrument_id=A, confidence=0.8, xyxy=[left, 10, left + 40, 35])
+        for left in (10, 70)
+    ]
+    core = {
+        "panel_detector": SimpleNamespace(
+            enabled=lambda: True,
+            predict=lambda image, **kwargs: {"status": "completed", "boxes": copy.deepcopy(boxes)},
+        ),
+        "now": lambda: "test-time",
+        "ocr_state": {"engine": "test"},
+        "OCR_DEVICE": "cpu",
+        "get_instrument": lambda ident: {
+            "measurement_ranges": {"温度": {"unit": "°C"}, "转速": {"unit": "rpm"}}
+        },
+        "predict_panel": lambda image, x, y: {
+            "status": "completed",
+            "lines": [{"text": "5G", "confidence": 0.9}, {"text": "52 °C", "confidence": 0.9}]
+            if x < 50
+            else [{"text": "52 rpm", "confidence": 0.9}],
+        },
+    }
+    calls = []
+
+    def digits(predict, image, initial, *args, **kwargs):
+        calls.append(kwargs)
+        return initial
+
+    monkeypatch.setattr(panel_regions, "refine_digits", digits)
+    monkeypatch.setattr(led_digits, "verify_digits", lambda image, local, *args: local)
+    result = panel_regions.predict(
+        core, np.zeros((60, 130, 3), np.uint8), allowed_instrument_ids=[A]
+    )
+    assert all(not call["red_readout_rejected"] for call in calls)
+    lines = result["panel_regions"][0]["local_ocr"]["lines"]
+    assert lines[0]["quality_issue"] and not lines[1]["quality_issue"]
 
 
 def test_small_detector_border_overlap_keeps_temperature_and_speed_roles():

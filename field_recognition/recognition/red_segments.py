@@ -9,7 +9,7 @@ import numpy as np
 
 from field_recognition.recognition.led_digits import PATTERNS
 
-VERSION = "fragmented-red-segments/1"
+VERSION = "fragmented-red-segments/2"
 CENTERS = (
     (0.5, 0.08),
     (0.82, 0.28),
@@ -48,7 +48,7 @@ def _glyph(mask, box):
     return PATTERNS.get(pattern), levels
 
 
-def check(image):
+def _check(image, factors=(0.60, 0.70, 0.75)):
     evidence = {"rule_version": VERSION, "status": "inconclusive", "views": []}
     if image.ndim != 3 or min(image.shape[:2]) < 16:
         return evidence
@@ -62,7 +62,7 @@ def check(image):
     )
     if threshold < 20 or np.percentile(channel[color], 95) - threshold < 15:
         return evidence
-    for factor in (0.60, 0.70, 0.75):
+    for factor in factors:
         mask = ((channel > threshold * factor) & color).astype(np.uint8)
         _, labels, stats, _ = cv2.connectedComponentsWithStats(mask)
         areas = stats[1:, 4]
@@ -129,6 +129,98 @@ def check(image):
     elif len(values) > 1:
         evidence["status"] = "disagreement"
     return evidence
+
+
+def check(image, *, native=None):
+    """Check original pixels, with one measured, resolution-preserving deskew.
+
+    A retry requires independently separated native glyphs at the original
+    resolution. No angle search, upsampling or synthetic stroke joins are used.
+    """
+    evidence = _check(image)
+    if evidence["status"] != "inconclusive":
+        return evidence
+    from field_recognition.recognition.digit_regions import red_display_geometry
+    from field_recognition.recognition.led_digits import native_diagnostics
+
+    native = native if native is not None else native_diagnostics(image)
+    if (
+        native.get("status") != "measured"
+        or native.get("below_resolution_gate")
+        or native.get("possible_decimal_point")
+        or native.get("merged_glyphs_possible")
+    ):
+        return evidence
+    geometry = red_display_geometry(image)
+    if geometry is None or not 0.5 <= abs(geometry["roll_degrees"]) <= 12:
+        return evidence
+    height, width = image.shape[:2]
+    transform = cv2.getRotationMatrix2D((width / 2, height / 2), geometry["roll_degrees"], 1.0)
+    rectified = cv2.warpAffine(
+        image,
+        transform,
+        (width, height),
+        flags=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT,
+    )
+    # One additional, higher threshold can separate glow-connected vertical
+    # bars. Complete patterns still need two views and any contrary view vetoes.
+    retry = _check(rectified, factors=(0.60, 0.70, 0.75, 0.80))
+    copy_views = [dict(view) for view in evidence["views"]]
+    diagnostics = {
+        "method": "measured_source_roll_nearest_v1",
+        "roll_degrees": geometry["roll_degrees"],
+        "scale": 1.0,
+        "interpolation": "nearest",
+        "source_size": [width, height],
+        "views": copy_views,
+        "status": retry["status"],
+    }
+    retry["native_deskew"] = diagnostics
+    observed = {view["text"] for view in copy_views + retry["views"]}
+    if len(observed) > 1:
+        retry["status"] = diagnostics["status"] = "disagreement"
+        retry.pop("text", None)
+        retry.pop("crop", None)
+        return retry
+    if retry["status"] != "consistent":
+        return retry
+    if len(retry["text"]) != native["group_count"]:
+        retry["status"] = diagnostics["status"] = "inconclusive"
+        diagnostics["reason"] = "source_group_count_changed"
+        retry.pop("text", None)
+        retry.pop("crop", None)
+        return retry
+    left, top, crop_width, crop_height = retry["crop"]
+    points = np.asarray(
+        [
+            [
+                [left, top],
+                [left + crop_width - 1, top],
+                [left + crop_width - 1, top + crop_height - 1],
+                [left, top + crop_height - 1],
+            ]
+        ],
+        np.float32,
+    )
+    polygon = cv2.transform(points, cv2.invertAffineTransform(transform))[0]
+    if (
+        np.any(polygon < 0)
+        or np.any(polygon[:, 0] > width - 1)
+        or np.any(polygon[:, 1] > height - 1)
+    ):
+        retry["status"] = diagnostics["status"] = "inconclusive"
+        diagnostics["reason"] = "source_window_clipped"
+        retry.pop("text", None)
+        retry.pop("crop", None)
+        return retry
+    retry["polygon"] = polygon.tolist()
+    retry["native_window_size"] = [crop_width, crop_height]
+    # The compatibility crop is an enclosing source rectangle; polygon retains
+    # the actual pixel window and is used for subsequent source mapping.
+    lo, hi = np.floor(polygon.min(0)).astype(int), np.ceil(polygon.max(0)).astype(int)
+    retry["crop"] = [int(lo[0]), int(lo[1]), int(hi[0] - lo[0] + 1), int(hi[1] - lo[1] + 1)]
+    return retry
 
 
 def corroborates(value, texts):
