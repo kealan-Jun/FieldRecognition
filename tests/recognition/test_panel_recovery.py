@@ -106,7 +106,7 @@ def test_photo_closeup_maps_two_scale_consensus_back_to_source():
 
 ANCHOR = [80, 90, 110, 115]
 PARTNER = [116, 90, 146, 115]
-CONTEXT_ORIGIN = [20, 65]
+CONTEXT_ORIGIN = [0, 0]
 
 
 def panel_image(windows=(ANCHOR, PARTNER)):
@@ -124,18 +124,28 @@ def context_box(coords=PARTNER, score=0.6, class_id=0):
     return box(score, class_id, [v - CONTEXT_ORIGIN[i % 2] for i, v in enumerate(coords)])
 
 
-def run_pair(image, local_responses=None, *, primary=None, photo=True):
+def run_pair(image, local_responses=None, *, primary=None, photo=True, imgsz=960):
     responses = [primary or [box(0.3, coords=ANCHOR)], [], [], []]
     responses.extend(local_responses or [[context_box()], [context_box()]])
     # Empty legacy closeup passes isolate the new recovery contract on negatives.
     responses.extend([[] for _ in range(8)])
     calls = []
+    context_pixels = cv2.LUT(image, np.uint8((np.arange(256) / 255.0) ** 2.2 * 255))
+    local_call = 0
 
     def infer(pixels, size, threshold):
+        nonlocal local_call
         calls.append((pixels.copy(), size, threshold))
-        return {"boxes": copy.deepcopy(responses[len(calls) - 1]), "speed_ms": {"inference": 2.0}}
+        if len(calls) <= 4:
+            boxes = responses[len(calls) - 1]
+        elif pixels.shape == context_pixels.shape and np.array_equal(pixels, context_pixels):
+            boxes = responses[4 + local_call]
+            local_call += 1
+        else:
+            boxes = []
+        return {"boxes": copy.deepcopy(boxes), "speed_ms": {"inference": 2.0}}
 
-    return detect(image, infer, photo=photo), calls
+    return detect(image, infer, photo=photo, imgsz=imgsz), calls
 
 
 def test_photo_pair_restores_missing_window_with_source_evidence_and_coordinates():
@@ -148,16 +158,16 @@ def test_photo_pair_restores_missing_window_with_source_evidence_and_coordinates
     assert [b["xyxy"] for b in result["boxes"]] == [ANCHOR, PARTNER]
     assert result["boxes"][0]["confidence"] == 0.3  # original crop/evidence wins
     partner = result["boxes"][1]
-    assert partner["localization_method"] == "photo_pair_context_v1"
-    assert partner["supporting_views"] == ["pair_gamma", "pair_original"]
+    assert partner["localization_method"] == "photo_pair_context_v2"
+    assert partner["supporting_views"] == ["pair_gamma_medium", "pair_gamma_wide"]
     assert partner["pair_anchor_xyxy"] == ANCHOR
     assert set(partner["pair_window_pixels"]) == {"anchor", "partner"}
     assert all(p["dark_fraction"] >= 0.25 for p in partner["pair_window_pixels"].values())
-    assert partner["pair_window_pixels"]["partner"]["evidence_bbox"] == [112, 86, 150, 119]
+    assert partner["pair_window_pixels"]["partner"]["evidence_bbox"] == [109, 83, 153, 122]
     assert "instrument_id" not in partner and "source_orientation" not in partner
     assert len(roles_for_boxes(result["boxes"])) == 2
-    assert calls[4][1:] == calls[5][1:] == (320, 0.25)
-    assert calls[4][0].shape[:2] == (75, 150)
+    assert calls[4][1:] == (640, 0.25) and calls[5][1:] == (960, 0.25)
+    assert calls[4][0].shape[:2] == (210, 260)
     assert result["diagnostics"]["photo_pair_context"]["reason"] == "recovered"
 
 
@@ -177,9 +187,9 @@ def test_photo_pair_window_evidence_uses_relative_contrast_without_expanding_ocr
         ([[context_box()], []], "insufficient_supporting_views"),
         ([[context_box(score=0.24)], [context_box(score=0.24)]], "below_recovery_confidence"),
         ([[context_box(class_id=1)], [context_box(class_id=1)]], "wrong_pair_class"),
-        ([[context_box([116, 45, 146, 70])]] * 2, "pair_context_out_of_bounds"),
+        ([[context_box([116, -25, 146, 0])]] * 2, "pair_context_out_of_bounds"),
         ([[context_box([116, 65, 146, 90])]] * 2, "pair_layout_unconfirmed"),
-        ([[context_box([116, 90, 176, 115])]] * 2, "pair_context_out_of_bounds"),
+        ([[context_box([116, 90, 276, 115])]] * 2, "pair_context_out_of_bounds"),
     ],
 )
 def test_photo_pair_requires_two_full_confidence_views_and_bounded_geometry(responses, reason):
@@ -209,6 +219,74 @@ def test_photo_pair_rejects_two_plausible_partners_instead_of_choosing_a_field()
     result, _ = run_pair(image, responses)
     assert len(result["boxes"]) == 1
     assert result["diagnostics"]["photo_pair_context"]["reason"] == "ambiguous_pair_partner"
+
+
+def test_photo_pair_padding_cannot_turn_solid_red_patch_on_black_desk_into_a_window():
+    image = panel_image()
+    image[80:125, 112:156] = 35
+    x1, y1, x2, y2 = PARTNER
+    image[y1:y2, x1:x2] = (0, 0, 210)
+    result, _ = run_pair(image)
+    assert len(result["boxes"]) == 1
+    assert "pair_window_evidence_missing" in {
+        b["reason"] for b in result["diagnostics"]["excluded_candidates"]
+    }
+
+
+def test_photo_pair_does_not_choose_an_anchor_among_multiple_primary_windows():
+    result, calls = run_pair(panel_image(), primary=[box(coords=ANCHOR), box(coords=PARTNER)])
+    assert len(calls) == 4 and len(result["boxes"]) == 2
+    assert "photo_pair_context" not in result["diagnostics"]
+
+
+def test_photo_pair_identical_clipped_contexts_and_model_scales_are_not_two_views():
+    result, calls = run_pair(panel_image(), imgsz=640)
+    assert len(result["boxes"]) == 1 and len(calls) == 14
+    assert "duplicate_context_views" in {
+        b["reason"] for b in result["diagnostics"]["excluded_candidates"]
+    }
+
+
+def test_photo_pair_rejects_same_class_window_on_a_distant_device_in_the_same_row():
+    distant = [180, 90, 210, 115]
+    image = panel_image((ANCHOR, distant))
+    responses = [[context_box(distant)]] * 2
+    result, _ = run_pair(image, responses)
+    assert len(result["boxes"]) == 1
+    assert not roles_for_boxes(result["boxes"])
+    rejected = [
+        b
+        for b in result["diagnostics"]["excluded_candidates"]
+        if b["reason"] == "pair_window_gap_exceeded"
+    ]
+    assert len(rejected) == 2
+    assert all(
+        b["pair_horizontal_gap"] == 70 and b["pair_horizontal_gap_limit"] == 30 for b in rejected
+    )
+
+
+def test_photo_pair_maps_each_chassis_context_back_to_the_same_source_window():
+    anchor, partner = [330, 350, 360, 375], [366, 350, 396, 375]
+    image = np.full((740, 900, 3), 200, np.uint8)
+    small = panel_image()
+    image[350:375, 330:396] = small[90:115, 80:146]
+    calls = []
+
+    def infer(pixels, size, threshold):
+        calls.append((pixels.shape[:2], size, threshold))
+        if len(calls) == 1:
+            return {"boxes": [box(0.3, coords=anchor)]}
+        if len(calls) <= 4:
+            return {"boxes": []}
+        origin = [150, 150] if len(calls) == 5 else [30, 50]
+        return {"boxes": [box(coords=[v - origin[i % 2] for i, v in enumerate(partner)])]}
+
+    result = detect(image, infer, photo=True)
+    assert len(calls) == 6
+    assert [b["xyxy"] for b in result["boxes"]] == [anchor, partner]
+    assert calls[4:] == [((425, 390), 640, 0.25), ((625, 630), 960, 0.25)]
+    passes = result["diagnostics"]["photo_pair_context"]["passes"]
+    assert [p["context_bbox"] for p in passes] == [[150, 150, 540, 575], [30, 50, 660, 675]]
 
 
 def test_photo_pair_does_not_replace_another_primary_class_region():

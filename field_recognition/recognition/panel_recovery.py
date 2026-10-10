@@ -53,7 +53,7 @@ def has_display_color(hsv, box):
 def window_pixels(hsv, coords):
     """Independent sparse red glyph/dark-window evidence, not an OCR identity."""
     x1, y1, x2, y2 = [round(v) for v in coords]
-    pad = max(2, math.ceil(min(x2 - x1, y2 - y1) * 0.15))
+    pad = max(2, math.ceil(min(x2 - x1, y2 - y1) * 0.25))
     if x1 - pad < 0 or y1 - pad < 0 or x2 + pad > hsv.shape[1] or y2 + pad > hsv.shape[0]:
         return None
     if min(x2 - x1, y2 - y1) < 8:
@@ -63,6 +63,7 @@ def window_pixels(hsv, coords):
     crop = hsv[y1 - pad : y2 + pad, x1 - pad : x2 + pad]
     hue, saturation, value = cv2.split(crop)
     red = ((hue <= 12) | (hue >= 170)) & (saturation >= 30) & (value >= 35)
+    inner_red_fraction = float(red[pad:-pad, pad:-pad].mean())
     # Relative contrast survives exposure changes; a uniform red object cannot
     # supply a distinct dark-window population merely by being bright or dim.
     contrast = float(np.percentile(value, 90) - np.percentile(value, 10))
@@ -71,6 +72,8 @@ def window_pixels(hsv, coords):
     ys, xs = np.where(red)
     if (
         not 0.06 <= red_fraction <= 0.5
+        # Padding must not dilute a solid red object into apparent glyphs.
+        or inner_red_fraction >= 0.9
         or dark_fraction < 0.25
         or contrast < 35
         or not xs.size
@@ -80,6 +83,7 @@ def window_pixels(hsv, coords):
         return None
     return {
         "red_fraction": round(red_fraction, 4),
+        "inner_red_fraction": round(inner_red_fraction, 4),
         "dark_fraction": round(dark_fraction, 4),
         "value_contrast": round(contrast, 2),
         "dark_threshold": threshold,
@@ -99,15 +103,30 @@ def photo_pair_context(image, hsv, anchor, infer, imgsz, confidence):
         return result
     x1, y1, x2, y2 = anchor["xyxy"]
     width, height = x2 - x1, y2 - y1
-    left, top = max(0, math.floor(x1 - 2 * width)), max(0, math.floor(y1 - height))
-    right = min(image.shape[1], math.ceil(x2 + 2 * width))
-    bottom = min(image.shape[0], math.ceil(y2 + height))
-    crop = image[top:bottom, left:right].copy()
-    diagnostics.update(attempted=True, context_bbox=[left, top, right, bottom])
+    diagnostics["attempted"] = True
     candidates = []
-    for name, pixels in (("pair_original", crop), ("pair_gamma", cv2.LUT(crop, GAMMA_LUT))):
-        detection = infer(pixels, min(imgsz, 320), confidence)
-        diagnostics["passes"].append({"view": name, "candidate_count": len(detection["boxes"])})
+    view_signatures = {}
+    # A character-only crop removes the chassis context learned by this model.
+    # Two fields of view retain the device while exposing distinct model scales.
+    for name, horizontal, vertical, size in (
+        ("pair_gamma_medium", 6, 8, min(imgsz, 640)),
+        ("pair_gamma_wide", 10, 12, imgsz),
+    ):
+        left = max(0, math.floor(x1 - horizontal * width))
+        top = max(0, math.floor(y1 - vertical * height))
+        right = min(image.shape[1], math.ceil(x2 + horizontal * width))
+        bottom = min(image.shape[0], math.ceil(y2 + vertical * height))
+        view_signatures[name] = (left, top, right, bottom, size)
+        pixels = cv2.LUT(image[top:bottom, left:right], GAMMA_LUT)
+        detection = infer(pixels, size, confidence)
+        diagnostics["passes"].append(
+            {
+                "view": name,
+                "candidate_count": len(detection["boxes"]),
+                "context_bbox": [left, top, right, bottom],
+                "imgsz": size,
+            }
+        )
         for key, value in detection.get("speed_ms", {}).items():
             result["speed_ms"][key] = result["speed_ms"].get(key, 0) + value
         for item in detection["boxes"]:
@@ -119,6 +138,9 @@ def photo_pair_context(image, hsv, anchor, infer, imgsz, confidence):
                 item["xyxy"][3] + top,
             ]
             bx1, by1, bx2, by2 = box["xyxy"]
+            gap = max(bx1 - x2, x1 - bx2, 0)
+            gap_limit = max(width, bx2 - bx1)
+            box.update(pair_horizontal_gap=gap, pair_horizontal_gap_limit=gap_limit)
             reason = (
                 "wrong_pair_class"
                 if box["class_id"] != anchor["class_id"]
@@ -130,6 +152,9 @@ def photo_pair_context(image, hsv, anchor, infer, imgsz, confidence):
                 if iou(box["xyxy"], anchor["xyxy"]) >= 0.4
                 else "pair_window_size_mismatch"
                 if not (0.6 <= (bx2 - bx1) / width <= 1.7 and 0.65 <= (by2 - by1) / height <= 1.5)
+                # Wider chassis context can include another device in the same row.
+                else "pair_window_gap_exceeded"
+                if gap > gap_limit
                 else "pair_layout_unconfirmed"
                 if len(roles_for_boxes([anchor, box])) != 2
                 else "pair_window_evidence_missing"
@@ -150,6 +175,9 @@ def photo_pair_context(image, hsv, anchor, infer, imgsz, confidence):
                 box | {"reason": "insufficient_supporting_views"}
             )
             continue
+        if len({view_signatures[name] for name in support}) < 2:
+            diagnostics["excluded_candidates"].append(box | {"reason": "duplicate_context_views"})
+            continue
         consensus.append(box | {"supporting_views": support})
     diagnostics["reason"] = (
         "recovered"
@@ -161,7 +189,7 @@ def photo_pair_context(image, hsv, anchor, infer, imgsz, confidence):
     if len(consensus) == 1:
         box = consensus[0]
         result["box"] = {k: v for k, v in box.items() if k not in {"view", "window_pixels"}} | {
-            "localization_method": "photo_pair_context_v1",
+            "localization_method": "photo_pair_context_v2",
             "pair_anchor_xyxy": list(anchor["xyxy"]),
             "pair_window_pixels": {"anchor": anchor_pixels, "partner": box["window_pixels"]},
             "pair_layout_basis": "model_horizontal_pair_contract",

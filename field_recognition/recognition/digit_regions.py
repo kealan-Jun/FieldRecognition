@@ -144,6 +144,52 @@ def _off_shape(image):
     }
 
 
+def _red_ocr_views(image, region):
+    """Use unsaturated source channels; never draw, join or replace a stroke."""
+    _, transform = extract_digits(image, region)
+    blue, green, red = cv2.split(image.astype(np.int16))
+    inside = np.zeros(image.shape[:2], np.uint8)
+    cv2.fillConvexPoly(inside, np.rint(region["polygon"]).astype(np.int32), 1)
+    red_source = (inside != 0) & (red - np.maximum(blue, green) > 18) & (red > 60)
+    samples = green[red_source]
+    diagnostics = {
+        "method": "source_unsaturated_channels_v1",
+        "source_pixel_count": int(samples.size),
+    }
+    if samples.size < 16:
+        return [], transform, dict(diagnostics, status="insufficient_source_pixels")
+    low, high = np.percentile(samples, [5, 95])
+    diagnostics.update(green_low=round(float(low), 3), green_high=round(float(high), 3))
+    if high - low < 15:
+        return [], transform, dict(diagnostics, status="insufficient_source_contrast")
+    # Red LEDs often saturate R. B/G preserve their brightness difference from
+    # the red surround. The second view uses a different source channel and
+    # linear contrast range; neither operation changes character geometry.
+    channels = [
+        ("max_bg_negative", (255 - np.maximum(blue, green)).astype(np.uint8)),
+        (
+            "green_contrast_negative",
+            255 - np.rint(np.clip((green - low) * 255 / (high - low), 0, 255)).astype(np.uint8),
+        ),
+    ]
+    views = [
+        (
+            name,
+            cv2.warpPerspective(
+                cv2.cvtColor(channel, cv2.COLOR_GRAY2BGR),
+                transform,
+                tuple(region["size"]),
+                flags=cv2.INTER_CUBIC,
+                borderMode=cv2.BORDER_REPLICATE,
+            ),
+        )
+        for name, channel in channels
+    ]
+    if np.array_equal(views[0][1], views[1][1]):
+        return [], transform, dict(diagnostics, status="duplicate_preprocessed_views")
+    return views, transform, dict(diagnostics, status="prepared")
+
+
 def _red_recovery(predict, image, previous, x, y, readout_rejected=False):
     started = time.monotonic()
     geometry = red_display_geometry(image, x, y)
@@ -191,13 +237,11 @@ def _red_recovery(predict, image, previous, x, y, readout_rejected=False):
         min(640, round(geometry["native_size"][0] * scale)),
         min(192, round(geometry["native_size"][1] * scale)),
     ]
-    crop, transform = extract_digits(image, dict(native_region, size=size))
-    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-    # Negative grayscale makes illuminated bars dark without adding strokes.
-    gray = cv2.cvtColor(255 - gray, cv2.COLOR_GRAY2BGR)
+    views, transform, preprocessing = _red_ocr_views(image, dict(native_region, size=size))
+    output["red_display_preprocessing"] = preprocessing
     attempts, accepted = [], []
     for degrees in (0, 180):
-        for name, view in (("color", crop), ("negative_gray", gray)):
+        for name, view in views:
             view = view if degrees == 0 else cv2.rotate(view, cv2.ROTATE_180)
             receipt = predict(view, 0, 0)
             attempt = {
