@@ -136,3 +136,48 @@ def _red_ocr_views(image, region):
     if np.array_equal(views[0][1], views[1][1]):
         return [], transform, dict(diagnostics, status="duplicate_preprocessed_views")
     return views, transform, dict(diagnostics, status="prepared")
+
+
+def _off_ocr_views(image, region):
+    """Prepare a fixed source pair after one complete native OFF-like pattern.
+
+    Both views use the unchanged source quad. They are correlated transforms,
+    not new source detail or independent truth. The caller must first verify
+    one complete native OFF-like pattern; two actual exact OFF OCR readings
+    are still required. No prior OCR text selects these views.
+    """
+    diagnostics = {"method": "source_luminance_and_unsaturated_channels_v1"}
+    if (
+        not isinstance(image, np.ndarray)
+        or image.ndim != 3
+        or image.shape[2] != 3
+        or not image.size
+        or image.dtype != np.uint8
+    ):
+        return [], np.eye(3), dict(diagnostics, status="invalid_source_image")
+    original_views, transform, source_channels = _red_ocr_views(image, region)
+    diagnostics["source_channels"] = source_channels
+    if len(original_views) != 2:
+        return (
+            [],
+            transform,
+            dict(diagnostics, status=source_channels.get("status", "not_prepared")),
+        )
+    max_bg = next(view for name, view in original_views if name == "max_bg_negative")
+    luminance_negative = cv2.cvtColor(
+        255 - cv2.cvtColor(image, cv2.COLOR_BGR2GRAY), cv2.COLOR_GRAY2BGR
+    )
+    luminance_view = cv2.warpPerspective(
+        luminance_negative,
+        transform,
+        tuple(region["size"]),
+        flags=cv2.INTER_CUBIC,
+        borderMode=cv2.BORDER_REPLICATE,
+    )
+    if np.array_equal(luminance_view, max_bg):
+        return [], transform, dict(diagnostics, status="duplicate_preprocessed_views")
+    return (
+        [("source_luminance_negative", luminance_view), ("max_bg_negative", max_bg)],
+        transform,
+        dict(diagnostics, status="prepared"),
+    )

@@ -10,8 +10,53 @@ from field_recognition.recognition.panel_recovery import (
     photo_pair_context,
     photo_weak_pair_context,
     source_box,
+    weak_crop_boundary_issue,
     window_pixels,
 )
+
+
+def test_weak_crop_rejects_connected_native_strokes_crossing_its_left_boundary():
+    image = np.zeros((60, 100, 3), np.uint8)
+    cv2.rectangle(image, (25, 18), (45, 34), (0, 0, 230), 2)
+    item = {
+        "xyxy": [35, 15, 80, 35],
+        "pair_window_pixels": {"left": {"evidence_bbox": [20, 10, 88, 45]}},
+    }
+    issue = weak_crop_boundary_issue(image, item, [33, 13, 82, 37])
+    assert issue["reason"] == "source_crop_truncated"
+    component = issue["crossing_components"][0]
+    assert component["source_bbox"][0] < 33 < component["source_bbox"][2]
+    assert component["native_height"] >= issue["minimum_native_height"]
+    assert "value" not in issue and "text" not in issue
+    # A complete crop of the same source strokes remains eligible.
+    assert weak_crop_boundary_issue(image, item, [20, 13, 82, 37]) is None
+
+
+@pytest.mark.parametrize("source_kind", ["tiny_noise", "dim_surround", "separate_row", "solid"])
+def test_weak_crop_boundary_guard_does_not_treat_red_background_or_noise_as_strokes(source_kind):
+    image = np.zeros((60, 100, 3), np.uint8)
+    if source_kind == "tiny_noise":
+        cv2.rectangle(image, (25, 22), (45, 25), (0, 0, 230), 1)
+    elif source_kind == "dim_surround":
+        image[10:45, 20:88] = (0, 0, 70)
+        cv2.rectangle(image, (45, 18), (65, 34), (0, 0, 230), 2)
+    elif source_kind == "separate_row":
+        cv2.rectangle(image, (25, 40), (45, 56), (0, 0, 230), 2)
+    else:
+        image[10:45, 20:88] = (0, 0, 230)
+    item = {
+        "xyxy": [35, 15, 80, 35],
+        "pair_window_pixels": {"left": {"evidence_bbox": [20, 10, 88, 45]}},
+    }
+    assert weak_crop_boundary_issue(image, item, [33, 13, 82, 37]) is None
+
+
+@pytest.mark.parametrize("bounds", [[1], [1, 2, 3, float("nan")], ["x", 2, 3, 4], None])
+def test_weak_crop_boundary_malformed_evidence_does_not_crash_other_fields(bounds):
+    item = {"xyxy": [35, 15, 80, 35], "pair_window_pixels": {"left": {"evidence_bbox": bounds}}}
+    assert (
+        weak_crop_boundary_issue(np.zeros((60, 100, 3), np.uint8), item, [33, 13, 82, 37]) is None
+    )
 
 
 def box(score=0.6, class_id=0, coords=None):

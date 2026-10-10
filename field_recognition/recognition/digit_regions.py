@@ -13,6 +13,7 @@ from field_recognition.recognition.red_geometry import (
     extract_digits,
     red_display_geometry,
     _red_ocr_views,
+    _off_ocr_views,
 )
 
 
@@ -196,6 +197,14 @@ def _off_shape(image):
 
 def _native_off_geometry(image, x, y):
     """Measure display direction before authorizing rotated OCR or an OFF state."""
+    if (
+        not isinstance(image, np.ndarray)
+        or image.ndim != 3
+        or image.shape[2] != 3
+        or not image.size
+        or image.dtype != np.uint8
+    ):
+        return None
     geometry = red_display_geometry(image, x, y)
     if geometry is None:
         return None
@@ -275,11 +284,20 @@ def _red_recovery(predict, image, previous, x, y, readout_rejected=False, *, sou
     output = copy.deepcopy(previous)
     output["red_display_geometry"] = geometry
     output["red_display_off_shape"] = off_shapes
-    orientations = (0, 180) if 180 in native_directions else (0,)
+    native_off_pair = (
+        len(native_directions) == 1 and off_shapes[native_directions[0]]["status"] == "consistent"
+    )
+    orientations = tuple(native_directions) if native_off_pair else (0,)
     output["red_display_retry_gate"] = {
         "orientation_degrees": list(orientations),
         "native_directions": native_directions,
         "rotated_retry_basis": "native_off_bars_required",
+        "view_selection": "native_off_fixed_source_pair"
+        if native_off_pair
+        else "source_channel_pair",
+        "view_selection_basis": "unique_complete_native_off_source_before_retry"
+        if native_off_pair
+        else "no_unique_complete_native_off_source",
     }
     if previous.get("digit_consistency", {}).get("native_confirmation_required") and not (
         len(native_directions) == 1
@@ -293,7 +311,8 @@ def _red_recovery(predict, image, previous, x, y, readout_rejected=False, *, sou
         min(640, round(geometry["native_size"][0] * scale)),
         min(192, round(geometry["native_size"][1] * scale)),
     ]
-    views, transform, preprocessing = _red_ocr_views(image, dict(native_region, size=size))
+    prepare_views = _off_ocr_views if native_off_pair else _red_ocr_views
+    views, transform, preprocessing = prepare_views(image, dict(native_region, size=size))
     output["red_display_preprocessing"] = preprocessing
     attempts, accepted = [], []
     for degrees in orientations:

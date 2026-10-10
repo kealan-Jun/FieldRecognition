@@ -209,21 +209,20 @@ def test_red_pixel_geometry_recovers_actual_off_and_preserves_receipts_and_offse
     json.dumps(out)
 
 
-def test_rotated_red_off_coordinates_return_to_source_and_all_four_receipts_survive():
+def test_rotated_red_off_coordinates_return_to_source_with_two_proven_direction_receipts():
     image = cv2.rotate(red_off_panel(), cv2.ROTATE_180)
     raw = {"status": "completed", "lines": []}
     calls = []
 
     def predict(view, x, y):
         calls.append(view.copy())
-        text = "OFF" if len(calls) > 2 else "出"
         return {
-            "lines": [line(text, [0, 0, view.shape[1] - 1, view.shape[0] - 1])],
+            "lines": [line("OFF", [0, 0, view.shape[1] - 1, view.shape[0] - 1])],
             "request_id": f"adapter-{len(calls)}",
         }
 
     out = refine_digits(predict, image, raw, 7, 13, recover_red=True)
-    assert len(calls) == 4
+    assert len(calls) == 2
     assert out["red_display_orientation"]["orientation_degrees"] == 180
     assert out["red_display_orientation"]["status"] == "consistent"
     assert out["display_state"]["text"] == "OFF"
@@ -232,16 +231,17 @@ def test_rotated_red_off_coordinates_return_to_source_and_all_four_receipts_surv
         np.asarray(out["digit_region"]["polygon"])[[2, 3, 0, 1]],
         atol=0.001,
     )
-    assert len(out["red_display_ocr_attempts"]) == 4
+    assert len(out["red_display_ocr_attempts"]) == 2
+    assert all(a["orientation_degrees"] == 180 for a in out["red_display_ocr_attempts"])
 
 
-@pytest.mark.parametrize("rotated,calls", [(False, 2), (True, 4)])
+@pytest.mark.parametrize("rotated,calls", [(False, 2), (True, 2)])
 def test_red_retries_never_replace_ambiguous_characters_or_infer_a_rotated_number(rotated, calls):
     image = red_off_panel()
     if rotated:
         image = cv2.rotate(image, cv2.ROTATE_180)
     raw = {"status": "completed", "lines": [line("1B2", [0, 0, 80, 44])]}
-    answers = iter(("5G", "出", "182", "182"))
+    answers = iter(("182", "182") if rotated else ("5G", "出"))
     out = refine_digits(
         lambda view, *a: {"lines": [line(next(answers), [0, 0, 50, 40])]},
         image,
@@ -355,7 +355,7 @@ def test_conflicting_off_cannot_overwrite_numeric_without_native_off_bars():
     assert out["digit_consistency"]["candidates"] == ["182", "OFF"]
 
 
-def test_native_180_direction_rejects_zero_degree_off_and_retries_correct_orientation():
+def test_native_180_direction_only_retries_the_correct_source_proven_orientation():
     image = cv2.rotate(red_off_panel(), cv2.ROTATE_180)
     calls = []
 
@@ -364,7 +364,7 @@ def test_native_180_direction_rejects_zero_degree_off_and_retries_correct_orient
         return {"lines": [line("OFF", [0, 0, view.shape[1] - 1, view.shape[0] - 1])]}
 
     out = refine_digits(predict, image, {"status": "completed", "lines": []}, recover_red=True)
-    assert len(calls) == 4
+    assert len(calls) == 2
     assert out["red_display_orientation"]["orientation_degrees"] == 180
     assert out["red_display_orientation"]["status"] == "consistent"
     assert out["display_state"]["text"] == "OFF"
@@ -421,7 +421,7 @@ def test_original_off_native_reverse_direction_cannot_fastpath_or_fallback_to_ra
         raw,
         recover_red=True,
     )
-    assert len(calls) == 4 and not out.get("display_state")
+    assert len(calls) == 2 and not out.get("display_state")
     assert not out.get("red_display_fastpath")
     assert out["display_state_rejection"] == {
         "text": "OFF",
@@ -429,7 +429,7 @@ def test_original_off_native_reverse_direction_cannot_fastpath_or_fallback_to_ra
         "native_directions": [180],
     }
     assert out["panel_ocr"] == raw
-    assert out["red_display_retry_gate"]["orientation_degrees"] == [0, 180]
+    assert out["red_display_retry_gate"]["orientation_degrees"] == [180]
 
 
 @pytest.mark.parametrize("confidence", [0.59, float("inf"), float("nan"), "invalid"])

@@ -147,8 +147,29 @@ def predict(core, image, x=0, y=0, *, video=False, allowed_instrument_ids=()):
         cx, cy = max(0, x1 - pad), max(0, y1 - pad)
         ex, ey = min(image.shape[1], x2 + pad), min(image.shape[0], y2 + pad)
         panel = image[cy:ey, cx:ex].copy()
-        local = predict_panel(panel, x + cx, y + cy)
-        if box["class_id"] == 1 and not video:
+        crop_issue = None
+        if (
+            not video
+            and box["class_id"] == 0
+            and box.get("localization_method") == "photo_weak_pair_context_v1"
+        ):
+            from field_recognition.recognition.panel_recovery import weak_crop_boundary_issue
+
+            crop_issue = weak_crop_boundary_issue(image, box, [cx, cy, ex, ey])
+        local = (
+            {
+                "status": "completed",
+                "lines": [],
+                "actual_model_invocation": False,
+                "recognition_skipped": True,
+                "failure_reason": "source_crop_truncated",
+                "source_crop_quality": crop_issue,
+                "ocr_model_call_count": 0,
+            }
+            if crop_issue
+            else predict_panel(panel, x + cx, y + cy)
+        )
+        if not crop_issue and box["class_id"] == 1 and not video:
             from field_recognition.recognition.lcd_digits import refine_lcd
 
             instrument = core.get("get_instrument", lambda _: {})(box["instrument_id"]) or {}
@@ -162,7 +183,7 @@ def predict(core, image, x=0, y=0, *, video=False, allowed_instrument_ids=()):
                 source_offset=(x, y),
                 instrument=instrument,
             )
-        else:
+        elif not crop_issue:
             # A syntactically numeric OCR token (e.g. "5G") can still violate
             # the registered field rule. Retry its source pixels, not a guessed
             # character substitution, while preserving the untouched receipt.
@@ -193,7 +214,7 @@ def predict(core, image, x=0, y=0, *, video=False, allowed_instrument_ids=()):
                 ),
                 require_native_conflict_confirmation=box["class_id"] == 0 and not video,
             )
-        if box["class_id"] == 0:
+        if not crop_issue and box["class_id"] == 0:
             from field_recognition.recognition.led_digits import verify_digits
 
             local = verify_digits(panel, local, x + cx, y + cy)
@@ -341,6 +362,7 @@ def needs_fallback(local):
                 reason
                 for r in local["panel_regions"]
                 if not r.get("display_state")
+                if (r["local_ocr"].get("source_crop_quality") or {}).get("status") != "rejected"
                 if (
                     reason := reading_fallback_reason(
                         r["local_ocr"].get("lines", []), r["local_ocr"].get("error")
@@ -423,6 +445,7 @@ def finish(
             image_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
         )
         result = region["local_ocr"]
+        crop_rejected = (result.get("source_crop_quality") or {}).get("status") == "rejected"
         lines = copy.deepcopy(result.get("lines", []))
         lines = validate_lines(lines, region.get("measurement_name"), region["instrument"])
         reason = (
@@ -435,7 +458,15 @@ def finish(
         primary = pipeline.primary_photos() and document.get("request_trigger") != "video_stream"
         if primary and not region.get("display_state"):
             reason = "primary_photo"
-        if reason and pipeline.public_config()["available"] and valid():
+        if crop_rejected:
+            region["fallback"] = {
+                "panel_id": region["panel_id"],
+                "status": "skipped",
+                "reason": "source_crop_truncated",
+                "queue_wait_ms": 0,
+            }
+            attempts.append(region["fallback"])
+        if not crop_rejected and reason and pipeline.public_config()["available"] and valid():
             attempt = {"panel_id": region["panel_id"], "trigger": reason}
             slot_started = clock()
             acquired = (

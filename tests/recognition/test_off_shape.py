@@ -1,12 +1,14 @@
 """Pure source-pixel OFF evidence; these synthetic cases are not OCR accuracy."""
 
 import json
+import hashlib
 
 import cv2
 import numpy as np
 import pytest
 
 from field_recognition.recognition import digit_regions
+from field_recognition.recognition import red_geometry
 
 
 def _off_panel():
@@ -184,7 +186,7 @@ def test_single_actual_off_ocr_view_still_cannot_complete_native_proof(monkeypat
             ]
         }
 
-    monkeypatch.setattr(digit_regions, "_red_ocr_views", one_view)
+    monkeypatch.setattr(digit_regions, "_off_ocr_views", one_view)
     output = digit_regions._red_recovery(predict, image, {"lines": []}, 0, 0)
 
     assert calls == [1]
@@ -327,3 +329,176 @@ def test_native_geometry_keeps_ocr_coordinates_and_independent_direction_receipt
         for axis in (0, 1)
     )
     json.dumps(shapes)
+
+
+def _actual_line(text, view, confidence=0.9):
+    h, w = view.shape[:2]
+    return {
+        "status": "completed",
+        "lines": [
+            {
+                "text": text,
+                "confidence": confidence,
+                "polygon": [[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]],
+            }
+        ],
+    }
+
+
+def _png_sha(image):
+    ok, encoded = cv2.imencode(".png", image)
+    assert ok
+    return hashlib.sha256(encoded.tobytes()).hexdigest()
+
+
+@pytest.mark.parametrize("rotated", [False, True])
+def test_unique_native_off_selects_fixed_pair_before_two_actual_matching_receipts(rotated):
+    image = _narrow_off_panel()
+    if rotated:
+        image = cv2.rotate(image, cv2.ROTATE_180)
+    source_before = image.copy()
+    previous = {"lines": [], "panel_ocr": {"lines": [{"text": "GFF", "confidence": 0.9}]}}
+    calls = []
+
+    def predict(view, x, y):
+        receipt = _actual_line("OFF", view)
+        receipt["request_id"] = f"actual-{len(calls)}"
+        calls.append(receipt)
+        return receipt
+
+    output = digit_regions._red_recovery(predict, image, previous, 17, 23)
+
+    assert len(calls) == 2
+    assert output["panel_ocr"] == previous["panel_ocr"]
+    assert output["display_state"]["text"] == "OFF"
+    assert output["display_state"]["verification"] == "native_corroborated"
+    assert [a["view"] for a in output["red_display_ocr_attempts"]] == [
+        "source_luminance_negative",
+        "max_bg_negative",
+    ]
+    assert [a["ocr"] for a in output["red_display_ocr_attempts"]] == calls
+    degrees = 180 if rotated else 0
+    assert output["red_display_retry_gate"]["orientation_degrees"] == [degrees]
+    assert output["red_display_retry_gate"]["view_selection_basis"] == (
+        "unique_complete_native_off_source_before_retry"
+    )
+    assert output["red_display_orientation"]["orientation_degrees"] == degrees
+    expected = np.asarray(output["digit_region"]["polygon"])
+    if rotated:
+        expected = expected[[2, 3, 0, 1]]
+    assert np.allclose(output["display_state"]["polygon"], expected, atol=0.001)
+    assert np.array_equal(image, source_before)
+
+
+def test_off_fixed_channels_are_original_bgr_luminance_and_unchanged_max_bg_with_same_quad():
+    image = _narrow_off_panel()
+    geometry, region, _, _ = digit_regions._native_off_geometry(image, 11, 13)
+    region = dict(region, size=[113, 64])
+    views, transform, preprocessing = digit_regions._off_ocr_views(image, region)
+    old_views, old_transform, old_preprocessing = digit_regions._red_ocr_views(image, region)
+    points = np.asarray(region["polygon"], np.float32)
+    target = np.asarray([[0, 0], [112, 0], [112, 63], [0, 63]], np.float32)
+    expected_transform = cv2.getPerspectiveTransform(points, target)
+    expected = cv2.warpPerspective(
+        cv2.cvtColor(255 - cv2.cvtColor(image, cv2.COLOR_BGR2GRAY), cv2.COLOR_GRAY2BGR),
+        expected_transform,
+        (113, 64),
+        flags=cv2.INTER_CUBIC,
+        borderMode=cv2.BORDER_REPLICATE,
+    )
+
+    assert [name for name, _ in views] == ["source_luminance_negative", "max_bg_negative"]
+    assert _png_sha(views[0][1]) == _png_sha(expected)
+    assert _png_sha(views[1][1]) == _png_sha(old_views[0][1])
+    assert _png_sha(views[0][1]) != _png_sha(views[1][1])
+    assert np.array_equal(transform, old_transform)
+    assert np.allclose(transform, expected_transform)
+    assert np.allclose(np.asarray(region["polygon"]) + [11, 13], geometry["polygon"])
+    assert preprocessing["source_channels"] == old_preprocessing
+
+
+@pytest.mark.parametrize("character", ["8", "G"])
+def test_no_complete_native_off_proof_keeps_original_numeric_channels(character, monkeypatch):
+    image = _narrow_off_panel()
+    start = 5 if character == "8" else 8
+    image[11:14, start:12] = (190, 190, 255)
+    evidence = digit_regions._native_off_geometry(image, 0, 0)
+    assert evidence[3] == []
+    monkeypatch.setattr(digit_regions, "_off_ocr_views", lambda *args: pytest.fail("No native OFF"))
+    calls = []
+
+    def predict(view, x, y):
+        calls.append(view.copy())
+        return _actual_line("182", view)
+
+    output = digit_regions._red_recovery(predict, image, {"lines": []}, 0, 0)
+    size = output["red_display_ocr_attempts"][0]["size"]
+    expected, _, _ = digit_regions._red_ocr_views(image, dict(evidence[1], size=size))
+    assert len(calls) == 2
+    assert [a["view"] for a in output["red_display_ocr_attempts"]] == [
+        "max_bg_negative",
+        "green_contrast_negative",
+    ]
+    assert [_png_sha(v) for v in calls] == [_png_sha(v) for _, v in expected]
+    assert [line["text"] for line in output["lines"]] == ["182"]
+    assert "display_state" not in output
+    assert output["red_display_retry_gate"]["view_selection"] == "source_channel_pair"
+
+
+def test_successful_original_exact_off_keeps_raw_receipt_without_fixed_views(monkeypatch):
+    image = _narrow_off_panel()
+    initial = _actual_line("OFF", image, 0.835)
+    initial["request_id"] = "original-exact-off"
+    monkeypatch.setattr(digit_regions, "_off_ocr_views", lambda *a: pytest.fail("Keep raw success"))
+    output = digit_regions.refine_digits(
+        lambda *a: pytest.fail("Original OFF needs no retry"), image, initial, recover_red=True
+    )
+    assert output["panel_ocr"] == initial
+    assert output["display_state"]["confidence"] == 0.835
+    assert output["display_state"]["source"] == "local_ocr.panel_ocr"
+    assert output["red_display_fastpath"]["adapter_retries"] == 0
+    assert not output.get("red_display_ocr_attempts")
+
+
+@pytest.mark.parametrize(
+    "image",
+    [
+        None,
+        np.zeros((8, 8), np.uint8),
+        np.zeros((8, 8, 4), np.uint8),
+        np.zeros((0, 8, 3), np.uint8),
+        np.full((8, 8, 3), np.nan, np.float32),
+        np.zeros((8, 8, 3), np.uint16),
+    ],
+)
+def test_invalid_source_cannot_prepare_off_views_or_invoke_a_model(image):
+    views, _, preprocessing = digit_regions._off_ocr_views(image, {})
+    assert views == [] and preprocessing["status"] == "invalid_source_image"
+    assert digit_regions._native_off_geometry(image, 0, 0) is None
+    previous = {"lines": []}
+    output = digit_regions._red_recovery(
+        lambda *a: pytest.fail("No valid source"), image, previous, 0, 0
+    )
+    assert output is previous
+
+
+def test_duplicate_off_views_cannot_supply_two_actual_votes(monkeypatch):
+    image = _narrow_off_panel()
+    _, region, _, _ = digit_regions._native_off_geometry(image, 0, 0)
+    size = region["size"]
+    grey = 255 - cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    luminance, transform = red_geometry.extract_digits(
+        cv2.cvtColor(grey, cv2.COLOR_GRAY2BGR), region
+    )
+    monkeypatch.setattr(
+        red_geometry,
+        "_red_ocr_views",
+        lambda *a: (
+            [("max_bg_negative", luminance), ("green_contrast_negative", luminance + 1)],
+            transform,
+            {"status": "prepared"},
+        ),
+    )
+    views, _, preprocessing = digit_regions._off_ocr_views(image, region)
+    assert views == [] and preprocessing["status"] == "duplicate_preprocessed_views"
+    assert luminance.shape == (size[1], size[0], 3)

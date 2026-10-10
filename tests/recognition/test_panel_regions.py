@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import cv2
 
 import field_recognition.recognition.panel_readout as panel_readout
 import field_recognition.recognition.panel_regions as panel_regions
@@ -17,6 +18,146 @@ from tests.support.unbound_readout import photo
 from tests.support.panel_readout import Clock, cloud_result, refresh_recognition_config
 from tests.support.archive_store import archive  # noqa: F401
 from field_recognition.archive.archive_paths import resolve_file
+
+
+@pytest.mark.parametrize(
+    "method,video,rejected",
+    [
+        ("photo_weak_pair_context_v1", False, True),
+        ("original", False, False),
+        ("photo_weak_pair_context_v1", True, False),
+    ],
+)
+def test_weak_partial_crop_skips_only_its_field_and_keeps_other_crop_and_receipt(
+    monkeypatch, method, video, rejected
+):
+    import field_recognition.recognition.led_digits as led_digits
+
+    image = np.zeros((60, 170, 3), np.uint8)
+    cv2.rectangle(image, (25, 18), (45, 34), (0, 0, 230), 2)
+    cv2.rectangle(image, (106, 18), (130, 34), (0, 0, 230), 2)
+    proof = {
+        "left": {"evidence_bbox": [20, 10, 88, 45]},
+        "right": {"evidence_bbox": [90, 10, 148, 45]},
+    }
+    boxes = [
+        dict(
+            class_id=0,
+            instrument_id=A,
+            confidence=0.8,
+            xyxy=coords,
+            localization_method=method,
+            pair_window_pixels=proof,
+        )
+        for coords in ([35, 15, 80, 35], [100, 15, 140, 35])
+    ]
+    calls = []
+
+    def ocr(pixels, x, y):
+        calls.append((pixels.copy(), x, y))
+        return {
+            "status": "completed",
+            "lines": [{"text": "123", "confidence": 0.9}],
+            "actual_model_invocation": True,
+            "ocr_model_call_count": 1,
+            "receipt": "kept",
+        }
+
+    core = {
+        "panel_detector": SimpleNamespace(
+            enabled=lambda: True,
+            predict=lambda *a, **k: {"status": "completed", "boxes": copy.deepcopy(boxes)},
+        ),
+        "now": lambda: "test-time",
+        "ocr_state": {"engine": "test"},
+        "OCR_DEVICE": "cpu",
+        "predict_panel": ocr,
+    }
+    monkeypatch.setattr(
+        panel_regions, "refine_digits", lambda predict, image, local, *a, **k: local
+    )
+    monkeypatch.setattr(led_digits, "verify_digits", lambda image, local, *a: local)
+    result = panel_regions.predict(core, image, video=video, allowed_instrument_ids=[A])
+    left, right = result["panel_regions"]
+    assert left["measurement_name"] == "温度" and right["measurement_name"] == "转速"
+    assert right["crop"] == [98, 13, 44, 24]
+    assert right["local_ocr"]["receipt"] == "kept"
+    assert np.array_equal(calls[-1][0], image[13:37, 98:142])
+    assert len(calls) == result["ocr_model_call_count"] == (1 if rejected else 2)
+    assert left["bbox"] == boxes[0]["xyxy"] and left["detector_confidence"] == 0.8
+    if rejected:
+        assert left["local_ocr"]["lines"] == []
+        assert left["local_ocr"]["source_crop_quality"]["reason"] == "source_crop_truncated"
+        assert left["local_ocr"]["actual_model_invocation"] is False
+        assert panel_regions.needs_fallback(result) is None
+    else:
+        assert left["local_ocr"]["receipt"] == "kept"
+
+
+@pytest.mark.parametrize("photo_mode", ["fallback", "primary"])
+def test_rejected_crop_cannot_be_read_by_same_crop_vision_and_stays_unrecognized(
+    app_client, monkeypatch, photo_mode
+):
+    import field_recognition.recognition.aliyun_vision as vision
+
+    app, client = app_client
+    bindings = two_bindings(app, client)
+    configure(app, monkeypatch)
+    monkeypatch.setattr(app.readout_pool, "submit", lambda *a: None)
+    job = app.read_saved_panel(
+        app.SavedPhotoRequest(photo=photo(app)), trigger="voice_photo_directory"
+    )
+    local = app.predict_readout(np.zeros((300, 400, 3), np.uint8), binding_snapshots=bindings)
+    for region in local["panel_regions"]:
+        region["local_ocr"].update(
+            lines=[],
+            recognition_skipped=True,
+            actual_model_invocation=False,
+            failure_reason="source_crop_truncated",
+            source_crop_quality={"status": "rejected", "reason": "source_crop_truncated"},
+        )
+    local["lines"] = []
+    job["precomputed_local"] = local
+    monkeypatch.setenv("FIELD_ALIYUN_FALLBACK_ENABLED", "1")
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "test-only-key")
+    monkeypatch.setenv("FIELD_VISION_PHOTO_MODE", photo_mode)
+    refresh_recognition_config(app)
+    monkeypatch.setattr(
+        vision, "read_panel", lambda *a, **k: pytest.fail("partial crop reached vision")
+    )
+    clock = Clock()
+    from field_recognition.recognition.pipeline_context import ReadoutPipeline
+    from field_recognition.measurements.reading_results import build_readings
+    from field_recognition.measurements.measurement_records import display_fields
+
+    # Exercise the per-panel transaction in either provider mode. A primary
+    # whole-photo recovery is a separate, complete-source-image contract.
+    panel_regions.finish(
+        vars(app),
+        job,
+        local,
+        np.zeros((300, 400, 3), np.uint8),
+        valid=lambda: True,
+        pipeline=ReadoutPipeline(
+            lambda document: None, lambda *a, **k: True, app.config.recognition
+        ),
+        clock=clock,
+    )
+    done = job
+    done["readings"] = build_readings(done)
+    done["display_fields"] = display_fields(done)
+    assert done["status"] == "completed"
+    assert done["readings"] == []
+    assert done["display_fields"] and all(
+        field["value"] is None for field in done["display_fields"]
+    )
+    assert all(field["status"] == "unreadable" for field in done["display_fields"])
+    assert all(
+        region["local_ocr"]["failure_reason"] == "source_crop_truncated"
+        for region in done["panel_regions"]
+    )
+    assert all(region["fallback"]["status"] == "skipped" for region in done["panel_regions"])
+    assert done["fallback"]["queue_wait_ms"] == 0
 
 
 def test_off_display_is_a_state_not_zero_or_a_fallback_miss(app_client, monkeypatch):

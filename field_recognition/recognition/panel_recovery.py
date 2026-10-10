@@ -139,6 +139,68 @@ def _pair_geometry_reason(anchor, box):
     return None
 
 
+def weak_crop_boundary_issue(image, box, crop_bbox):
+    """Reject evidenced leading-stroke clipping, without deriving a readout.
+
+    Only the new weak-pair path uses this guard. Its wider native window
+    evidence can establish that an OCR crop cuts a connected bright structure;
+    it does not authorize expanding the crop into the neighbouring window.
+    """
+    evidence = []
+    for item in box.get("pair_window_pixels", {}).values():
+        bounds = item.get("evidence_bbox") if isinstance(item, dict) else None
+        if not isinstance(bounds, (list, tuple)) or len(bounds) != 4:
+            continue
+        try:
+            if all(math.isfinite(v) for v in bounds):
+                evidence.append(bounds)
+        except TypeError:
+            continue
+    if not evidence:
+        return None
+    bx1, by1, bx2, by2 = box["xyxy"]
+    center = (bx1 + bx2) / 2
+    bounds = min(evidence, key=lambda coords: abs((coords[0] + coords[2]) / 2 - center))
+    x1, y1, x2, y2 = map(int, bounds)
+    cx, cy, ex, ey = crop_bbox
+    if not (0 <= x1 < cx < x2 <= image.shape[1] and 0 <= y1 < y2 <= image.shape[0]):
+        return None
+    hue, saturation, value = cv2.split(cv2.cvtColor(image[y1:y2, x1:x2], cv2.COLOR_BGR2HSV))
+    threshold, _ = cv2.threshold(value, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+    bright = ((hue <= 12) | (hue >= 170)) & (saturation >= 30) & (value > threshold)
+    # Do not combine another row, or rely on red hue in a dim surround. These
+    # are unscaled source pixels, with no closing/painted bridges between them.
+    bright[: max(0, cy - y1)] = False
+    bright[max(0, ey - y1) :] = False
+    _, _, components, _ = cv2.connectedComponentsWithStats(bright.astype(np.uint8), 8)
+    minimum_height = max(8, math.ceil((by2 - by1) * 0.5))
+    crossing = []
+    for px, py, width, height, area in components[1:]:
+        sx, sy = x1 + int(px), y1 + int(py)
+        fill = int(area) / (int(width) * int(height))
+        if sx < cx < sx + width - 1 and height >= minimum_height and fill < 0.9:
+            crossing.append(
+                {
+                    "source_bbox": [sx, sy, sx + int(width), sy + int(height)],
+                    "native_height": int(height),
+                    "source_pixel_count": int(area),
+                    "fill": round(fill, 4),
+                }
+            )
+    if not crossing:
+        return None
+    return {
+        "status": "rejected",
+        "reason": "source_crop_truncated",
+        "basis": "native_bright_red_component_crosses_left_crop_boundary",
+        "source_crop_bbox": list(crop_bbox),
+        "evidence_bbox": [x1, y1, x2, y2],
+        "source_value_otsu_threshold": threshold,
+        "minimum_native_height": minimum_height,
+        "crossing_components": crossing,
+    }
+
+
 def photo_pair_context(image, hsv, anchor, infer, imgsz, confidence, existing_boxes=()):
     """Two actual views corroborate a partner, using at most three forwards."""
     diagnostics = {"attempted": False, "passes": [], "excluded_candidates": []}
