@@ -7,6 +7,7 @@ import pytest
 from field_recognition.measurements.measurement_records import measurement_value
 from field_recognition.recognition.led_digits import (
     PATTERNS,
+    has_dark_interiors,
     native_diagnostics,
     segment_check,
     verify_digits,
@@ -196,3 +197,74 @@ def test_inconclusive_native_color_diagnostics_cannot_bypass_original_stroke_hei
     assert result.get("digit_consistency", {}).get("status") != "resolved"
     assert result["digit_segment_check"]["status"] == "inconclusive"
     assert raw == before
+
+
+def test_single_integer_candidate_cannot_skip_visible_extra_native_groups():
+    image = cv2.resize(display("358"), None, fx=0.3, fy=0.3)
+    raw = local("5", image)
+    raw["panel_ocr"] = {"lines": copy.deepcopy(raw["lines"])}
+    before = copy.deepcopy(raw)
+    result = verify_digits(image, raw)
+    line = result["lines"][0]
+    assert line["text"] == "5" and line["confidence"] is None
+    assert line["quality_issue"] == "low_native_resolution"
+    assert "possible_missing_digit" in line["quality_issues"]
+    assert result["digit_segment_check"]["native_diagnostics"]["group_count"] == 3
+    normalized, _ = measurement_value("speed", line | {"value": line["text"]}, {})
+    assert normalized["value"] is None
+    assert raw == before and result["panel_ocr"] == before["panel_ocr"]
+
+
+def test_single_candidate_is_quality_checked_without_a_digit_region_or_numeric_repair():
+    image = display("72")
+    raw = local("1", image)
+    raw["digit_region"] = {"status": "not_located"}
+    result = verify_digits(image, raw)
+    assert result["lines"][0]["text"] == "1"
+    assert result["lines"][0]["quality_issue"] == "possible_missing_digit"
+    assert result["digit_consistency"]["status"] == "quality_issue"
+    assert "reading_source" not in result["lines"][0]
+
+
+@pytest.mark.parametrize("text", ["1", "5", "8"])
+def test_a_single_digit_without_independent_ambiguity_is_preserved(text):
+    image = display(text)
+    raw = local(text, image)
+    result = verify_digits(image, raw)
+    assert result["lines"] == raw["lines"]
+    assert result["digit_segment_check"]["reason"] == "single_digit_quality_only"
+
+
+@pytest.mark.parametrize("text", ["-5", "+5", "0.5", "5 g", "OFF"])
+def test_single_digit_quality_path_preserves_status_sign_decimal_and_unit_boundaries(text):
+    image = display("358")
+    raw = local(text, image)
+    assert verify_digits(image, raw) is raw
+
+
+@pytest.mark.parametrize("value", ["0", "6", "8", "9"])
+def test_loop_background_requires_a_dark_patch_not_isolated_noise(value):
+    glyph = np.ones((40, 20), np.uint8)
+    glyph[10, 10] = 0
+    glyph[28, 10] = 0
+    assert not has_dark_interiors(glyph, value)
+    glyph[7:16, 6:14] = 0
+    glyph[23:33, 6:14] = 0
+    assert has_dark_interiors(glyph, value)
+
+
+def test_solid_luminous_columns_cannot_support_a_pixel_eight_correction():
+    image = np.full((70, 100, 3), (15, 20, 125), np.uint8)
+    for left in (15, 60):
+        cv2.rectangle(image, (left, 10), (left + 20, 60), (235, 245, 255), -1)
+    assert segment_check(image, 2)["status"] == "inconclusive"
+    raw = local("8B", image)
+    result = verify_digits(image, raw)
+    assert result["lines"] == raw["lines"]
+    assert result.get("digit_consistency", {}).get("status") != "resolved"
+    assert result["digit_segment_check"]["status"] == "inconclusive"
+
+
+@pytest.mark.parametrize("text", ["00", "66", "88", "99", "0689"])
+def test_complete_connected_loop_digits_keep_their_interior_background(text):
+    assert segment_check(display(text), len(text))["status"] == "consistent"

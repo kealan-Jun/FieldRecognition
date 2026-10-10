@@ -307,3 +307,59 @@ def test_complete_native_recovery_does_not_reuse_a_superseded_quality_flag():
     assert not result["lines"][0].get("quality_issue")
     normalized, _ = measurement_value("speed", result["lines"][0], {})
     assert normalized["value"] == 672
+
+
+@pytest.mark.parametrize("text", ["3856", "4058", "8970"])
+def test_stable_low_pixel_collapsed_row_preserves_ambiguity_without_decoding(text):
+    image = cv2.resize(display(text, positions=[0, 18, 36, 54]), None, fx=0.3, fy=0.3)
+    raw = local(image, "85", "85")
+    raw["digit_region"]["size"] = [image.shape[1] * 8, image.shape[0] * 8]
+    before = copy.deepcopy(raw)
+    result = verify_digits(image, raw)
+    line = result["lines"][0]
+    assert line["text"] == "85" and line["confidence"] is None
+    assert line["quality_issues"] == ["low_native_resolution", "ambiguous_led_glyphs"]
+    assert "possible_missing_digit" not in line["quality_issues"]
+    diagnosis = result["digit_segment_check"]["native_diagnostics"]
+    assert diagnosis["status"] == "inconclusive" and "group_count" not in diagnosis
+    assert diagnosis["low_resolution_collapsed_row"]
+    assert len(diagnosis["collapsed_views"]) >= 2
+    assert diagnosis["collapsed_row_height_range"][1] < 20
+    normalized, _ = measurement_value("speed", line | {"value": line["text"]}, {})
+    assert normalized["value"] is None
+    assert raw == before and result["panel_ocr"] == before["panel_ocr"]
+
+
+def test_complete_native_pattern_precedes_coarse_projection_ambiguity(monkeypatch):
+    import field_recognition.recognition.led_digits as led
+
+    image = display("890")
+    diagnosis = native_diagnostics(image) | {
+        "status": "inconclusive",
+        "low_resolution_collapsed_row": True,
+    }
+    monkeypatch.setattr(led, "native_diagnostics", lambda image: diagnosis)
+    result = verify_digits(image, local(image, "890", "890"))
+    assert result["digit_segment_check"]["status"] == "consistent"
+    assert result["digit_consistency"]["status"] == "resolved"
+    assert result["lines"][0]["text"] == "890"
+    assert not result["lines"][0].get("quality_issue")
+
+
+def test_luminous_columns_are_not_complete_fragmented_eights():
+    image = np.full((72, 100, 3), (10, 15, 190), np.uint8)
+    for left in (10, 50):
+        cv2.rectangle(image, (left, 12), (left + 18, 54), (65, 120, 255), -1)
+    image = cv2.GaussianBlur(image, (3, 3), 0.7)
+    result = check(image)
+    assert result["status"] == "inconclusive" and not result["views"]
+    raw = local(image, "8B", "8B")
+    result = verify_digits(image, raw)
+    assert result["lines"] == raw["lines"]
+    assert result.get("digit_consistency", {}).get("status") != "resolved"
+
+
+@pytest.mark.parametrize("text", ["00", "66", "88", "99", "0689"])
+def test_complete_separated_loop_digits_keep_their_interior_background(text):
+    result = check(display(text))
+    assert result["status"] == "consistent" and result["text"] == text

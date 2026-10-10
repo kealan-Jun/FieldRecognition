@@ -11,7 +11,7 @@ import re
 import cv2
 import numpy as np
 
-VERSION = "red-led-segments/2"
+VERSION = "red-led-segments/3"
 SEGMENTS = (
     (0.2, 0, 0.8, 0.2),
     (0.65, 0.15, 1, 0.48),
@@ -33,6 +33,25 @@ PATTERNS = {
     "1111111": "8",
     "1111011": "9",
 }
+
+
+def has_dark_interiors(glyph, value):
+    """A closed LED loop needs background inside, not just seven bright probes."""
+    centers = {"0": (0.28, 0.73), "6": (0.73,), "8": (0.28, 0.73), "9": (0.28,)}
+    height, width = glyph.shape
+    for center in centers.get(value, ()):
+        # Search only the interior band, allowing slanted segment fonts. A
+        # substantial connected dark patch is required; isolated noisy pixels
+        # in an otherwise luminous column do not establish a loop's background.
+        left, right = int(width * 0.2), max(int(width * 0.2) + 1, int(np.ceil(width * 0.8)))
+        top = max(0, int((center - 0.13) * height))
+        bottom = min(height, max(top + 1, int(np.ceil((center + 0.13) * height))))
+        interior = glyph[top:bottom, left:right]
+        dark = (interior == 0).astype(np.uint8)
+        stats = cv2.connectedComponentsWithStats(dark)[2][1:]
+        if not len(stats) or max(stats[:, 4]) < interior.size * 0.2:
+            return False
+    return True
 
 
 def native_diagnostics(image):
@@ -71,6 +90,7 @@ def native_diagnostics(image):
         color = np.ones(channel.shape, dtype=bool)
         factors = (0.85, 1.0, 1.15)
         evidence["appearance"] = "bright_bars_on_red"
+    collapsed = []
     for factor in factors:
         mask = ((channel > threshold * factor) & color).astype(np.uint8)
         _, labels, stats, _ = cv2.connectedComponentsWithStats(mask)
@@ -81,7 +101,7 @@ def native_diagnostics(image):
         if not len(columns):
             continue
         groups = np.split(columns, np.flatnonzero(np.diff(columns) > 1) + 1)
-        if not 2 <= len(groups) <= 6:
+        if not 1 <= len(groups) <= 6:
             continue
         boxes = []
         for group in groups:
@@ -89,6 +109,13 @@ def native_diagnostics(image):
             rows = np.flatnonzero(mask[:, left:right].sum(axis=1))
             boxes.append([left, int(rows[0]), right - left, int(rows[-1] - rows[0]) + 1])
         height = max(box[3] for box in boxes)
+        if len(boxes) == 1:
+            # One wide projection can hide several glow-connected glyphs.
+            # Preserve this negative evidence without claiming a digit count.
+            box = boxes[0]
+            if height >= image.shape[0] * 0.25 and box[2] / height > 1.5:
+                collapsed.append({"threshold": round(threshold * factor, 2), "box": box})
+            continue
         tall = [box for box in boxes if box[3] >= height * 0.65]
         possible_dot = len(tall) >= 2 and any(
             box[3] <= height * 0.25
@@ -138,6 +165,26 @@ def native_diagnostics(image):
             )
             >= 2,
         )
+    if len(collapsed) >= 2:
+        stable_boxes = []
+        for i, first in enumerate(collapsed):
+            a = first["box"]
+            for second in collapsed[i + 1 :]:
+                b = second["box"]
+                overlap = max(0, min(a[0] + a[2], b[0] + b[2]) - max(a[0], b[0])) * max(
+                    0, min(a[1] + a[3], b[1] + b[3]) - max(a[1], b[1])
+                )
+                if overlap / (a[2] * a[3] + b[2] * b[3] - overlap) >= 0.8:
+                    stable_boxes.extend((a, b))
+        if stable_boxes:
+            evidence.update(
+                collapsed_views=collapsed,
+                collapsed_row_height_range=[
+                    min(box[3] for box in stable_boxes),
+                    max(box[3] for box in stable_boxes),
+                ],
+                low_resolution_collapsed_row=all(box[3] < 20 for box in stable_boxes),
+            )
     return evidence
 
 
@@ -199,7 +246,7 @@ def segment_check(crop, digits):
             if any(0.30 < level < 0.50 for level in levels):
                 break
             value = PATTERNS.get("".join("1" if level >= 0.50 else "0" for level in levels))
-            if value is None:
+            if value is None or not has_dark_interiors(glyph, value):
                 break
             text += value
             fills.append([round(level, 3) for level in levels])
@@ -219,7 +266,7 @@ def verify_digits(image, local, x=0, y=0):
     lines = local.get("lines", [])
     region = local.get("digit_region") or {}
     if lines and (
-        len(lines) != 1 or not re.fullmatch(r"[\dB]{2,6}", lines[0].get("text", "").strip())
+        len(lines) != 1 or not re.fullmatch(r"[\dB]{1,6}", lines[0].get("text", "").strip())
     ):
         return local
     raw_lines = [
@@ -242,7 +289,8 @@ def verify_digits(image, local, x=0, y=0):
     native = native_diagnostics(image)
     fragmented = check_fragmented(image, native=native)
     fragmented["native_diagnostics"] = native
-    if fragmented["status"] in {"consistent", "disagreement"}:
+    quality_only = bool(lines and len(lines[0].get("text", "").strip()) == 1)
+    if not quality_only and fragmented["status"] in {"consistent", "disagreement"}:
         output = copy.deepcopy(local)
         output.update(
             digit_segment_check=fragmented,
@@ -300,14 +348,16 @@ def verify_digits(image, local, x=0, y=0):
         output = copy.deepcopy(local)
         output["digit_segment_check"] = fragmented
         return output
-    if region.get("status") != "located":
+    if region.get("status") != "located" and not quality_only:
         return local
     if len(lines) != 1:
         return local
     original = lines[0].get("text", "").strip()
-    if not re.fullmatch(r"[\dB]{2,6}", original):
+    if not re.fullmatch(r"[\dB]{1,6}", original):
         return local
     issues = []
+    if quality_only and fragmented["status"] == "consistent":
+        issues.append("possible_missing_digit")
     if native.get("status") == "measured":
         if native["possible_decimal_point"]:
             issues.append("possible_decimal_point")
@@ -317,6 +367,9 @@ def verify_digits(image, local, x=0, y=0):
             issues.append("ambiguous_led_glyphs")
         if issues and native["below_resolution_gate"]:
             issues.insert(0, "low_native_resolution")
+    elif native.get("low_resolution_collapsed_row"):
+        issues.extend(("low_native_resolution", "ambiguous_led_glyphs"))
+    issues = list(dict.fromkeys(issues))
     if issues:
         output = copy.deepcopy(local)
         output.update(
@@ -335,6 +388,11 @@ def verify_digits(image, local, x=0, y=0):
         output["lines"] = [
             lines[0] | {"quality_issue": issues[0], "quality_issues": issues, "confidence": None}
         ]
+        return output
+    if quality_only:
+        output = copy.deepcopy(local)
+        fragmented["reason"] = "single_digit_quality_only"
+        output["digit_segment_check"] = fragmented
         return output
     if native.get("below_resolution_gate"):
         # Low resolution alone does not reject an otherwise agreeing OCR

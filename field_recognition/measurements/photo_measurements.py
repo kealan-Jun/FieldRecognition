@@ -87,6 +87,7 @@ def versions():
                 "photo_measurements.py",
                 "panel_regions.py",
                 "digit_regions.py",
+                "field_recognition/recognition/red_geometry.py",
                 "led_digits.py",
                 "red_segments.py",
                 "panel_layout.py",

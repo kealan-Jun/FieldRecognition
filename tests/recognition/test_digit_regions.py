@@ -532,7 +532,7 @@ def test_unsaturated_views_use_source_channels_without_mutating_or_drawing_pixel
     assert [name for name, pixels in views] == ["max_bg_negative", "green_contrast_negative"]
     assert np.array_equal(source, original)
     assert np.array_equal(views[0][1][:, :, 0], 255 - np.maximum(source[:, :, 0], source[:, :, 1]))
-    low, high = np.percentile(source[:, :, 1], [5, 95])
+    low, high = source[:, :, 1].min(), source[:, :, 1].max()
     expected = 255 - np.rint(
         np.clip((source[:, :, 1].astype(float) - low) * 255 / (high - low), 0, 255)
     ).astype(np.uint8)

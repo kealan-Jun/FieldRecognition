@@ -7,9 +7,9 @@ This is pixel evidence, not a calibrated probability or a general OCR model.
 import cv2
 import numpy as np
 
-from field_recognition.recognition.led_digits import PATTERNS
+from field_recognition.recognition.led_digits import PATTERNS, has_dark_interiors
 
-VERSION = "fragmented-red-segments/2"
+VERSION = "fragmented-red-segments/3"
 CENTERS = (
     (0.5, 0.08),
     (0.82, 0.28),
@@ -45,7 +45,8 @@ def _glyph(mask, box):
     if any(0.16 < v < 0.24 for v in levels):
         return None, levels
     pattern = "".join("1" if v >= 0.24 else "0" for v in levels)
-    return PATTERNS.get(pattern), levels
+    value = PATTERNS.get(pattern)
+    return value if value and has_dark_interiors(glyph, value) else None, levels
 
 
 def _check(image, factors=(0.60, 0.70, 0.75)):

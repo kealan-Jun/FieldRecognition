@@ -9,109 +9,64 @@ import cv2
 import numpy as np
 
 from field_recognition.measurements.readout_rules import READOUT
-
-
-def extract_digits(image, region):
-    points = np.asarray(region["polygon"], np.float32)
-    width, height = region["size"]
-    target = np.asarray(
-        [[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]], np.float32
-    )
-    transform = cv2.getPerspectiveTransform(points, target)
-    crop = cv2.warpPerspective(
-        image, transform, (width, height), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE
-    )
-    return crop, transform
-
-
-def red_display_geometry(image, x=0, y=0):
-    """Locate a red character row using source pixels, without reading its value."""
-    if image.ndim != 3 or min(image.shape[:2]) < 8:
-        return None
-    blue, green, red = cv2.split(image.astype(np.int16))
-    red_mask = ((red - np.maximum(blue, green) > 18) & (red > 60)).astype(np.uint8)
-    connected = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
-    contours, _ = cv2.findContours(connected, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    contours = [c for c in contours if cv2.contourArea(c) >= 12]
-    if not contours:
-        return None
-    contours.sort(key=cv2.contourArea, reverse=True)
-    if len(contours) > 1 and cv2.contourArea(contours[1]) > cv2.contourArea(contours[0]) * 0.6:
-        return None  # More than one comparable row inside this authorized panel.
-    window = np.zeros(red_mask.shape, np.uint8)
-    cv2.drawContours(window, [contours[0]], -1, 1, cv2.FILLED)
-    channel = np.maximum(blue, green).astype(np.uint8)
-    values = channel[window.astype(bool)]
-    threshold, _ = cv2.threshold(values, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    if np.percentile(values, 95) - threshold < 15:
-        return None
-    foreground = ((channel > threshold) & window.astype(bool)).astype(np.uint8)
-    points = cv2.findNonZero(foreground)
-    if points is None or len(points) < 16:
-        return None
-    _, glyph_size, _ = cv2.minAreaRect(points)
-    if min(glyph_size) < 7:
-        return None
-    # Include the measured red window around the luminous row; a bright
-    # threshold alone could clip a faint leading digit from the source crop.
-    center, (width, height), angle = cv2.minAreaRect(contours[0])
-    if height > width:
-        width, height, angle = height, width, angle + 90
-    angle = (angle + 90) % 180 - 90
-    if abs(angle) > 45 or height < 7 or width < height * 1.1:
-        return None
-    radians = math.radians(angle)
-    along = np.array([math.cos(radians), math.sin(radians)])
-    down = np.array([-along[1], along[0]])
-    center = np.asarray(center)
-    # A source-pixel margin includes complete bars, including faint OFF stems.
-    width, height = width + 4, height + 4
-    quad = np.asarray(
-        [
-            center - along * width / 2 - down * height / 2,
-            center + along * width / 2 - down * height / 2,
-            center + along * width / 2 + down * height / 2,
-            center - along * width / 2 + down * height / 2,
-        ],
-        np.float32,
-    )
-    quad[:, 0] = np.clip(quad[:, 0], 0, image.shape[1] - 1)
-    quad[:, 1] = np.clip(quad[:, 1], 0, image.shape[0] - 1)
-    native_size = [max(8, round(width)), max(8, round(height))]
-    return {
-        "method": "source_red_character_geometry_v1",
-        "polygon": (quad + [x, y]).tolist(),
-        "native_size": native_size,
-        "roll_degrees": round(angle, 3),
-        "threshold": round(threshold, 3),
-        "foreground_pixel_count": int(len(points)),
-        "foreground_native_span": [round(float(v), 3) for v in glyph_size],
-    }
+from field_recognition.recognition.red_geometry import (
+    extract_digits,
+    red_display_geometry,
+    source_bar_geometry,
+    _red_ocr_views,
+)
 
 
 def _off_shape(image):
     """Check O/F/F bar direction at native resolution, independently of OCR."""
-    channel = np.maximum(image[:, :, 0], image[:, :, 1])
-    threshold, _ = cv2.threshold(channel, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    evidence = {"status": "inconclusive", "method": "native_red_off_bars_v2", "views": []}
+    if image.ndim != 3 or image.shape[2] != 3 or not image.size:
+        return dict(evidence, reason="invalid_source_image")
+    blue, green, red = cv2.split(image.astype(np.int16))
+    channel = np.maximum(blue, green).astype(np.uint8)
+    # Neutral frame/background pixels are not LED bars. They must not join
+    # glyph columns or set the contrast of the independently measured row.
+    red_source = (red - channel > 18) & (red > 60)
+    values = channel[red_source]
+    evidence["red_source_pixel_count"] = int(values.size)
+    if values.size < 16:
+        return dict(evidence, reason="insufficient_red_source_pixels")
+    threshold, _ = cv2.threshold(values, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     views = []
-    contrast = float(np.percentile(channel, 95)) - threshold
+    contrast = float(np.percentile(values, 95)) - threshold
+    evidence.update(source_threshold=round(threshold, 3), source_contrast=round(contrast, 3))
     if contrast < 15:
-        return {"status": "inconclusive", "views": []}
+        return dict(evidence, reason="insufficient_source_contrast")
     for factor in (0.2, 0.4):
         cut = threshold + contrast * factor
-        mask = (channel > cut).astype(np.uint8)
+        mask = ((channel > cut) & red_source).astype(np.uint8)
         columns = np.flatnonzero(mask.sum(axis=0))
-        groups = np.split(columns, np.flatnonzero(np.diff(columns) > 1) + 1)
+        groups = np.split(columns, np.flatnonzero(np.diff(columns) > 1) + 1) if len(columns) else []
+        view = {
+            "threshold_factor": factor,
+            "threshold": round(cut, 3),
+            "foreground_pixel_count": int(np.count_nonzero(mask)),
+            "group_count": len(groups),
+            "glyph_boxes": [],
+            "patterns": [],
+            "matches_off": False,
+        }
+        views.append(view)
         if len(groups) != 3:
+            view["reason"] = "glyph_group_count"
             continue
-        patterns, boxes = [], []
         for group in groups:
             left, right = int(group[0]), int(group[-1]) + 1
             rows = np.flatnonzero(mask[:, left:right].sum(axis=1))
             top, bottom = int(rows[0]), int(rows[-1]) + 1
             glyph = mask[top:bottom, left:right]
             h, w = glyph.shape
+            view["glyph_boxes"].append([left, top, w, h])
             if h < 8 or not 0.3 <= w / h <= 0.95:
+                view["reason"] = "glyph_geometry"
+                break
+            if left == 0 or top == 0 or right == image.shape[1] or bottom == image.shape[0]:
+                view["reason"] = "source_glyph_clipped"
                 break
             levels = []
             for cx, cy in (
@@ -126,68 +81,28 @@ def _off_shape(image):
                 sx, ex = max(0, int((cx - 0.17) * w)), min(w, math.ceil((cx + 0.17) * w))
                 sy, ey = max(0, int((cy - 0.1) * h)), min(h, math.ceil((cy + 0.1) * h))
                 levels.append(float(glyph[sy:ey, sx:ex].mean()))
-            patterns.append("".join("1" if level >= 0.3 else "0" for level in levels))
-            boxes.append([left, top, w, h])
-        views.append(
-            {
-                "threshold": round(cut, 3),
-                "glyph_boxes": boxes,
-                "patterns": patterns,
-                "matches_off": patterns == ["1111110", "1000111", "1000111"],
-            }
+            view["patterns"].append("".join("1" if level >= 0.3 else "0" for level in levels))
+        if len(view["patterns"]) == 3 and not view.get("reason"):
+            boxes = view["glyph_boxes"]
+            common_height = min(top + h for _, top, _, h in boxes) - max(
+                top for _, top, _, _ in boxes
+            )
+            if common_height < min(h for _, _, _, h in boxes) * 0.5:
+                view["reason"] = "glyph_row_alignment"
+        view["matches_off"] = not view.get("reason") and view["patterns"] == [
+            "1111110",
+            "1000111",
+            "1000111",
+        ]
+        view.setdefault(
+            "reason", "complete_off_bars" if view["matches_off"] else "off_pattern_mismatch"
         )
-    return {
-        "status": "consistent"
-        if len(views) == 2 and all(v["matches_off"] for v in views)
-        else "inconclusive",
-        "views": views,
-    }
-
-
-def _red_ocr_views(image, region):
-    """Use unsaturated source channels; never draw, join or replace a stroke."""
-    _, transform = extract_digits(image, region)
-    blue, green, red = cv2.split(image.astype(np.int16))
-    inside = np.zeros(image.shape[:2], np.uint8)
-    cv2.fillConvexPoly(inside, np.rint(region["polygon"]).astype(np.int32), 1)
-    red_source = (inside != 0) & (red - np.maximum(blue, green) > 18) & (red > 60)
-    samples = green[red_source]
-    diagnostics = {
-        "method": "source_unsaturated_channels_v1",
-        "source_pixel_count": int(samples.size),
-    }
-    if samples.size < 16:
-        return [], transform, dict(diagnostics, status="insufficient_source_pixels")
-    low, high = np.percentile(samples, [5, 95])
-    diagnostics.update(green_low=round(float(low), 3), green_high=round(float(high), 3))
-    if high - low < 15:
-        return [], transform, dict(diagnostics, status="insufficient_source_contrast")
-    # Red LEDs often saturate R. B/G preserve their brightness difference from
-    # the red surround. The second view uses a different source channel and
-    # linear contrast range; neither operation changes character geometry.
-    channels = [
-        ("max_bg_negative", (255 - np.maximum(blue, green)).astype(np.uint8)),
-        (
-            "green_contrast_negative",
-            255 - np.rint(np.clip((green - low) * 255 / (high - low), 0, 255)).astype(np.uint8),
-        ),
-    ]
-    views = [
-        (
-            name,
-            cv2.warpPerspective(
-                cv2.cvtColor(channel, cv2.COLOR_GRAY2BGR),
-                transform,
-                tuple(region["size"]),
-                flags=cv2.INTER_CUBIC,
-                borderMode=cv2.BORDER_REPLICATE,
-            ),
-        )
-        for name, channel in channels
-    ]
-    if np.array_equal(views[0][1], views[1][1]):
-        return [], transform, dict(diagnostics, status="duplicate_preprocessed_views")
-    return views, transform, dict(diagnostics, status="prepared")
+    evidence["views"] = views
+    if len(views) == 2 and all(v["matches_off"] for v in views):
+        evidence.update(status="consistent", reason="two_thresholds_complete_off_bars")
+    else:
+        evidence["reason"] = "two_thresholds_not_consistent"
+    return evidence
 
 
 def _native_off_geometry(image, x, y):
@@ -199,18 +114,48 @@ def _native_off_geometry(image, x, y):
         "polygon": (np.asarray(geometry["polygon"]) - [x, y]).tolist(),
         "size": geometry["native_size"],
     }
-    _, native_transform = extract_digits(image, native_region)
+    points = np.asarray(native_region["polygon"], np.float32)
+    # The OCR region stays unchanged. OFF proof samples only the physical quad;
+    # a saved size measured before corner clipping must not enlarge its pixels.
+    width = min(np.linalg.norm(points[1] - points[0]), np.linalg.norm(points[2] - points[3]))
+    height = min(np.linalg.norm(points[3] - points[0]), np.linalg.norm(points[2] - points[1]))
+    source_size = [
+        min(geometry["native_size"][0], math.floor(float(width))),
+        min(geometry["native_size"][1], math.floor(float(height))),
+    ]
+    if min(source_size) < 2:
+        off_shapes = {
+            degrees: {
+                "status": "inconclusive",
+                "reason": "insufficient_native_source_size",
+                "views": [],
+            }
+            for degrees in (0, 180)
+        }
+        return geometry, native_region, off_shapes, []
+    target = np.asarray(
+        [
+            [0, 0],
+            [source_size[0] - 1, 0],
+            [source_size[0] - 1, source_size[1] - 1],
+            [0, source_size[1] - 1],
+        ],
+        np.float32,
+    )
+    native_transform = cv2.getPerspectiveTransform(points, target)
     native = cv2.warpPerspective(
         image,
         native_transform,
-        tuple(geometry["native_size"]),
+        tuple(source_size),
         flags=cv2.INTER_NEAREST,
-        borderMode=cv2.BORDER_REPLICATE,
+        borderMode=cv2.BORDER_CONSTANT,
     )
     off_shapes = {
         degrees: _off_shape(native if degrees == 0 else cv2.rotate(native, cv2.ROTATE_180))
         for degrees in (0, 180)
     }
+    for shape in off_shapes.values():
+        shape["sampling"] = {"method": "source_quad_nearest", "source_size": source_size}
     native_directions = [
         degrees for degrees, shape in off_shapes.items() if shape["status"] == "consistent"
     ]
@@ -221,13 +166,25 @@ def _red_recovery(predict, image, previous, x, y, readout_rejected=False, *, sou
     started = time.monotonic()
     source_evidence = source_evidence or _native_off_geometry(image, x, y)
     if source_evidence is None:
-        return previous
+        geometry = source_bar_geometry(image, x, y)
+        if geometry is None:
+            return previous
+        native_region = {
+            "polygon": (np.asarray(geometry["polygon"]) - [x, y]).tolist(),
+            "size": geometry["native_size"],
+        }
+        # Numeric bar positions do not prove O/F/F patterns or direction. Do
+        # not run OFF verification on this different source window.
+        source_evidence = geometry, native_region, {}, []
     geometry, native_region, off_shapes, native_directions = source_evidence
+    numeric_only = geometry.get("purpose") == "numeric_retry_geometry_only"
 
     def supported(text, degrees):
         if text == "OFF":
-            return len(native_directions) <= 1 and (
-                not native_directions or degrees in native_directions
+            return (
+                not numeric_only
+                and len(native_directions) <= 1
+                and (not native_directions or degrees in native_directions)
             )
         return degrees == 0 and not native_directions
 
@@ -247,6 +204,13 @@ def _red_recovery(predict, image, previous, x, y, readout_rejected=False, *, sou
         "native_directions": native_directions,
         "rotated_retry_basis": "native_off_bars_required",
     }
+    if numeric_only:
+        output["red_display_off_basis"] = {
+            "status": "unavailable",
+            "reason": "numeric_source_geometry_only",
+            "native_off_measured": False,
+        }
+        output["red_display_retry_gate"]["off_state_allowed"] = False
     if previous.get("digit_consistency", {}).get("native_confirmation_required") and not (
         len(native_directions) == 1
     ):
@@ -344,7 +308,10 @@ def _red_recovery(predict, image, previous, x, y, readout_rejected=False, *, sou
             cv2.perspectiveTransform(points, np.linalg.inv(transform))[0] + [x, y]
         ).tolist()
         output["digit_region"] = dict(
-            geometry, status="located", size=size, method="source_red_character_geometry_v1"
+            geometry,
+            status="located",
+            size=size,
+            method=geometry.get("method", "source_red_character_geometry_v1"),
         )
         if selected["text"].strip().upper() == "OFF":
             output["lines"] = []
