@@ -23,11 +23,18 @@ NAS 的 `Result.json`（同图多台仪器时另有 `Result02.json` 等）直接
 | get_field_state | 无，传 `{}` | 仪器登记、相机、绑定和 OCR 状态 |
 | capture_and_scan | 无，传 `{}` | 最新主码流照片、capture_id、scan_id、二维码 matches、帧时间戳 |
 | scan_photo | camera_id、image_base64 | 对 Agent 已有照片进行同样的扫码和存证 |
+| enter_scene | scan_id、scene_id | 独立场景扫码凭证与到访时段 |
 | bind_instrument | scan_id、instrument_id、operator | binding_id 和仪器/场景/相机绑定快照 |
 | read_panel | capture_id | 异步 job_id；binding_id、crop=[x,y,width,height] 可选 |
 | read_saved_panel | image_path（或 photo） | binding_id 可选；复用 NAS 已拍照片，异步 job_id |
 | get_panel_result | job_id | 任务状态及完成后的原文、分数、坐标、来源 |
 | end_instrument_binding | binding_id | 结束本次使用绑定 |
+| get_measurement_draft | measurement_id | 草稿、字段与来源证据 |
+| revise_measurement_draft | measurement_id、revision、actor、reason | 校正字段或采集时间，保留修订原因 |
+| confirm_measurement_draft | measurement_id、revision、actor | 校验后确认并读回同一正式记录 |
+| reject_measurement_draft | measurement_id、revision、actor、reason | 拒绝当前草稿并保留原因 |
+| request_device_handoff | request_id、binding_id、recipient_scan_id、recipient_operator | 实际扫码支持的交接请求 |
+| decide_device_handoff | handoff_id、action、revision、actor、camera_id | 交出、接收、取消或拒绝的明确决策 |
 
 ## Agent 调用顺序
 
@@ -39,11 +46,11 @@ NAS 的 `Result.json`（同图多台仪器时另有 `Result02.json` 等）直接
 6. 每隔约 1 秒 get_panel_result；只有 completed 才展示 lines。调用方设置自己的总等待期限，超时保留 job_id 稍后查询，不重新提交 OCR。
 7. 使用结束时 end_instrument_binding。
 
-不传 binding_id 时，按未绑定照片识别，仪器/场景为空；自动目录导入可关联拍摄时已存在的有效绑定。显式传入 binding_id 后仍检查相机、时间、场景和二维码冲突，校验失败拒绝关联请求。crop 不传表示整图识别，不代表已自动定位面板。上传照片的 camera_id 为调用方声明，不等于硬件身份认证。
+不传 binding_id 时，不据此推断有效绑定；自动目录导入可关联拍摄时已存在的有效绑定。没有有效绑定且照片未实际解出仪器码时，仪器/场景保持空值；照片真实二维码解码得到的仪器身份可保留为 `instrument_identity_basis=decoded_photo_qr`，仍不建立绑定或把未定位读数归属给该仪器。显式传入 binding_id 后仍检查相机、时间、场景和二维码冲突，校验失败拒绝关联请求。crop 不传表示整图识别，不代表已自动定位面板。上传照片的 camera_id 为调用方声明，不等于硬件身份认证。
 
 ## Python 接入
 
-`agent_client.py` 仅使用 Python 标准库；可直接交给 Agent 开发方。
+`field_recognition/api/agent_client.py` 仅使用 Python 标准库；可单独复制给 Agent 开发方。仓库根目录的 `agent_client.py` 保留旧导入入口，在本仓库内继续可用。
 
 ```python
 from agent_client import FieldTools
@@ -70,7 +77,7 @@ curl -sS http://127.0.0.1:8188/api/tools/capture_and_scan \
 ## 状态与错误
 
 - 工具调用 HTTP 200 只表示调用成功；read_panel 的 result.status=queued 不是 OCR 已完成。
-- OCR：queued → running → completed / failed；服务重启时未完成任务标记 interrupted。
+- OCR：queued → running → completed / failed；单进程兼容模式重启时未完成任务可标记 interrupted。托管队列通过租约恢复未完成照片任务，保留失败历史；过时视频任务不会作为新照片补跑。
 - 404：工具、扫描记录或任务不存在；422：参数或图片无效；409：相机暂不可用或绑定冲突；429：OCR 队列已满。
 - HTTP 错误返回 detail，Python 客户端抛出 FieldToolsError(status, detail)。网络异常由标准库上抛。客户端不自动重试写操作，避免超时后重复绑定或重复提交 OCR。
 - OCR 输出为模型原文和候选数字，不能将缺失文字补写为真实读数。
@@ -83,12 +90,12 @@ curl -sS http://127.0.0.1:8188/api/tools/capture_and_scan \
 
 ## 场景进入工具
 
-工具总数现为 9。调用 capture_and_scan 或 scan_photo 后，从 scene_matches 取得已登记的场景；调用 enter_scene，参数 {"scan_id":"扫码记录 UUID","scene_id":"场景 UUID"}，确认该照片相机进入场景。仪器码也可直接调用 bind_instrument；实际已进入场景时，系统校验同相机的当前场景是否冲突。场景可独立追加关联，不覆盖已有场景或仪器记录；同场景重复进入不会结束绑定。录入实验员仍由用户指定。get_field_state 返回 scenes 与 scene_visits；所有场景与仪器码仍未签名。
+工具总数现为 15。调用 capture_and_scan 或 scan_photo 后，从 scene_matches 取得已登记的场景；调用 enter_scene，参数 {"scan_id":"扫码记录 UUID","scene_id":"场景 UUID"}，确认该照片相机进入场景。仪器码也可直接调用 bind_instrument；实际已进入场景时，系统校验同相机的当前场景是否冲突。场景可独立追加关联，不覆盖已有场景或仪器记录；同场景重复进入不会结束绑定。录入实验员仍由用户指定。get_field_state 返回 scenes 与 scene_visits；所有场景与仪器码仍未签名。
 
 
 ## 连续视频扫码 HTTP 接口
 
-原有八个 Agent 工具保持兼容，新增 read_saved_panel；网页使用新增 HTTP 接口，无需逐张调用 capture_and_scan：
+当前 15 个 Agent 工具保持兼容；网页使用以下 HTTP 接口，无需逐张调用 capture_and_scan：
 
 - `GET /api/camera/preview.mjpg`：MJPEG 实时预览，无绑定副作用。
 - `POST /api/camera/scan-sessions`：参数 `{"operator":"用户指定实验员"}`。调用即选择自动进入唯一场景、自动绑定唯一已登记仪器（已有场景扫码关系时校验匹配）。

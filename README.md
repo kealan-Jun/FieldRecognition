@@ -29,7 +29,7 @@
 
 ## 让读数回到现场
 
-**哪台仪器、谁在使用、何时采集、原图在哪里。** FieldRecognition 将扫码绑定、视频自动留证与已有语音照片识别放进同一条证据链。每条结果保留采集时间、拍摄时归属与识别版本；**没有有效绑定时，仪器身份保持空值。**
+**哪台仪器、谁在使用、何时采集、原图在哪里。** FieldRecognition 将扫码绑定、视频自动留证与已有语音照片识别放进同一条证据链。每条结果保留采集时间、拍摄时归属与识别版本；**没有有效绑定时，不推断仪器归属；照片实际解码得到的二维码身份单独保留。**
 
 <a id="showcase"></a>
 
@@ -138,7 +138,7 @@ FIELD_OCR_DEVICE=cpu OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 \
   .venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 8188
 ```
 
-打开 [http://127.0.0.1:8188](http://127.0.0.1:8188)。尚未接入 Receiver 时，可使用兼容照片上传接口和 [二维码样张](static/labels/) 体验基础流程；现场主采集方式仍是视频与外部语音照片。
+打开 [http://127.0.0.1:8188](http://127.0.0.1:8188)。尚未接入 Receiver 时，可使用兼容照片上传接口和 [二维码样张](static/labels) 体验基础流程；现场主采集方式仍是视频与外部语音照片。
 
 本机部署使用 **RTX 3090 Ti / `gpu:0`**。新建适配的 GPU 环境使用 [Requirements.gpu.lock.txt](Requirements.gpu.lock.txt) 并选择 `FIELD_OCR_DEVICE=gpu:0`，平台要求见 [GPU 部署](docs/GPU部署.md)。模型权重不随 Git 分发；无完整本地缓存时可能下载，显式指定的模型目录不完整会报错。
 
@@ -169,7 +169,7 @@ voice_photos/
             └── YYYYMMDD_HHMMSS[_序号].jpg
 ```
 
-照片稳定性、时间来源、去重与批次声明分别校验。详见 [技术方案](技术方案.md) 和 [NAS 留存指南](docs/NAS文件夹与留存指南.md)。
+照片稳定性、时间来源、去重与批次声明分别校验。详见 [技术方案](docs/Architecture.md) 和 [NAS 留存指南](docs/NAS文件夹与留存指南.md)。
 
 </details>
 
@@ -212,25 +212,28 @@ flowchart TB
 
 ```text
 FieldRecognition/
-├── app.py                           # HTTP 服务入口
-├── receiver.py / live_scan.py        # 视频接入、扫码与采集会话
-├── scene_binding.py                 # 场景和仪器绑定规则
-├── photo_watch.py / saved_photo.py   # NAS 照片发现、导入与去重
-├── panel_readout.py / panel_regions.py # 面板读数与候选处理
-├── photo_measurements.py            # 连拍草稿、复核与确认
-├── evidence_timeline.py             # 两路采集时间追溯
-├── archive_store.py / archive_events.py # 归档队列与事件文件
-├── aliyun_vision.py                  # 可配置视觉调用与结果校验
-├── agent_tools.py / agent_client.py  # Agent 工具与 Python 适配器
-├── static/                          # 工作台、时间轴与二维码样张
+├── field_recognition/               # 可导入的业务包
+│   ├── api/                         # 应用工厂、HTTP 与 Agent 适配
+│   ├── bindings/                    # 二维码身份、使用时段与交接
+│   ├── capture/                     # Receiver、扫码与照片导入
+│   ├── recognition/                 # OCR、面板与视觉调用
+│   ├── measurements/                # 读数规则、草稿与证据事务
+│   ├── archive/                     # 归档队列、事件与历史索引
+│   └── runtime/                     # 配置、数据库与独立 worker
+├── app.py / *_worker.py              # 兼容服务启动入口
+├── agent_client.py                  # 兼容 Python 客户端导入
+├── static/                          # 页面、共享工具与工作台控制器
+├── scripts/                         # 运维、迁移与离线验证工具
 ├── deployment/                      # 托管服务模板
 ├── schemas/                         # 业务 JSON 契约
-├── tests/                           # 临时数据自动测试
-├── docs/                            # 部署、验证记录与流程图
-├── .env.example                     # 配置模板
+├── tests/                           # 按业务分组；support 共用测试夹具
+├── docs/                            # 使用、架构与维护文档
+│   └── history/                     # 保留原结论的历史交付记录
+├── pyproject.toml                   # 开发与静态检查配置
 ├── Requirements*.lock.txt           # CPU / GPU 锁定依赖
-├── AgentTools.md                    # 接入接口与调用示例
-└── 技术方案.md                       # 实现机制与边界
+├── .env.example                     # 配置模板
+├── AgentTools.md                    # Agent 接口与调用示例
+└── AGENTS.md                        # 项目维护与技能适用规则
 ```
 
 `Data/`、`Verification/`、`VerificationData/`、`output/`、`tmp/` 为本地运行或验证材料；虚拟环境、模型权重、日志与凭证不纳入 Git。
@@ -243,10 +246,11 @@ FieldRecognition/
 
 | 我想了解… | 从这里开始 |
 | :--- | :--- |
-| **系统实现与安装** | [技术方案](技术方案.md) · [GPU 部署](docs/GPU部署.md) · [托管运行](docs/ProductionRuntime.md) |
+| **系统实现与安装** | [技术方案](docs/Architecture.md) · [GPU 部署](docs/GPU部署.md) · [托管运行](docs/ProductionRuntime.md) |
 | **让 Agent 获取读数** | [工具参数、发现接口与 Python 示例](AgentTools.md) |
 | **采集与身份关联** | [自动运行](docs/本机自动运行.md) · [绑定快照](docs/FieldRepair20260920.md) · [自动解绑](docs/AutomaticBindingRelease20260921.md) · [两路采集](docs/TwoStreamEvidence20260923.md) |
 | **照片、结果与复核** | [NAS 留存指南](docs/NAS文件夹与留存指南.md) · [六字段契约](schemas/InstrumentMeasurement.schema.json) · [视觉配置](docs/NianfengVision20260925.md) · [界面演示](docs/ReadmeShowcase.md) |
+| **维护与目录** | [文档索引](docs/README.md) · [代码结构](docs/CodeStructure.md) · [Agent 指南](AGENTS.md) |
 | **验证与升级** | [升级入口](docs/RuntimeReliability.md#升级入口) · [数据库迁移](docs/BindingMigration.md) · [时延验收](docs/PublicationLatency20261008.md) · [项目进展](docs/ProjectHistory.md) |
 
 <a id="evaluation"></a>

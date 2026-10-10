@@ -96,7 +96,7 @@ sudo systemctl enable --now field-recognition-ocr-recovery.timer
 
 ## 验证范围
 
-`tests/test_runtime_reliability.py` 使用临时数据库和替代 systemctl，覆盖依赖失败后的重复尝试、
+`tests/runtime/test_runtime_reliability.py` 使用临时数据库和替代 systemctl，覆盖依赖失败后的重复尝试、
 维护暂停、禁用服务、迁移演练失败阻断、活跃写入者阻断、历史哈希保留、运行中升级拒绝、无变化不重启、
 文档更新不调用服务管理，以及离线升级顺序。
 真实运行验证回执保存在本机 `Verification/ReliabilityRepair20260920/`，不进入 Git。

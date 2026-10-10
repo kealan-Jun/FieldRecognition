@@ -1,11 +1,10 @@
-"""Managed runtime deployment instructions; never patch a running application."""
+"""Compatibility entry point for field_recognition.runtime.enable_production."""
 
-def enable_production_mode():
-    raise RuntimeError('Use prepare_runtime.py and deployment/field-recognition.target')
+import importlib
+import runpy
+import sys
 
-
-def patch_app_at_startup():
-    raise RuntimeError('Runtime patching was removed; production boundaries are installed by app.py')
-
-if __name__=='__main__':
-    print('Prepare with prepare_runtime.py, then install deployment/field-recognition*.service and field-recognition.target. See docs/ProductionRuntime.md.')
+if __name__ == "__main__":
+    runpy.run_module("field_recognition.runtime.enable_production", run_name="__main__")
+else:
+    sys.modules[__name__] = importlib.import_module("field_recognition.runtime.enable_production")

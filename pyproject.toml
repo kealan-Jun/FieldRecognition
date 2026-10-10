@@ -1,0 +1,13 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["F821", "F822", "F823"]
+
+[tool.ruff.format]
+quote-style = "double"

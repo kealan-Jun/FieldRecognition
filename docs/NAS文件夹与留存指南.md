@@ -107,7 +107,7 @@ FieldRecognitionArchive/
 
 本机 SQLite 事务同时写业务记录与持久化归档队列。NAS 不可用时保留本地图片与队列，恢复后重试；容量不足暂停归档。原图和回执写完才能确认已归档；人类导航尚未重建时 `navigation_pending=true`，不冒充整理完成。
 
-手动升级已有归档时只暂停归档 worker，API、采集和 OCR 可继续：
+以下是明确授权暂停归档或归档 worker 已离线时的维护步骤。正常迭代不能为执行迁移停止正在使用的归档服务；先在隔离副本演练并保留候选。仅在获准窗口暂停归档 worker 时，API、采集和 OCR 可继续，本机归档队列仍保留；NAS 新结果的发布会延后至归档恢复：
 
 ```bash
 systemctl --user stop field-recognition-archive.service

@@ -1,7 +1,7 @@
 # 人员登记与交接数据库迁移
 
 本说明对应 SQLite 迁移脚本 [migrate_db.py](../migrate_db.py) 和
-[database.py](../database.py)。本次仅在临时数据库中演练；没有读取或修改生产数据库、NAS 原件。
+[database.py](../field_recognition/runtime/database.py)。本次仅在临时数据库中演练；没有读取或修改生产数据库、NAS 原件。
 迁移的运行前提是停写窗口，运行数据库仍须位于本地受支持的 SQLite 文件系统。
 
 ## 数据关系与兼容性
@@ -81,8 +81,8 @@ FIELD_MIGRATION_RESTORED=/absolute/path/to/isolated/State-restored.sqlite3
 ```bash
 env -u FIELD_RECEIVER_URL -u FIELD_CAMERA_SNAPSHOT_URL \
   OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 \
-  .venv/bin/python -m pytest -q tests/test_migrate_db.py
-.venv/bin/python -m compileall -q migrate_db.py tests/test_migrate_db.py
+  .venv/bin/python -m pytest -q tests/runtime/test_migrate_db.py
+.venv/bin/python -m compileall -q migrate_db.py field_recognition/runtime/migrate_db.py tests/runtime/test_migrate_db.py
 ```
 
 演练覆盖：旧单人表迁移、两人登记和重复登记、历史绑定与读数字节保留、SQLite WAL 备份、恢复到新路径、

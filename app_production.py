@@ -1,11 +1,12 @@
-"""Compatibility entry point; the actual app owns all production services."""
+"""Legacy access to the existing initialized managed ASGI runtime."""
 
-def integrate_production(app_globals, app_instance):
-    if app_globals.get('app') is not app_instance or not app_globals.get('RUNTIME_ENABLED'):
-        raise RuntimeError('Prepare migrations and start a managed API/worker role; runtime patching is not supported')
-    return app_globals
+from field_recognition.runtime.app_production import integrate_production
+from field_recognition.runtime.app_production import get_production_core as _get_explicit_core
 
 
-def get_production_core():
-    import app
-    return integrate_production(vars(app),app.app)
+def get_production_core(runtime=None, **factory_settings):
+    if runtime is None and not factory_settings:
+        import app
+
+        return integrate_production(app.runtime, app.app)
+    return _get_explicit_core(runtime, **factory_settings)

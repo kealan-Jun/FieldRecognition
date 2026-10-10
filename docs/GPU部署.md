@@ -6,7 +6,9 @@
 
 本机环境为 Linux x86_64、Python 3.11、NVIDIA 驱动 580.173.02。GPU 锁文件固定 PaddlePaddle GPU 3.2.0、CUDA 12.6 依赖、PaddleOCR 3.2.0 和 PaddleX 3.2.1。GPU wheel 来自 [Paddle 官方 CUDA 12.6 索引](https://www.paddlepaddle.org.cn/packages/stable/cu126/paddlepaddle-gpu/)。它用于本机平台，不是通用的 Windows / ARM 安装文件。
 
-已有 CPU 环境切换时，在项目根目录执行：
+以下保留 2026-09-14 单进程部署的 CPU → GPU 切换步骤，仅适用于已经离线的环境或明确授权的停写窗口。现有托管部署按 [托管运行](ProductionRuntime.md) 与 [升级入口](RuntimeReliability.md#升级入口) 管理；正常迭代不能停止服务或在其加载的环境中安装依赖。停止相机采集会结束旧绑定、打断正在进行的采集，恢复后须重新扫码；已保存的照片与队列仍须保留。
+
+满足上述前提后，在项目根目录执行：
 
 ```bash
 systemctl --user stop field-recognition-demo.service
