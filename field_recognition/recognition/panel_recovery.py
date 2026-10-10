@@ -92,7 +92,7 @@ def window_pixels(hsv, coords):
 
 
 def photo_pair_context(image, hsv, anchor, infer, imgsz, confidence, existing_boxes=()):
-    """Two bounded model views corroborate one missing partner on source pixels."""
+    """Two actual views corroborate a partner, using at most three forwards."""
     from field_recognition.recognition.panel_layout import roles_for_boxes
 
     diagnostics = {"attempted": False, "passes": [], "excluded_candidates": []}
@@ -103,38 +103,56 @@ def photo_pair_context(image, hsv, anchor, infer, imgsz, confidence, existing_bo
         return result
     x1, y1, x2, y2 = anchor["xyxy"]
     width, height = x2 - x1, y2 - y1
-    # Quantize the crop construction once, covering all source pixels touched
-    # by the model box. Keep its original floats for geometry, OCR and evidence.
+    # Preserve the successful continuous-box context. Its canonical pixel
+    # envelope is a bounded alternative only after an eligible set is empty.
     cx1, cy1, cx2, cy2 = math.floor(x1), math.floor(y1), math.ceil(x2), math.ceil(y2)
     context_width, context_height = cx2 - cx1, cy2 - cy1
     diagnostics["context_anchor_bbox"] = [cx1, cy1, cx2, cy2]
-    diagnostics["context_coordinate_basis"] = "source_pixel_floor_ceil"
+    diagnostics["context_coordinate_basis"] = "continuous_source_box"
     diagnostics["attempted"] = True
     candidates = []
     view_signatures = {}
+    eligible_by_view = {}
+
     # A character-only crop removes the chassis context learned by this model.
     # Two fields of view retain the device while exposing distinct model scales.
-    for name, horizontal, vertical, size in (
-        ("pair_gamma_medium", 6, 8, min(imgsz, 640)),
-        ("pair_gamma_wide", 10, 12, imgsz),
-    ):
-        left = max(0, cx1 - horizontal * context_width)
-        top = max(0, cy1 - vertical * context_height)
-        right = min(image.shape[1], cx2 + horizontal * context_width)
-        bottom = min(image.shape[0], cy2 + vertical * context_height)
+    def context(name, horizontal, vertical, size, canonical=False):
+        ax1, ay1, ax2, ay2 = (cx1, cy1, cx2, cy2) if canonical else (x1, y1, x2, y2)
+        aw, ah = (context_width, context_height) if canonical else (width, height)
+        return {
+            "view": name,
+            "context_bbox": [
+                max(0, math.floor(ax1 - horizontal * aw)),
+                max(0, math.floor(ay1 - vertical * ah)),
+                min(image.shape[1], math.ceil(ax2 + horizontal * aw)),
+                min(image.shape[0], math.ceil(ay2 + vertical * ah)),
+            ],
+            "imgsz": size,
+            "context_basis": "source_pixel_floor_ceil" if canonical else "continuous_source_box",
+        }
+
+    def skip(view, reason, **extra):
+        diagnostics.setdefault("skipped_views", []).append(view | {"reason": reason} | extra)
+
+    def run_view(view):
+        name, size = view["view"], view["imgsz"]
+        left, top, right, bottom = view["context_bbox"]
+        signature = (left, top, right, bottom, size)
+        previous = next((v for v, s in view_signatures.items() if s == signature), None)
+        if previous is not None:
+            skip(view, "duplicate_context_views", same_as_view=previous)
+            diagnostics["excluded_candidates"].extend(
+                b | {"reason": "duplicate_context_views"} for b in eligible_by_view[previous]
+            )
+            return []
         view_signatures[name] = (left, top, right, bottom, size)
         pixels = cv2.LUT(image[top:bottom, left:right], GAMMA_LUT)
         detection = infer(pixels, size, confidence)
-        diagnostics["passes"].append(
-            {
-                "view": name,
-                "candidate_count": len(detection["boxes"]),
-                "context_bbox": [left, top, right, bottom],
-                "imgsz": size,
-            }
-        )
+        receipt = view | {"candidate_count": len(detection["boxes"])}
+        diagnostics["passes"].append(receipt)
         for key, value in detection.get("speed_ms", {}).items():
             result["speed_ms"][key] = result["speed_ms"].get(key, 0) + value
+        eligible = []
         for item in detection["boxes"]:
             box = dict(item, view=name)
             box["xyxy"] = [
@@ -172,15 +190,30 @@ def photo_pair_context(image, hsv, anchor, infer, imgsz, confidence, existing_bo
             if reason:
                 diagnostics["excluded_candidates"].append(box | {"reason": reason})
             else:
-                candidates.append(box | {"window_pixels": pixels_evidence})
-        if name == "pair_gamma_medium" and not candidates:
-            # A second view cannot corroborate a new partner absent from the
-            # first eligible set. Do not count a skipped forward as evidence.
+                eligible.append(box | {"window_pixels": pixels_evidence})
+        candidates.extend(eligible)
+        eligible_by_view[name] = eligible
+        receipt["eligible_partner_count"] = len(eligible)
+        return eligible
+
+    medium = context("pair_gamma_medium", 6, 8, min(imgsz, 640))
+    wide = context("pair_gamma_wide", 10, 12, imgsz)
+    canonical_medium = context("pair_gamma_medium_canonical", 6, 8, min(imgsz, 640), True)
+    canonical_wide = context("pair_gamma_wide_canonical", 10, 12, imgsz, True)
+    if not run_view(medium):
+        diagnostics["fallback_trigger"] = "float_medium_no_eligible_partner"
+        skip(wide, "no_eligible_partner_first_view")
+        if not run_view(canonical_medium):
             diagnostics["reason"] = "no_eligible_partner_first_view"
-            diagnostics["skipped_views"] = [
-                {"view": "pair_gamma_wide", "reason": "no_eligible_partner_first_view"}
-            ]
+            skip(canonical_wide, "no_eligible_partner_first_view")
             return result
+        run_view(canonical_wide)
+    elif not run_view(wide):
+        # A failed wide view may omit a partner visible in the medium view.
+        # An eligible but contrary wide view is evidence, never outvoted by
+        # an extra crop. Only an empty eligible set authorizes this fallback.
+        diagnostics["fallback_trigger"] = "float_wide_no_eligible_partner"
+        run_view(canonical_wide)
     consensus = []
     for box in sorted(candidates, key=lambda b: b["confidence"], reverse=True):
         if any(iou(box["xyxy"], b["xyxy"]) >= 0.5 for b in consensus):
@@ -214,7 +247,7 @@ def photo_pair_context(image, hsv, anchor, infer, imgsz, confidence, existing_bo
 
 
 def detect(image, infer, *, imgsz=960, confidence=0.25, photo=False):
-    """Four video forwards; photos allow two local and eight closeup forwards."""
+    """Four video forwards; photos allow three local and eight closeup forwards."""
     height, width = image.shape[:2]
     primary = infer(image, imgsz, confidence)
     accepted = [dict(b, localization_method="original") for b in primary["boxes"]]

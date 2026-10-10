@@ -5,7 +5,12 @@ import numpy as np
 import pytest
 
 from field_recognition.recognition.panel_layout import resolve_type_boxes, roles_for_boxes
-from field_recognition.recognition.panel_recovery import detect, source_box, window_pixels
+from field_recognition.recognition.panel_recovery import (
+    detect,
+    photo_pair_context,
+    source_box,
+    window_pixels,
+)
 
 
 def box(score=0.6, class_id=0, coords=None):
@@ -206,11 +211,16 @@ def test_photo_pair_requires_two_full_confidence_views_and_bounded_geometry(resp
     pair = result["diagnostics"]["photo_pair_context"]
     if expected == 9:
         assert [p["view"] for p in pair["passes"]] == ["pair_gamma_medium"]
-        assert pair["skipped_views"] == [
-            {"view": "pair_gamma_wide", "reason": "no_eligible_partner_first_view"}
+        assert [p["view"] for p in pair["skipped_views"]] == [
+            "pair_gamma_wide",
+            "pair_gamma_medium_canonical",
+            "pair_gamma_wide_canonical",
         ]
+        assert pair["skipped_views"][1]["reason"] == "duplicate_context_views"
     else:
-        assert len(pair["passes"]) == 2 and "skipped_views" not in pair
+        assert len(pair["passes"]) == 2
+        assert pair["skipped_views"][0]["view"] == "pair_gamma_wide_canonical"
+        assert pair["skipped_views"][0]["reason"] == "duplicate_context_views"
 
 
 @pytest.mark.parametrize("partner_fill", [None, (0, 0, 210), (220, 220, 220)])
@@ -255,7 +265,7 @@ def test_photo_pair_does_not_choose_an_anchor_among_multiple_primary_windows():
 
 def test_photo_pair_identical_clipped_contexts_and_model_scales_are_not_two_views():
     result, calls = run_pair(panel_image(), imgsz=640)
-    assert len(result["boxes"]) == 1 and len(calls) == 10
+    assert len(result["boxes"]) == 1 and len(calls) == 9
     assert "duplicate_context_views" in {
         b["reason"] for b in result["diagnostics"]["excluded_candidates"]
     }
@@ -287,6 +297,7 @@ def test_photo_pair_maps_each_chassis_context_back_to_the_same_source_window(fra
     small = panel_image()
     image[350:375, 330:396] = small[90:115, 80:146]
     calls = []
+    origins = [[152, 153], [34, 54]] if fractional else [[150, 150], [30, 50]]
 
     def infer(pixels, size, threshold):
         calls.append((pixels.shape[:2], size, threshold))
@@ -294,16 +305,18 @@ def test_photo_pair_maps_each_chassis_context_back_to_the_same_source_window(fra
             return {"boxes": [box(0.3, coords=anchor)]}
         if len(calls) <= 4:
             return {"boxes": []}
-        origin = [150, 150] if len(calls) == 5 else [30, 50]
+        origin = origins[len(calls) - 5]
         return {"boxes": [box(coords=[v - origin[i % 2] for i, v in enumerate(partner)])]}
 
     result = detect(image, infer, photo=True)
     assert len(calls) == 6
     assert [b["xyxy"] for b in result["boxes"]] == [anchor, partner]
-    assert calls[4:] == [((425, 390), 640, 0.25), ((625, 630), 960, 0.25)]
+    shapes = [(419, 386), (617, 622)] if fractional else [(425, 390), (625, 630)]
+    assert calls[4:] == [(shapes[0], 640, 0.25), (shapes[1], 960, 0.25)]
     pair = result["diagnostics"]["photo_pair_context"]
     assert pair["context_anchor_bbox"] == [330, 350, 360, 375]
-    assert pair["context_coordinate_basis"] == "source_pixel_floor_ceil"
+    assert pair["context_coordinate_basis"] == "continuous_source_box"
+    assert "fallback_trigger" not in pair and "skipped_views" not in pair
     pixels_evidence = result["boxes"][1]["pair_window_pixels"]
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     assert pixels_evidence == {
@@ -312,7 +325,13 @@ def test_photo_pair_maps_each_chassis_context_back_to_the_same_source_window(fra
     }
     assert result["boxes"][1]["pair_anchor_xyxy"] == anchor
     passes = pair["passes"]
-    assert [p["context_bbox"] for p in passes] == [[150, 150, 540, 575], [30, 50, 660, 675]]
+    contexts = (
+        [[152, 153, 538, 572], [34, 54, 656, 671]]
+        if fractional
+        else [[150, 150, 540, 575], [30, 50, 660, 675]]
+    )
+    assert [p["context_bbox"] for p in passes] == contexts
+    assert all(p["context_basis"] == "continuous_source_box" for p in passes)
 
 
 def test_photo_pair_does_not_replace_another_primary_class_region():
@@ -377,12 +396,17 @@ def test_empty_first_context_skips_second_model_view_without_fabricating_a_recei
             "candidate_count": 0,
             "context_bbox": [0, 0, 260, 210],
             "imgsz": 640,
+            "context_basis": "continuous_source_box",
+            "eligible_partner_count": 0,
         }
     ]
     assert pair["reason"] == "no_eligible_partner_first_view"
-    assert pair["skipped_views"] == [
-        {"view": "pair_gamma_wide", "reason": "no_eligible_partner_first_view"}
+    assert [p["view"] for p in pair["skipped_views"]] == [
+        "pair_gamma_wide",
+        "pair_gamma_medium_canonical",
+        "pair_gamma_wide_canonical",
     ]
+    assert pair["skipped_views"][1]["same_as_view"] == "pair_gamma_medium"
     assert not any(
         p["view"] == "pair_gamma_wide" or p["view"].startswith("closeup_0.45/")
         for p in result["diagnostics"]["passes"]
@@ -489,3 +513,175 @@ def test_two_primary_red_windows_still_allow_b_recovery_with_four_video_forwards
     result, calls = run_pair(image, primary=primary, photo=False)
     assert len(calls) == result["recovery"]["passes"] == 4
     assert [b["xyxy"] for b in result["boxes"]] == [ANCHOR, PARTNER]
+
+
+FRACTIONAL_ANCHOR = [330.2, 350.2, 359.8, 374.8]
+FRACTIONAL_PARTNER = [366.2, 350.2, 395.8, 374.8]
+FRACTIONAL_CONTEXTS = {
+    "pair_gamma_medium": ([152, 153, 538, 572], 640),
+    "pair_gamma_wide": ([34, 54, 656, 671], 960),
+    "pair_gamma_medium_canonical": ([150, 150, 540, 575], 640),
+    "pair_gamma_wide_canonical": ([30, 50, 660, 675], 960),
+}
+
+
+def run_fractional_context(responses, *, partner_pixels=True, existing_boxes=()):
+    image = np.full((740, 900, 3), 200, np.uint8)
+    image[350:375, 330:396] = panel_image()[90:115, 80:146]
+    if not partner_pixels:
+        image[350:375, 366:396] = 220
+    calls = []
+
+    def infer(pixels, size, threshold):
+        for name, (coords, view_size) in FRACTIONAL_CONTEXTS.items():
+            left, top, right, bottom = coords
+            if view_size == size and pixels.shape[:2] == (bottom - top, right - left):
+                expected = cv2.LUT(
+                    image[top:bottom, left:right], np.uint8((np.arange(256) / 255) ** 2.2 * 255)
+                )
+                assert np.array_equal(pixels, expected)
+                assert threshold == 0.25 and name not in calls
+                calls.append(name)
+                returned = [
+                    b
+                    | {"xyxy": [v - (left if i % 2 == 0 else top) for i, v in enumerate(b["xyxy"])]}
+                    for b in responses.get(name, [])
+                ]
+                return {"boxes": returned, "speed_ms": {"inference": 2.0}}
+        pytest.fail("unexpected or repeated context")
+
+    anchor = box(0.3, coords=FRACTIONAL_ANCHOR)
+    before = copy.deepcopy(anchor)
+    result = photo_pair_context(
+        image, cv2.cvtColor(image, cv2.COLOR_BGR2HSV), anchor, infer, 960, 0.25, existing_boxes
+    )
+    assert anchor == before
+    return result, calls
+
+
+def test_failed_float_medium_can_use_two_distinct_canonical_views_with_three_actual_forwards():
+    partner = box(coords=FRACTIONAL_PARTNER)
+    result, calls = run_fractional_context(
+        {"pair_gamma_medium_canonical": [partner], "pair_gamma_wide_canonical": [partner]}
+    )
+    assert calls == [
+        "pair_gamma_medium",
+        "pair_gamma_medium_canonical",
+        "pair_gamma_wide_canonical",
+    ]
+    assert result["speed_ms"] == {"inference": 6.0}
+    assert result["box"]["xyxy"] == FRACTIONAL_PARTNER
+    assert result["box"]["pair_anchor_xyxy"] == FRACTIONAL_ANCHOR
+    assert result["box"]["supporting_views"] == [
+        "pair_gamma_medium_canonical",
+        "pair_gamma_wide_canonical",
+    ]
+    receipt = result["diagnostics"]
+    assert receipt["fallback_trigger"] == "float_medium_no_eligible_partner"
+    assert [p["context_basis"] for p in receipt["passes"]] == [
+        "continuous_source_box",
+        "source_pixel_floor_ceil",
+        "source_pixel_floor_ceil",
+    ]
+    assert [p["eligible_partner_count"] for p in receipt["passes"]] == [0, 1, 1]
+    assert [p["view"] for p in receipt["skipped_views"]] == ["pair_gamma_wide"]
+
+
+def test_failed_float_wide_can_be_corroborated_by_one_canonical_wide_without_replacing_success():
+    partner = box(coords=FRACTIONAL_PARTNER)
+    result, calls = run_fractional_context(
+        {"pair_gamma_medium": [partner], "pair_gamma_wide_canonical": [partner]}
+    )
+    assert calls == ["pair_gamma_medium", "pair_gamma_wide", "pair_gamma_wide_canonical"]
+    assert result["box"]["xyxy"] == FRACTIONAL_PARTNER
+    assert result["box"]["supporting_views"] == ["pair_gamma_medium", "pair_gamma_wide_canonical"]
+    assert result["diagnostics"]["fallback_trigger"] == "float_wide_no_eligible_partner"
+
+
+def test_canonical_medium_without_second_actual_support_never_outputs_a_partner():
+    result, calls = run_fractional_context(
+        {"pair_gamma_medium_canonical": [box(coords=FRACTIONAL_PARTNER)]}
+    )
+    assert len(calls) == len(result["diagnostics"]["passes"]) == 3
+    assert not result["box"] and result["diagnostics"]["reason"] == "no_pair_consensus"
+    assert "insufficient_supporting_views" in {
+        b["reason"] for b in result["diagnostics"]["excluded_candidates"]
+    }
+
+
+def test_two_failed_medium_views_skip_both_wide_views_and_report_only_actual_calls():
+    result, calls = run_fractional_context(
+        {
+            "pair_gamma_wide": [box(coords=FRACTIONAL_PARTNER)],
+            "pair_gamma_wide_canonical": [box(coords=FRACTIONAL_PARTNER)],
+        }
+    )
+    assert calls == ["pair_gamma_medium", "pair_gamma_medium_canonical"]
+    assert not result["box"] and result["speed_ms"]["inference"] == 4.0
+    assert [p["view"] for p in result["diagnostics"]["skipped_views"]] == [
+        "pair_gamma_wide",
+        "pair_gamma_wide_canonical",
+    ]
+
+
+def test_eligible_contrary_float_wide_is_not_outvoted_by_a_canonical_third_view():
+    other = [294.2, 350.2, 323.8, 374.8]
+    # The synthetic source only contains the right partner, so create the left
+    # pixel evidence separately without reading or inferring a field value.
+    image = np.full((740, 900, 3), 200, np.uint8)
+    image[350:375, 294:324] = panel_image((ANCHOR,))[90:115, 80:110]
+    image[350:375, 330:396] = panel_image()[90:115, 80:146]
+    calls = []
+
+    def infer(pixels, size, threshold):
+        calls.append(size)
+        assert len(calls) <= 2, "contrary eligible views must not authorize a third vote"
+        origin = [152, 153] if len(calls) == 1 else [34, 54]
+        source = FRACTIONAL_PARTNER if len(calls) == 1 else other
+        return {"boxes": [box(coords=[v - origin[i % 2] for i, v in enumerate(source)])]}
+
+    result = photo_pair_context(
+        image,
+        cv2.cvtColor(image, cv2.COLOR_BGR2HSV),
+        box(coords=FRACTIONAL_ANCHOR),
+        infer,
+        960,
+        0.25,
+    )
+    assert calls == [640, 960] and not result["box"]
+    assert [p["eligible_partner_count"] for p in result["diagnostics"]["passes"]] == [1, 1]
+    assert "fallback_trigger" not in result["diagnostics"]
+
+
+@pytest.mark.parametrize(
+    "failure", ["low_confidence", "wrong_class", "layout", "overlap", "pixels"]
+)
+def test_canonical_fallback_keeps_all_source_partner_gates(failure):
+    candidate = box(coords=FRACTIONAL_PARTNER)
+    existing = ()
+    if failure == "low_confidence":
+        candidate["confidence"] = 0.24
+    elif failure == "wrong_class":
+        candidate["class_id"] = 1
+    elif failure == "layout":
+        candidate["xyxy"] = [366.2, 325.2, 395.8, 349.8]
+    elif failure == "overlap":
+        existing = [box(class_id=1, coords=FRACTIONAL_PARTNER)]
+    result, calls = run_fractional_context(
+        {
+            "pair_gamma_medium_canonical": [candidate],
+            "pair_gamma_wide_canonical": [box(coords=FRACTIONAL_PARTNER)],
+        },
+        partner_pixels=failure != "pixels",
+        existing_boxes=existing,
+    )
+    assert calls == ["pair_gamma_medium", "pair_gamma_medium_canonical"]
+    assert not result["box"]
+    reasons = {
+        "low_confidence": "below_recovery_confidence",
+        "wrong_class": "wrong_pair_class",
+        "layout": "pair_layout_unconfirmed",
+        "overlap": "duplicate_existing_region",
+        "pixels": "pair_window_evidence_missing",
+    }
+    assert reasons[failure] in {b["reason"] for b in result["diagnostics"]["excluded_candidates"]}
