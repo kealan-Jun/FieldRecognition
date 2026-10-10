@@ -1,76 +1,65 @@
+<a id="top"></a>
+
 <div align="center">
 
-<img src="static/BrandLogo.png" alt="FieldRecognition 标识" width="64">
+<h1>
+<picture>
+  <source media="(max-width: 640px)" srcset="docs/assets/readme-hero-mobile.svg">
+  <img src="docs/assets/readme-hero.svg" alt="FieldRecognition · 从现场画面，到可追溯读数。流程示意，非现场截图。" width="100%">
+</picture>
+</h1>
 
-<h1>FieldRecognition</h1>
-
-<p><strong>让现场仪器读数，有原图、有时间、有依据。</strong></p>
-<p>面向实验现场的仪器识别与证据留存系统<br>视频扫码绑定 · 本地 GPU OCR · 语音照片读数 · 采集时间追溯</p>
+<p>视频扫码绑定 · 本地 GPU OCR · 语音照片读数 · 采集时间追溯</p>
 
 <p>
-  <a href="#quick-start"><strong>快速开始</strong></a> ·
-  <a href="AgentTools.md"><strong>Agent 接入</strong></a> ·
-  <a href="技术方案.md"><strong>技术方案</strong></a> ·
+  <a href="#quick-start"><strong>快速开始</strong></a> &nbsp; / &nbsp;
+  <a href="#features"><strong>核心能力</strong></a> &nbsp; / &nbsp;
+  <a href="AgentTools.md"><strong>Agent 接入</strong></a> &nbsp; / &nbsp;
   <a href="#documentation"><strong>文档导航</strong></a>
 </p>
 
 <p>
-  <img src="https://img.shields.io/badge/Python-3.11-3776AB?style=flat-square&amp;logo=python&amp;logoColor=white" alt="Python 3.11">
-  <img src="https://img.shields.io/badge/PaddleOCR-3.2-1769E0?style=flat-square" alt="PaddleOCR 3.2">
-  <img src="https://img.shields.io/badge/Inference-GPU%20%2F%20CPU-24545C?style=flat-square" alt="GPU 推理与 CPU 便携选项">
-  <img src="https://img.shields.io/badge/API-FastAPI-009688?style=flat-square&amp;logo=fastapi&amp;logoColor=white" alt="FastAPI">
+  <img src="https://img.shields.io/badge/Python-3.11-4B807B?style=flat-square&amp;labelColor=203D46&amp;logo=python&amp;logoColor=white" alt="Python 3.11">
+  <img src="https://img.shields.io/badge/PaddleOCR-3.2-4B807B?style=flat-square&amp;labelColor=203D46" alt="PaddleOCR 3.2">
+  <img src="https://img.shields.io/badge/Inference-GPU%20%2F%20CPU-4B807B?style=flat-square&amp;labelColor=203D46" alt="GPU 推理与 CPU 便携选项">
+  <img src="https://img.shields.io/badge/API-FastAPI-4B807B?style=flat-square&amp;labelColor=203D46&amp;logo=fastapi&amp;logoColor=white" alt="FastAPI">
 </p>
-
-<img src="docs/assets/readme-hero.svg" alt="FieldRecognition 流程示意：解码仪器二维码，识别面板，保留原图、时间与已有绑定证据。非现场截图。" width="100%">
-
-<p><sub><a href="#features">核心能力</a> · <a href="#workflow">现场流程</a> · <a href="#architecture">系统架构</a> · <a href="#evaluation">验证与边界</a> · <a href="docs/ProjectHistory.md">项目进展</a></sub></p>
 
 </div>
 
-## 从一个数字，到一条有据可查的记录
+## 让读数回到现场
 
-实验记录需要回答：**哪台仪器、谁在使用、何时采集、原图在哪里。** FieldRecognition 将视频扫码、面板识别与照片留存放进同一条证据链，让读数可以回到采集画面和当时的身份关联。
+实验记录需要回答：**哪台仪器、谁在使用、何时采集、原图在哪里。** FieldRecognition 将视频扫码、面板识别与证据留存放进同一条链路，读数可追溯到原始画面和拍摄时的身份关联。
 
-挂脖相机解出已登记的仪器二维码后建立绑定；视频中稳定的读数可自动留证；现有 Agent 的语音拍照结果写入 NAS 后，也能独立进入识别流程。网页、时间追溯页和 HTTP 工具共同提供查询入口。
-
-**没有有效绑定时，照片仍可识别与保存，仪器身份保持空值。** 数字候选、人工校正和正式确认分别保留，不凭面板文字推断物理资产或操作。
+挂脖相机解出已登记的仪器码后建立绑定；视频稳定读数可自动留证；已有 Agent 写入 NAS 的语音照片也可独立识别。**没有有效绑定时，仪器身份保持空值。** 候选、人工校正和正式确认分别记录，不凭面板文字推断物理资产或操作。
 
 <a id="features"></a>
 
 ## 核心能力
 
-<table>
-<tr>
-<td width="50%" valign="top">
-<h3>⌁ 扫码确认仪器</h3>
-<p>解码场景与仪器二维码；支持多相机、同相机多仪器及人员使用时段。保留命中帧和绑定历史，异常释放或跨日后重新扫码。</p>
-</td>
-<td width="50%" valign="top">
-<h3>▣ 两路采集，同一时间轴</h3>
-<p>视频稳定读数自动留证，外部语音照片从 NAS 导入。<code>/trace</code> 按采集时间查看两路画面、来源与识别版本。</p>
-</td>
-</tr>
-<tr>
-<td valign="top">
-<h3>◉ 本地 OCR，模型常驻</h3>
-<p>GPU PaddleOCR 复用常驻模型，照片任务优先、模型串行。提供面板区域处理与手动选框；CPU 可用于独立便携环境。</p>
-</td>
-<td valign="top">
-<h3>✧ 可选视觉模型</h3>
-<p>默认本地识别优先，满足条件时尝试云端兜底；照片也可配置视觉优先。原始回答与失败回执保留，无法读取时不补造数字。</p>
-</td>
-</tr>
-<tr>
-<td valign="top">
-<h3>✓ 复核与版本追溯</h3>
-<p>逐张候选、连拍冲突、草稿校正和正式确认分开记录。重新识别生成新版本，原图、拍摄时归属与旧回执保留。</p>
-</td>
-<td valign="top">
-<h3>↗ 证据归档与 Agent 接入</h3>
-<p>原图、SHA-256、阶段时间与身份快照关联留存；持久化队列支持 NAS 恢复后重试。网页、HTTP API 与九个 Agent 工具共用业务规则。</p>
-</td>
-</tr>
-</table>
+### <img src="docs/assets/readme-icons/qr.svg" width="22" height="22" alt=""> 扫码确认仪器
+
+真实解码场景与仪器码，支持多相机和同相机多仪器。保留命中帧、人员使用时段与绑定历史，异常释放或跨日后重新扫码。
+
+### <img src="docs/assets/readme-icons/timeline.svg" width="22" height="22" alt=""> 两路采集，同一时间轴
+
+视频稳定读数自动留证，已有语音照片从 NAS 导入。通过 `/trace` 按采集时间查看画面、来源与识别版本。
+
+### <img src="docs/assets/readme-icons/ocr.svg" width="22" height="22" alt=""> 本地识别，模型常驻
+
+GPU PaddleOCR 复用常驻模型，照片任务优先、模型串行；支持面板区域处理与手动选框，CPU 可用于独立便携环境。
+
+### <img src="docs/assets/readme-icons/vision.svg" width="22" height="22" alt=""> 按需接入视觉模型
+
+默认本地识别优先，满足条件时尝试云端兜底；照片可配置视觉优先。保留原始回答与失败回执，无法读取时不补造数字。
+
+### <img src="docs/assets/readme-icons/review.svg" width="22" height="22" alt=""> 复核、确认与版本追溯
+
+逐张候选、连拍冲突与人工校正都有记录。重新识别生成新版本，原图、拍摄时归属和旧回执继续保留。
+
+### <img src="docs/assets/readme-icons/archive.svg" width="22" height="22" alt=""> 证据留存与 Agent 接入
+
+原图、SHA-256、阶段时间与身份快照关联归档；NAS 恢复后队列继续重试。网页、HTTP API 与 Agent 工具共用业务规则。
 
 <a id="workflow"></a>
 
@@ -164,23 +153,22 @@ voice_photos/
 视频与语音照片共享身份快照、任务队列和归档，但各自保留采集来源。在托管模式中，API、相机监控、OCR 和归档分别运行；NAS 提供文件共享，识别服务运行在本机。
 
 ```mermaid
-flowchart LR
-    Camera[挂脖相机] --> Receiver[Receiver 主码流]
-    Receiver --> QR[二维码解码]
-    QR --> Binding[场景 / 仪器 / 人员绑定]
-    Receiver --> Video[视频面板观测]
-    Agent[已有 Agent 语音拍照] --> Photos[NAS 原始照片]
-    Photos --> Import[稳定性校验与导入]
-    Binding -. 拍摄时身份快照 .-> Jobs[持久化识别任务]
-    Video --> Jobs
-    Import --> Jobs
-    Jobs -->|本地识别路径| OCR[本地 GPU OCR]
-    Jobs -. 启用且符合所选模式 .-> Vision[可选视觉模型]
-    OCR --> Evidence[原图与识别回执]
-    Vision --> Evidence
+flowchart TB
+    subgraph Capture[两路采集]
+        direction LR
+        Video[视频 / Receiver 主码流]
+        Voice[已有 Agent → NAS 语音照片]
+    end
+    Video --> Binding[二维码解码与身份关联]
+    Video --> Jobs[稳定性校验 / 持久化识别任务]
+    Voice --> Jobs
+    Binding -. 拍摄时已有身份快照 .-> Jobs
+    Jobs --> Reading[本地 OCR / 按配置选择视觉模型]
+    Reading --> Evidence[原图 · 采集时间 · 识别回执]
     Evidence --> UI[工作台 / 时间轴 / Agent API]
-    Evidence --> Outbox[本机归档队列]
-    Outbox --> Archive[NAS 原件 / 结果 / 历史版本]
+    Evidence --> Archive[本机归档队列 → NAS 历史版本]
+    classDef accent fill:#173d46,stroke:#60a797,color:#edf8f1
+    class Binding,Reading,Evidence accent
 ```
 
 识别路径由配置和任务条件决定；任务跳过模型或无法读清时仍保留对应回执。
@@ -229,7 +217,7 @@ FieldRecognition/
 | 我想了解… | 从这里开始 |
 | :--- | :--- |
 | **系统如何实现** | [技术方案](技术方案.md) · [多二维码与实时视频 OCR](docs/多二维码与实时视频OCR.md) |
-| **让 Agent 获取读数** | [九个工具、参数与 Python 示例](AgentTools.md) |
+| **让 Agent 获取读数** | [工具参数、发现接口与 Python 示例](AgentTools.md) |
 | **安装与常驻运行** | [GPU 部署](docs/GPU部署.md) · [托管运行](docs/ProductionRuntime.md) · [工作台推理连接](docs/工作台推理连接与恢复.md) |
 | **使用与身份关联** | [本机自动运行](docs/本机自动运行.md) · [多人使用与绑定快照](docs/FieldRepair20260920.md) · [自动解绑](docs/AutomaticBindingRelease20260921.md) |
 | **视频与语音照片采集** | [两路时间追溯](docs/TwoStreamEvidence20260923.md) · [照片视觉优先](docs/NianfengVision20260925.md) |
@@ -273,9 +261,6 @@ env -u FIELD_RECEIVER_URL -u FIELD_CAMERA_SNAPSHOT_URL \
 ---
 
 <p align="center">
-  <strong>FieldRecognition</strong><br>
-  <sub>让每次现场识别，都能回到它的依据。</sub><br><br>
-  <a href="https://github.com/kealan-Jun/FieldRecognition">个人仓库</a> ·
-  <a href="https://github.com/RealityLoopAI/FieldRecognition">RealityLoopAI 仓库</a> ·
-  <a href="#quick-start">开始使用 ↑</a>
+  <sub><strong>FieldRecognition</strong> · 让每次现场识别，都能回到它的依据。</sub><br>
+  <sub><a href="#top">返回顶部 ↑</a></sub>
 </p>
