@@ -63,9 +63,11 @@ def verify_password(password: str, password_hash: str) -> bool:
 class AuthService:
     """Authentication and authorization service."""
 
-    def __init__(self, db: Database):
+    def __init__(self, db: Database, *, session_duration_hours: int = 8):
+        if type(session_duration_hours) is not int or not 1 <= session_duration_hours <= 72:
+            raise ValueError("session_duration_hours must be an integer between 1 and 72")
         self.db = db
-        self.session_duration_hours = 8
+        self.session_duration_hours = session_duration_hours
 
     def create_initial_admin(self, username: str, display_name: str, password: str) -> User:
         """

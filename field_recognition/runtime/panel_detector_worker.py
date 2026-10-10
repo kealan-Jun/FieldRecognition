@@ -3,11 +3,21 @@
 import base64
 import contextlib
 import json
+import re
 import sys
+
+
+def inference_device(value="cpu"):
+    if value == "cpu":
+        return value
+    if not re.fullmatch(r"gpu:\d+", value):
+        raise ValueError("Panel detector device must be cpu or gpu:<index>")
+    return int(value.split(":")[1])
 
 
 def main():
     wire = sys.stdout
+    device = inference_device(sys.argv[4] if len(sys.argv) > 4 else "cpu")
     with contextlib.redirect_stdout(sys.stderr):
         import cv2
         import numpy as np
@@ -17,7 +27,6 @@ def main():
 
         settings.update({"sync": False})
         torch.set_num_threads(2)
-        device = "cpu" if len(sys.argv) > 4 and sys.argv[4] == "cpu" else 0
         if device != "cpu" and not torch.cuda.is_available():
             raise RuntimeError("GPU unavailable")
         model = YOLO(sys.argv[1])

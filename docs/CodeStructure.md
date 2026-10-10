@@ -1,6 +1,6 @@
 # 代码结构与维护
 
-代码按职责组织在 `field_recognition/`。仓库根目录只保留服务和客户端的兼容入口，现有 systemd 模板及 `uvicorn app:app`、`python -m ocr_worker` 等启动命令仍可使用。
+代码按职责组织在 `field_recognition/`，标准启动入口是 `python -m field_recognition`。仓库根目录保留服务和客户端的兼容入口，`uvicorn app:app`、`python -m ocr_worker` 等命令仍可使用。systemd 文件是模板，须由 `scripts/install_runtime.py` 按实际仓库路径和配置文件生成，不能直接复制未渲染的模板启动。
 
 整理参考了 [FastAPI 的多模块应用说明](https://fastapi.tiangolo.com/tutorial/bigger-applications/) 与 [Requests 的仓库布局](https://github.com/psf/requests)：源码归入包，测试和文档有独立入口，再按本项目业务边界拆分。原先根目录的 80 个 Python 模块归入包，根目录保留 12 个有实际启动或导入用途的兼容入口。
 

@@ -124,7 +124,7 @@ PaddleOCR 支持 GPU / CPU、常驻模型与面板区域处理；视觉模型按
 
 ### 全新隔离环境
 
-下面使用 CPU 依赖运行单进程体验，要求已安装 `uv`，且端口 8188 空闲。已有部署请使用其工作台；常驻多服务部署见 [托管运行说明](docs/ProductionRuntime.md)。
+下面在 Linux x86_64、Python 3.11 环境中使用 CPU 依赖运行单进程体验，要求先按 [uv 官方安装说明](https://docs.astral.sh/uv/getting-started/installation/) 安装 `uv`，且端口 18188 空闲。其他平台未在当前 CI 中验证。已有部署请使用其工作台；常驻多服务部署见 [托管运行说明](docs/ProductionRuntime.md)。
 
 ```bash
 git clone https://github.com/kealan-Jun/FieldRecognition.git
@@ -134,23 +134,47 @@ uv python install 3.11.15
 uv venv --python 3.11.15 .venv
 uv pip install --python .venv/bin/python -r Requirements.lock.txt
 
-FIELD_OCR_DEVICE=cpu OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 \
-  .venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 8188
+env -i PATH="$PATH" HOME="$HOME" LANG=C.UTF-8 \
+  FIELD_DEMO_DATA="$PWD/tmp/CpuUpload" FIELD_CAMERA_ID=SampleUploadCamera \
+  FIELD_RECORD_MODE=test FIELD_REGISTRY_POLICY=sample FIELD_OCR_DEVICE=cpu \
+  OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 \
+  .venv/bin/python -m field_recognition --host 127.0.0.1 --port 18188
 ```
 
-打开 [http://127.0.0.1:8188](http://127.0.0.1:8188)。尚未接入 Receiver 时，可使用兼容照片上传接口和 [二维码样张](static/labels) 体验基础流程；现场主采集方式仍是视频与外部语音照片。
+打开 [http://127.0.0.1:18188](http://127.0.0.1:18188)。此体验使用忽略的 `tmp/CpuUpload/` 保存本地数据，显式导入样例二维码，不继承 Receiver、NAS、云端或生产数据库配置。退出终端进程即可结束体验。现场主采集方式仍是视频与外部语音照片。
 
-本机部署使用 **RTX 3090 Ti / `gpu:0`**。新建适配的 GPU 环境使用 [Requirements.gpu.lock.txt](Requirements.gpu.lock.txt) 并选择 `FIELD_OCR_DEVICE=gpu:0`，平台要求见 [GPU 部署](docs/GPU部署.md)。模型权重不随 Git 分发；无完整本地缓存时可能下载，显式指定的模型目录不完整会报错。
+在另一个终端的仓库根目录上传一张随仓库提供的二维码样张；这一步只解码和保存照片，不运行 OCR：
+
+```bash
+.venv/bin/python - <<'PY'
+import base64
+from pathlib import Path
+from field_recognition.api.agent_client import FieldTools
+
+tools = FieldTools('http://127.0.0.1:18188', camera_id='SampleUploadCamera')
+scan = tools.call('scan_photo', {
+    'camera_id': 'SampleUploadCamera',
+    'image_base64': base64.b64encode(Path('static/labels/InstrumentA.png').read_bytes()).decode(),
+})
+print(scan['capture_id'], scan['matches'])
+PY
+```
+
+照片上传不自动建立绑定。要体验面板 OCR，可上传自己的清晰 JPEG/PNG，按 [CPU 照片识别步骤](docs/QuickStart.md#cpu-照片识别) 提交并查询同一任务。仓库样例身份仅用于体验；正式仪器需 [导入自有注册表](docs/ProductionRuntime.md#owned-registries)，再真实扫码。
+
+CPU 是默认推理设备。新建适配的 GPU 环境使用 [Requirements.gpu.lock.txt](Requirements.gpu.lock.txt) 并选择 `FIELD_OCR_DEVICE=gpu:0`，平台要求见 [GPU 部署](docs/GPU部署.md)。模型权重不随 Git 分发；无完整本地缓存时可能下载，显式指定的模型目录不完整会报错。
 
 <details>
 <summary><strong>接入配置：相机、NAS 与可选视觉模型</strong></summary>
 
-模板见 [.env.example](.env.example)。手动运行需要设置环境变量，程序不会自动读取 `.env`；托管服务通过环境文件加载配置。凭证只放环境变量或未跟踪的本地文件。
+模板见 [.env.example](.env.example)。手动启动默认只读取环境变量；需要配置文件时显式运行 `.venv/bin/python -m field_recognition --env-file .env`，不会自动搜索 `.env`。已有环境变量优先于文件，`--host`、`--port` 再覆盖监听地址；文件只接受注释与 `KEY=value`，不执行 shell 或变量展开。托管服务通过环境文件加载配置。凭证只放环境变量或未跟踪的本地文件。
 
 | 配置 | 用途 |
 | :--- | :--- |
 | `FIELD_OCR_DEVICE` | `cpu` 或 `gpu:0`；GPU 不可用时明确报错。 |
-| `FIELD_RECEIVER_URL`、`FIELD_CAMERA_ID` | Receiver 地址与相机标识，主码流需支持 GWHP 协议。 |
+| `FIELD_RECEIVER_URL`、`FIELD_CAMERA_ID` | Receiver 地址与精确相机标识；配置 Receiver 或快照 URL 时必须同时指定相机，主码流需支持 GWHP 协议。 |
+| `FIELD_HOST`、`FIELD_PORT` | 默认 `127.0.0.1:8188`，首次体验显式使用 18188。 |
+| `FIELD_REGISTRY_POLICY` | `auto` 在 test 模式导入样例、production 模式不导入；`sample` 显式选用样例；`none` 跳过导入，不删除既有登记。 |
 | `FIELD_SAVED_PHOTO_ROOT`、`FIELD_SAVED_PHOTO_WATCH_ENABLED=1` | 监控已挂载的语音照片目录，不要求先绑定。 |
 | `FIELD_SAVED_PHOTO_TIMEZONE` | 照片文件名时间的时区，默认 `Asia/Shanghai`。 |
 | `FIELD_ARCHIVE_ENABLED`、`FIELD_ARCHIVE_ROOT`、`FIELD_ARCHIVE_MOUNT` | 独立 NAS 归档目标及挂载点，数据库保留在本机。 |
@@ -250,7 +274,7 @@ FieldRecognition/
 | **让 Agent 获取读数** | [工具参数、发现接口与 Python 示例](AgentTools.md) |
 | **采集与身份关联** | [自动运行](docs/本机自动运行.md) · [绑定快照](docs/FieldRepair20260920.md) · [自动解绑](docs/AutomaticBindingRelease20260921.md) · [两路采集](docs/TwoStreamEvidence20260923.md) |
 | **照片、结果与复核** | [NAS 留存指南](docs/NAS文件夹与留存指南.md) · [六字段契约](schemas/InstrumentMeasurement.schema.json) · [视觉配置](docs/NianfengVision20260925.md) · [界面演示](docs/ReadmeShowcase.md) |
-| **维护与目录** | [文档索引](docs/README.md) · [代码结构](docs/CodeStructure.md) · [Agent 指南](AGENTS.md) |
+| **维护与目录** | [文档索引](docs/README.md) · [代码结构](docs/CodeStructure.md) · [Agent 指南](AGENTS.md) · [贡献指南](CONTRIBUTING.md) · [安全说明](SECURITY.md) |
 | **验证与升级** | [升级入口](docs/RuntimeReliability.md#升级入口) · [数据库迁移](docs/BindingMigration.md) · [时延验收](docs/PublicationLatency20261008.md) · [项目进展](docs/ProjectHistory.md) |
 
 <a id="evaluation"></a>
@@ -287,6 +311,8 @@ env -u FIELD_RECEIVER_URL -u FIELD_CAMERA_SNAPSHOT_URL \
 后续验收重点为现场连续扫码与故障后重新绑定、真实语音拍照闭环、不同仪器与拍摄条件的人工真值评测，以及生产负载下的结果首读和长期时延分布。
 
 </details>
+
+仓库暂未附带 `LICENSE`，许可由所有者另行决定。一般问题与改进建议按 [贡献指南](CONTRIBUTING.md) 提交；敏感安全问题按 [安全说明](SECURITY.md) 处理。
 
 ---
 

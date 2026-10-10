@@ -6,6 +6,8 @@
 
 ## NAS 恢复后的 OCR 接口补启动
 
+这是上述 2026-09-20 部署中已有独立 OCR 服务的可选恢复机制，不是首次克隆或 CPU 上传的安装前提。服务名与原部署有关；其他环境不能照抄启用，先核对实际服务归属并取得修改该服务的授权。
+
 `deployment/system/field-recognition-ocr-recovery.timer` 开机 45 秒开始检查，此后每 30 秒运行一次。
 它仅在现有 `realityloop-ocr-api.service` 已启用且处于 inactive/failed 时提交启动请求。
 挂载的等待和错误仍由原 API 单元管理；挂载失败后下次定时检查再次尝试。

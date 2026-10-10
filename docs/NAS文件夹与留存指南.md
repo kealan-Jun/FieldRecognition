@@ -1,6 +1,6 @@
 # NAS 文件夹与留存指南
 
-程序在本机运行。只读相机采集目录，把结果写入 `/mnt/realityloop-nas/FieldRecognitionArchive/`；不更改 `VisionCortexExperimentArchive/`。目录采用“日期＋相机 → 事件 → 照片与结果”的结构，业务文件夹和文件名使用大驼峰格式，已有相机 ID、事件 ID 保持原值。
+程序在本机运行。只读已配置的相机采集目录，把结果写入 `FIELD_ARCHIVE_ROOT` 指定的独立 `FieldRecognitionArchive/`；不更改其他项目的归档目录。目录采用“日期＋相机 → 事件 → 照片与结果”的结构，业务文件夹和文件名使用大驼峰格式，已有相机 ID、事件 ID 保持原值。
 
 ## 打开哪里
 
@@ -9,7 +9,7 @@
 ```text
 FieldRecognitionArchive/
 ├── Readme.html
-├── 2026-09-14_lubancat-52d2ef0c_cam01/
+├── 2026-09-14_Camera01/
 │   ├── Bindings/
 │   │   └── 13-26-19.000_<绑定或扫码ID>/
 │   │       ├── Binding.json

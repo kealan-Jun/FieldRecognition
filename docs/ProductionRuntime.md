@@ -1,6 +1,6 @@
 # 本机托管运行与 NAS 归档
 
-本机运行 API、相机监控、GPU OCR、NAS 归档四个独立服务。NAS 只提供文件共享；原采集目录只读，不安装服务。`FIELD_PRODUCTION_ENABLED=1` 启用服务拆分和持久化任务队列；`FIELD_RECORD_MODE=production` 才启用正式业务草稿确认。两个开关含义不同，测试结果不会自动成为正式记录。
+托管模式在 Linux 主机运行 API、相机监控、OCR、归档四个独立服务。OCR 默认 CPU；适配依赖后可显式使用 GPU。NAS 只提供文件共享；原采集目录只读，不安装服务。`FIELD_PRODUCTION_ENABLED=1` 启用服务拆分和持久化任务队列；`FIELD_RECORD_MODE=production` 才启用正式业务草稿确认。两个开关含义不同，测试结果不会自动成为正式记录。
 
 ## 服务与入口
 
@@ -8,22 +8,93 @@
 |---|---|
 | `field-recognition-api.service` | HTTP、网页、Agent 工具；默认免登录；不加载模型或连接相机 |
 | `field-recognition-cameras.service` | 从登记表读取已登记使用人的相机；每台相机一个监控进程 |
-| `field-recognition-ocr.service` | 统一 GPU 模型所有权；照片任务优先、按相机公平取任务；最多四个照片流程等待，模型串行 |
+| `field-recognition-ocr.service` | 统一 OCR 模型所有权；照片任务优先、按相机公平取任务；最多四个照片流程等待，模型串行 |
 | `field-recognition-archive.service` | 消费本地归档队列、同步 NAS、生成索引与完整性巡检 |
 | `field-recognition.target` | 一起启动、停止上述服务 |
 
-进程通过本机权限为 `0600` 的 Unix socket 通信，不开放额外网络端口。API 默认只监听 `127.0.0.1:8188`。打开 `http://127.0.0.1:8188/` 即可使用；旧 `/login` 地址会返回工作台。
+进程通过本机权限为 `0600` 的 Unix socket 通信，不开放额外网络端口。API 默认只监听 `127.0.0.1:8188`，可通过 `FIELD_HOST`、`FIELD_PORT` 调整；默认免登录应保留本机监听。打开对应地址即可使用；免登录模式下旧 `/login` 地址返回工作台。
 
 迁移前使用 SQLite backup API 生成一致性备份。迁移只增加结构或保留原表副本，不删除照片、绑定、历史记录。以下是新建离线部署或已获明确授权停写窗口的安装步骤；正常使用期间的迭代不能执行停服或原地安装。相机采集进程停止会结束旧绑定，恢复后须重新扫码，进行中的采集会中断；已经保存的照片、队列与历史回执保留。不要为满足部署前提主动制造停机。
 
-在授权窗口内先停止旧服务，避免旧进程与新任务消费者并行写入：
+## 首次离线安装
+
+先按 [README](../README.md#quick-start) 建立本项目环境。需要 Linux 用户 systemd 会话；终端应保留其 `XDG_RUNTIME_DIR` 和 D-Bus 环境，不使用 CPU 体验的 `env -i` 命令安装服务。安装器从实际仓库位置生成单元，不要求固定主目录或 clone 路径。
+
+在仓库根目录创建本地配置，已有 `.env` 会保留：
 
 ```bash
-systemctl --user stop field-recognition-demo.service
-.venv/bin/python prepare_runtime.py --data Data --username kealan --display-name 徐荣炜 --camera lubancat-52d2ef0c_cam01
-.venv/bin/python scripts/install_runtime.py
+test -e .env || (umask 077; cp .env.example .env)
+chmod 600 .env
+```
+
+编辑 `.env`，填写部署自己的相机和来源；配置 Receiver 或快照 URL 时必须提供精确 `FIELD_CAMERA_ID`。真实业务至少设置 `FIELD_RECORD_MODE=production`、`FIELD_REGISTRY_POLICY=none`，按需要启用照片监控与归档。默认 CPU 环境无需 GPU。数据与数据库路径可分别用 `FIELD_DEMO_DATA`、`FIELD_DATABASE_PATH` 设置，使用本机存储；文件内路径写实际值，不使用 shell 变量展开。
+
+托管采集会为已登记并分配使用人的相机启动采集进程，必须有可用 Receiver 主码流来源；仅配置快照 URL 不能提供该采集能力。无硬件首次体验或只有已有照片的环境使用 README 的单进程上传流程。以下为需替换的配置实例：
+
+```dotenv
+FIELD_RECORD_MODE=production
+FIELD_REGISTRY_POLICY=none
+FIELD_CAMERA_ID=sender_cam01
+FIELD_RECEIVER_URL=http://receiver-host:8080
+```
+
+<a id="owned-registries"></a>
+
+### 登记自己的仪器与场景
+
+新建正式库通过准备脚本显式导入自有注册表。创建本地目录：
+
+```bash
+mkdir -p Data/Registries
+```
+
+将下面的结构保存为 `Data/Registries/Instruments.json`。**示例 UUID 只展示格式，必须换成自己实际仪器标签载荷中的 ID，不能把它当作真实仪器。** 新制标签应使用自己的唯一 UUID，并让注册表与标签中的 `{"v":1,"type":"instrument","id":"同一UUID"}` 一致；标签印好后仍需真实相机解码核验。
+
+```json
+{
+  "schema": "FieldRecognitionQrLabels/1",
+  "instruments": [
+    {
+      "instrument_id": "00000000-0000-4000-8000-000000000001",
+      "label": "自有仪器"
+    }
+  ]
+}
+```
+
+仪器必填字段为有效 UUID `instrument_id` 和非空 `label`（最多 80 字符）。可选 `measurement_ranges` 声明已经核对的字段单位、量程和显示规则；`type_id`、`device_category`、`scene`、`model`、`device_no` 分别声明类型、类别、登记位置、型号和编号。未知值留空，不从样例补造；`scene` 仅是登记位置文字，不证明扫过场景码。
+
+场景为可选的独立登记。需要时保存 `Data/Registries/Scenes.json`，将示例 UUID 和名称换成自己的场景；标签载荷为 `{"v":1,"type":"scene","id":"同一场景UUID"}`。没有场景标签时可省略该文件及后续 `--scene-registry` 参数。
+
+```json
+{
+  "schema": "FieldRecognitionSceneQrLabels/1",
+  "scenes": [
+    {
+      "scene_id": "00000000-0000-4000-8000-000000000002",
+      "scene_name": "自有实验台"
+    }
+  ]
+}
+```
+
+场景 ID 必须是 UUID；仅有非空 `scene_name` 的项会导入。`Data/Registries/` 随 `Data/` 被 Git 忽略，自有身份资料不提交仓库。参数支持绝对路径，相对路径按本项目根目录解析；自定义数据目录也可存放这些文件，但需传实际路径。导入只登记元数据，不产生 `matches`、扫码照片或绑定；JSON 中的 `decode_verified` 等描述不能代替实际解码证据。
+
+确认没有本项目运行中的写入进程后执行，下列人员与相机值是占位实例，需替换：
+
+```bash
+.venv/bin/python prepare_runtime.py --env-file .env \
+  --username operator01 --display-name 实验员一 --camera sender_cam01 \
+  --receiver-url http://receiver-host:8080 --registry-policy none \
+  --instrument-registry Data/Registries/Instruments.json \
+  --scene-registry Data/Registries/Scenes.json
+.venv/bin/python scripts/install_runtime.py --env-file .env
 systemctl --user status field-recognition.target
 ```
+
+准备脚本默认不导入样例；体验环境可明确传 `--registry-policy sample`，不能与自有注册表参数同时使用。显式自有文件与 `--registry-policy none` 可同时使用；重复导入只添加缺失 ID，不覆盖既有名称、编号、规则、身份或证据，也不用于修改已有登记。运行时 `FIELD_REGISTRY_POLICY=auto` 仅在 test 模式导入样例，production 模式不导入；`none` 不删除既有登记。准备脚本支持 `--database-path` 覆盖数据库路径；准备、安装与运行必须指向同一库。启动后仍需从实际二维码解码建立新绑定，导入文件本身不授权使用关系。
+
+安装器检查旧单进程及托管单元，运行中或状态无法确认时拒绝，绝不自动停止/重启。首次机器没有旧单元正常跳过；已离线的旧单元可禁用自启，不调用 `--now`。缺少 `.env` 默认报错；`--init-env` 仅在缺失时以 `0600` 创建模板，不覆盖已有配置，仍须核对配置与准备数据库。`--no-start` 安装并启用自启但不立即启动。已有部署必须先满足上述离线或明确停写授权条件，不能通过安装器制造停机。
 
 默认 `FIELD_AUTH_ENABLED=0`，网页、API 和 Agent 均无需登录。准备脚本登记使用人唯一 ID、姓名与相机关系，不生成密码；已有账号、绑定身份、原图和历史回执保留。实验员登记仍用于数据归属，免登录下的操作人是本机登记或请求声明的身份，不代表通过账号认证。
 
@@ -33,7 +104,7 @@ systemctl --user status field-recognition.target
 
 二维码身份按活跃绑定独占：同一个二维码不能同时绑定到多个设备或相机。明确结束绑定（含交接交出）、当天凭证失效、设备离线、采集服务异常或 Receiver 接入会话变化都会释放旧占用；另一相机可凭新的实际扫码建立自己的关系。异常观测不等于已证实设备物理关机，旧绑定与原始扫码证据不会删除。完整规则见 [自动解绑](AutomaticBindingRelease20260921.md)。
 
-登录是独立的可选配置，托管模式或 `FIELD_RECORD_MODE=production` 均不会自动开启。新建需要账号认证的部署时，使用 `prepare_runtime.py --enable-login` 并设置 `FIELD_AUTH_ENABLED=1`；初始密码只写入权限为 `0600` 的 `Data/Access/InitialAccess.json`。仅在这种配置下启用会话、CSRF、相机账号隔离及管理员账号接口。
+登录是独立的可选配置，托管模式或 `FIELD_RECORD_MODE=production` 均不会自动开启。新建需要账号认证的部署时，设置 `FIELD_AUTH_ENABLED=1` 并使用准备脚本的 `--enable-login`；初始密码只写入权限为 `0600` 的 `<数据目录>/Access/InitialAccess.json`。默认登录地址按 `FIELD_HOST`、`FIELD_PORT` 生成，受控网关部署可用 `FIELD_LOGIN_URL` 或 `--login-url` 明确指定。`FIELD_SESSION_DURATION_HOURS` 同时控制会话及 Cookie 时长（1–72 小时，默认 8）。仅在登录配置下启用会话、CSRF、相机账号隔离及管理员账号接口；不要把凭证交付文件上传仓库或截图公开。
 
 `/api/v1/` 与现有 `/api/` 执行相同业务规则。`GET /api/cameras` 列出已登记相机，后续请求使用 `X-Camera-Id` 选择相机。Agent 工具目录见 `GET /api/tools`，测量与交接工具直接调用同一业务事务。
 

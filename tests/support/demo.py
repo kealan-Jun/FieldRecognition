@@ -14,6 +14,7 @@ from field_recognition.runtime.paths import PROJECT_ROOT
 @pytest.fixture
 def app_client(tmp_path, monkeypatch):
     monkeypatch.setenv("FIELD_DEMO_DATA", str(tmp_path))
+    monkeypatch.setenv("FIELD_REGISTRY_POLICY", "sample")
     monkeypatch.setenv("FIELD_ALIYUN_FALLBACK_ENABLED", "0")
     monkeypatch.setenv("FIELD_SAVED_PHOTO_WATCH_ENABLED", "0")
     monkeypatch.setenv("FIELD_VIDEO_OCR_ENABLED", "0")

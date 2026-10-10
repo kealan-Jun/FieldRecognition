@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import os
+import re
 from pathlib import Path
 from field_recognition.runtime.paths import PROJECT_ROOT
 import selectors
@@ -83,14 +84,15 @@ class PanelDetector:
             YOLO_OFFLINE="true",
             YOLO_CONFIG_DIR=str(path.parent / "runtime"),
         )
-        device = os.environ.get("FIELD_PANEL_DEVICE", "gpu:0")
-        if device not in {"cpu", "gpu:0"}:
-            raise ValueError("FIELD_PANEL_DEVICE must be cpu or gpu:0")
+        device = os.environ.get("FIELD_PANEL_DEVICE", "cpu").strip().lower()
+        if not re.fullmatch(r"cpu|gpu:\d+", device):
+            raise ValueError("FIELD_PANEL_DEVICE must be cpu or gpu:<index>")
         if os.environ.get("FIELD_OCR_SERVICE_URL") and device != "cpu":
             raise ValueError(
                 "The standalone GPU service owns CUDA; local panel detection requires cpu"
             )
-        env["CUDA_VISIBLE_DEVICES"] = "" if device == "cpu" else "0"
+        # The child sees only the explicitly selected host GPU, at its local index 0.
+        env["CUDA_VISIBLE_DEVICES"] = "" if device == "cpu" else device.split(":")[1]
         self.process = subprocess.Popen(
             [
                 config["python"],
@@ -99,7 +101,7 @@ class PanelDetector:
                 str(weights),
                 str(config.get("imgsz", 960)),
                 str(config.get("confidence", 0.25)),
-                device,
+                "cpu" if device == "cpu" else "gpu:0",
             ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,

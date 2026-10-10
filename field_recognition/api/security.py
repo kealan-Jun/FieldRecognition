@@ -347,7 +347,14 @@ class SecurityMiddleware(BaseHTTPMiddleware):
 
 def install(core, enabled):
     app = core["app"]
-    core["auth_service"] = AuthService(core["database"]) if enabled else None
+    config = core.get("config")
+    core["auth_service"] = (
+        AuthService(
+            core["database"], session_duration_hours=config.session_duration_hours if config else 8
+        )
+        if enabled
+        else None
+    )
     app.add_middleware(SecurityMiddleware, core=core, enabled=enabled)
     app.add_middleware(BoundedBody)
 
@@ -421,7 +428,7 @@ def install(core, enabled):
             httponly=True,
             samesite="strict",
             secure=request.url.scheme == "https",
-            max_age=8 * 3600,
+            max_age=core["auth_service"].session_duration_hours * 3600,
         )
         return response
 

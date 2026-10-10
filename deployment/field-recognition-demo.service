@@ -1,16 +1,17 @@
+# Template: render with scripts/install_runtime.py; do not copy directly.
 [Unit]
 Description=FieldRecognition QR binding and panel recognition
 After=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/Projects/FieldRecognition
-ExecStart=%h/Projects/FieldRecognition/.venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 8188
+WorkingDirectory=@PROJECT_ROOT@
+ExecStart=/usr/bin/env ./.venv/bin/python -m field_recognition
 Environment=PYTHONUNBUFFERED=1
 Environment=OMP_NUM_THREADS=2
 Environment=OPENBLAS_NUM_THREADS=2
 Environment=PADDLE_PDX_MODEL_SOURCE=BOS
-EnvironmentFile=-%h/Projects/FieldRecognition/.env
+EnvironmentFile=-@ENV_FILE@
 Nice=10
 CPUQuota=200%
 MemoryMax=3G

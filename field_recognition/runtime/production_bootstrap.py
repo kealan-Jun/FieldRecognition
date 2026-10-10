@@ -37,7 +37,11 @@ class ProductionCore:
         self.db = Database(db_path)
 
         # Initialize services
-        self.auth_service = AuthService(self.db) if config.auth_enabled else None
+        self.auth_service = (
+            AuthService(self.db, session_duration_hours=config.session_duration_hours)
+            if config.auth_enabled
+            else None
+        )
         self.camera_registry = CameraRegistry(self.db)
         self.instrument_config = InstrumentConfig(self.db)
         self.measurement_state = None  # Installed with the evidence-backed application workflow.

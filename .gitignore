@@ -8,6 +8,12 @@ tmp/
 __pycache__/
 .pytest_cache/
 .ruff_cache/
+build/
+dist/
+*.egg-info/
+.DS_Store
+*.swp
+*.swo
 *.py[cod]
 *.log
 .env

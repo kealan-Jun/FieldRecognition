@@ -1,12 +1,14 @@
 # FieldRecognition 现场识别系统技术方案
 
+> 本文保留 2026-09-11 起的基础协议与设计记录，早期部署形态、测试数量和性能结论有其日期边界。首次安装以 [快速开始](QuickStart.md)、[托管运行](ProductionRuntime.md) 为准；当前目录与入口见 [代码结构](CodeStructure.md)。
+>
 > 2026-09-14 多关联与实时视频 OCR 更新：本文件保留基础协议及早期设计记录；有关单仪器限制、绑定后停止扫码、仅照片 OCR 的描述已由 [多二维码与实时视频 OCR](多二维码与实时视频OCR.md) 替代。新版本的接口、分类结构、留存规则和证据边界详见该文。
 
 版本：2026-09-11 · 当前实现说明与后续建设边界
 
 2026-09-14 补充：本机自动运行、实验员登记、暂停恢复与新接口见 [本机自动运行](本机自动运行.md)。新增 `automation.py` 负责后台调度，既有视频、照片和 OCR 算法继续复用。
 
-项目目录：`/home/x1/Projects/FieldRecognition`
+项目目录：本机任意位置的仓库根目录；使用命令前先进入该目录。
 
 代码基线：以 `de48678ce3b150ff27e7410cbfad77d364a9a111` 为初始基线，本文与后续功能实现一并发布到 `main`。初始 SHA 单独检出不包含全部新增功能；完整版本请以 [GitHub 仓库提交历史](https://github.com/kealan-Jun/FieldRecognition/commits/main/) 为准。
 
@@ -159,7 +161,7 @@ NAS 不部署本项目程序，只提供已有照片的读取与独立归档目�
 
 ### 5.1 设备发现
 
-配置项 `FIELD_RECEIVER_URL` 指向现有 Receiver，`FIELD_CAMERA_ID` 指定唯一目标相机。当前部署记录中的目标为 `lubancat-52d2ef0c_cam01`，Receiver 地址为 `http://192.168.1.196:8080`。
+配置项 `FIELD_RECEIVER_URL` 指向部署自己的 Receiver，`FIELD_CAMERA_ID` 指定精确目标相机；设置 Receiver 或快照 URL 时必须同时设置相机 ID。可分别填写 `http://receiver-host:8080` 与 `sender_cam01`，示例值须替换为实际配置。
 
 接收模块先请求 `GET /api/status`。取流候选要求 `online` 和 `media_live` 为真，然后按 `camera_key`，或 `sender_id + '_' + camera_id` 精确匹配目标。找不到唯一目标时等待，不从其他相机随意选一路。
 
@@ -342,11 +344,11 @@ Receiver 的 ingress 会话 ID 不是设备进程启动 UUID。设备重连或 R
 
 ### 9.1 目录约定
 
-本机已确认的语音拍照根目录：
+语音拍照来源布局示例（根目录由 `FIELD_SAVED_PHOTO_ROOT` 配置）：
 
 ```text
-/mnt/realityloop-nas/voice_photos/
-└── lubancat-52d2ef0c_cam01/
+/mnt/field-data/voice_photos/
+└── Camera01/
     └── 2026-09-09/
         └── 09-46-26/
             ├── 20260909_094626.jpg

@@ -19,12 +19,12 @@ class ProductionConfig(BaseModel):
     )
     production_enabled: bool = Field(default=False)
     record_mode: Literal["test", "production"] = Field(default="test")
+    registry_policy: Literal["auto", "none", "sample"] = Field(default="auto")
     data_dir: str | None = None
     database_path: str = Field(default="Data/Demo.sqlite3")
 
     # Optional account login; independent of process and record modes.
     auth_enabled: bool = Field(default=False)
-    require_device_credentials: bool = Field(default=False)
     session_duration_hours: int = Field(default=8, ge=1, le=72)
 
     # OCR settings
@@ -66,6 +66,13 @@ class ProductionConfig(BaseModel):
     # Server
     host: str = Field(default="127.0.0.1")
     port: int = Field(default=8188, ge=1024, le=65535)
+
+    @property
+    def use_sample_registry(self) -> bool:
+        """Samples are opt-in for production; changing policy never removes identities."""
+        return self.registry_policy == "sample" or (
+            self.registry_policy == "auto" and self.record_mode == "test"
+        )
 
     @model_validator(mode="after")
     def synchronize_recognition_threshold(self):
@@ -120,10 +127,6 @@ class ProductionConfig(BaseModel):
         if not self.archive_enabled:
             errors.append("Warning: archive_enabled should be true in production")
 
-        # Device credentials should be required
-        if self.auth_enabled and not self.require_device_credentials:
-            errors.append("Warning: require_device_credentials should be true in production")
-
         # Photo watch recommended
         if not self.saved_photo_watch_enabled and not self.receiver_url:
             errors.append("Warning: No photo source configured (neither photo_watch nor receiver)")
@@ -152,12 +155,12 @@ class ProductionConfig(BaseModel):
             service_role=os.environ.get("FIELD_SERVICE_ROLE", "combined"),
             production_enabled=os.environ.get("FIELD_PRODUCTION_ENABLED", "0") == "1",
             record_mode=os.environ.get("FIELD_RECORD_MODE", "test"),
+            registry_policy=os.environ.get("FIELD_REGISTRY_POLICY", "auto"),
             data_dir=os.environ.get("FIELD_DEMO_DATA"),
             database_path=os.environ.get("FIELD_DATABASE_PATH")
             or str(Path(os.environ.get("FIELD_DEMO_DATA", "Data")) / "Demo.sqlite3"),
             auth_enabled=os.environ.get("FIELD_AUTH_ENABLED", "0") == "1",
-            require_device_credentials=os.environ.get("FIELD_REQUIRE_DEVICE_CREDENTIALS", "0")
-            == "1",
+            session_duration_hours=int(os.environ.get("FIELD_SESSION_DURATION_HOURS", "8")),
             ocr_device=os.environ.get("FIELD_OCR_DEVICE", "cpu"),
             receiver_url=os.environ.get("FIELD_RECEIVER_URL"),
             camera_id=os.environ.get("FIELD_CAMERA_ID"),

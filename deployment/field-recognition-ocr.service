@@ -1,3 +1,4 @@
+# Template: render with scripts/install_runtime.py; do not copy directly.
 [Unit]
 Description=FieldRecognition ocr
 PartOf=field-recognition.target
@@ -10,15 +11,15 @@ Type=notify
 NotifyAccess=main
 WatchdogSec=120
 TimeoutStartSec=120
-WorkingDirectory=%h/Projects/FieldRecognition
-EnvironmentFile=-%h/Projects/FieldRecognition/Data/Runtime/ServiceEnvironment.env
-EnvironmentFile=%h/Projects/FieldRecognition/.env
+WorkingDirectory=@PROJECT_ROOT@
+EnvironmentFile=-@SERVICE_ENV_FILE@
+EnvironmentFile=@ENV_FILE@
 Environment=FIELD_PRODUCTION_ENABLED=1
 Environment=FIELD_SERVICE_ROLE=ocr
 Environment=PYTHONUNBUFFERED=1
 Environment=OMP_NUM_THREADS=2
 Environment=OPENBLAS_NUM_THREADS=2
-ExecStart=%h/Projects/FieldRecognition/.venv/bin/python -m ocr_worker --persistent
+ExecStart=/usr/bin/env ./.venv/bin/python -m ocr_worker --persistent
 Restart=always
 RestartSec=5
 TimeoutStopSec=25

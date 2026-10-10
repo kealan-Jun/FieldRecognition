@@ -84,7 +84,7 @@ curl -sS http://127.0.0.1:8188/api/tools/capture_and_scan \
 
 ## 部署边界
 
-当前服务监听本机 127.0.0.1:8188，Agent 适配器可以运行在同一电脑。若 Agent 在挂脖设备本机，localhost 指的是挂脖设备而非此电脑，尚需受控网关或隧道接入；本轮未将无认证服务 暴露到局域网。
+默认服务监听本机 `127.0.0.1:8188`，Agent 适配器可以运行在同一电脑；地址由 `FIELD_HOST`、`FIELD_PORT` 或启动参数配置。若 Agent 在挂脖设备本机，localhost 指的是挂脖设备而非服务电脑，需要受控网关或隧道接入。默认免登录服务应保持本机访问；安全上报方式见 [SECURITY.md](SECURITY.md)。
 
 图片采集来自挂脖设备，二维码解码与 PaddleOCR 在服务端执行。当前为未签名二维码及本地 OCR；此接口封装不改变其身份认证和准确率边界。
 
@@ -114,7 +114,7 @@ get_field_state 的 `ocr.status` 为 queued/loading 时表示后台预加载正�
 
 ## 已有语音照片与自动识别
 
-当前服务监控 `/mnt/realityloop-nas/voice_photos/<配置相机>/日期/时间/照片.jpg`，不要求先绑定。启动照片监控时预加载 OCR；现有 Agent 写完照片后才执行预测。轮询间隔 0.5 秒，文件稳定至少 0.5 秒；不重拍、不修改源照片、不逐帧做 OCR。照片去重跨重启、重新绑定有效。设备离线后，已导入语音照片仍完成读数；新 NAS 照片仍可识别，无法确认的仪器关联保持 null。
+启用监控后，服务读取 `<FIELD_SAVED_PHOTO_ROOT>/<配置相机>/日期/时间/照片.jpg`，不要求先绑定。启动照片监控时预加载 OCR；现有 Agent 写完照片后才执行预测。轮询间隔 0.5 秒，文件稳定至少 0.5 秒；不重拍、不修改源照片、不逐帧做 OCR。照片去重跨重启、重新绑定有效。设备离线后，已导入语音照片仍完成读数；新 NAS 照片仍可识别，无法确认的仪器关联保持 null。
 
 直接传递拍照结果的标准库调用：
 
@@ -136,7 +136,7 @@ result = tools.call('get_panel_result', {'job_id': job['job_id']})
 
 ## OCR 推理设备
 
-本机通过 `FIELD_OCR_DEVICE=gpu:0` 使用 GPU；`get_field_state.ocr.device` 和本地预测的 `device` 按当前配置返回，历史结果保留原设备。`not_loaded` 不代表已调用 GPU。配置的 GPU 不可用时加载明确失败；模型常驻、照片触发、五秒兜底规则保持不变。部署和验证见 [GPU部署.md](docs/GPU部署.md)。
+默认使用 CPU；适配 GPU 依赖后可显式选择 `FIELD_OCR_DEVICE=gpu:0`。`get_field_state.ocr.device` 和本地预测的 `device` 按当前配置返回，历史结果保留原设备。`not_loaded` 不代表已调用 GPU。配置的 GPU 不可用时加载明确失败；模型常驻、照片触发、五秒兜底规则保持不变。部署和验证见 [GPU部署.md](docs/GPU部署.md)。
 
 直接仪器绑定时，`scene_visit_id=null`、`scene_qr_verified=false`、`scene_basis=instrument_registration`；`scene.name` 只表达登记位置。实际识别并进入场景后绑定则保留真实 visit ID，并标记 `decoded_scene_qr`。不得把前者说成已经扫描场景码。`enter_scene` 可传使用者明确提供的 `operator`，自动扫码会传入已登记实验员，缺失时不补造。
 
@@ -146,14 +146,14 @@ result = tools.call('get_panel_result', {'job_id': job['job_id']})
 
 任务的 `timing` 保存源写入、首次发现、稳定、读取、导入、排队、OCR、视觉模型、最终结果时间和毫秒差值；`get_panel_result.archive` 保存最新回执的归档确认与耗时。缺失时间为 null，NAS mtime 未独立校时，补处理标记为 `is_backfill=true`。完整字段、近实时目标与边界见 [识别时延与未绑定照片](docs/识别时延与未绑定照片.md)。
 
-`GET /api/readouts?limit=20&before=<游标>` 提供当前配置相机的读数分页，返回 `items`、`next_cursor` 和 `order=submitted_desc`。摘要包含 `job_id`、`result_url`、照片、拍摄时间、阶段时延和最新 `archive` 状态，不返回图片字节；`next_cursor=null` 表示末页。此为新增只读 HTTP 接口，九个 Agent 工具保持兼容。
+`GET /api/readouts?limit=20&before=<游标>` 提供当前配置相机的读数分页，返回 `items`、`next_cursor` 和 `order=submitted_desc`。摘要包含 `job_id`、`result_url`、照片、拍摄时间、阶段时延和最新 `archive` 状态，不返回图片字节；`next_cursor=null` 表示末页。此为只读 HTTP 接口，当前 15 个 Agent 工具保持兼容。
 
 调度最多同时推进四张照片，GPU 推理仍串行；每张五秒等待可重叠。视觉请求同时只允许一个，忙时记录 `fallback.status=skipped, reason=busy`，不重试、不消费该任务的冷却名额。已完成的本地数字结果可以在其他照片等待视觉请求时先交付。
 
 2026-10-08 待部署时延诊断版本保留上述接口，增加 OCR 调度/执行分阶段计时和逐回执归档等待/发布计时。新 `archive_queue_wait_ms` 是该版本排队至成功发布尝试开始；`receipt_publication_ms` 是原件校验与不可变回执发布的单调时钟实测，不含客户端缓存/轮询。缺失阶段保持 null；详细字段及三连拍验收流程见 [三连拍时延修复](docs/PublicationLatency20261008.md)。此说明不代表当前运行服务已升级。
 
 
-NAS 全量索引：`GET /api/archive/files/Index.json` 返回全部已归档版本摘要；`GET /api/archive/files/Readme.html` 提供可筛选页面。`get_field_state.archive.integrity` 返回每日巡检状态、最近报告摘要、下次计划、最多 50 项异常及报告相对路径；完整报告位于 `/api/archive/files/<report_path>`。检查未完成与已完成但发现异常分别记录，不以 `pending_receipts=0` 替代完整性校验结论。九个 Agent 工具保持不变。
+NAS 全量索引：`GET /api/archive/files/Index.json` 返回全部已归档版本摘要；`GET /api/archive/files/Readme.html` 提供可筛选页面。`get_field_state.archive.integrity` 返回每日巡检状态、最近报告摘要、下次计划、最多 50 项异常及报告相对路径；完整报告位于 `/api/archive/files/<report_path>`。检查未完成与已完成但发现异常分别记录，不以 `pending_receipts=0` 替代完整性校验结论。当前 15 个 Agent 工具保持不变。
 
 ## 标准读数与事件归档
 

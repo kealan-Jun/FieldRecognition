@@ -20,13 +20,6 @@ def install(core):
         CREATE TABLE IF NOT EXISTS scenes(id TEXT PRIMARY KEY, name TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS scene_visits(id TEXT PRIMARY KEY, camera TEXT, ended TEXT, document TEXT);
         """)
-        registry = json.loads((core["BASE"] / "SceneRegistry.json").read_text())
-        for item in registry["scenes"]:
-            if item.get("scene_name"):
-                conn.execute(
-                    "INSERT OR IGNORE INTO scenes VALUES(?,?)",
-                    (item["scene_id"], item["scene_name"]),
-                )
 
     def scenes():
         with db() as conn:

@@ -2,9 +2,9 @@
 
 ## Start with the requested outcome
 
-- This is an independent project for QR identities, instrument bindings, Receiver snapshots and traceable panel recognition. Read `README.md` and `AgentTools.md` before changing runtime or interface behavior. Keep work within this project; do not modify VisionCortex or its services.
+- This is an independent project for QR identities, instrument bindings, Receiver snapshots and traceable panel recognition. Read `README.md` and `AgentTools.md` before changing runtime or interface behavior. Keep work within this project; do not modify unrelated projects or their services.
 - Complete authorized implementation, validation and requested Git synchronization. Ask only for missing information that changes the result, a concrete destructive action, or an actual unresolved permission boundary. Routine reversible choices and already authorized actions need no repeated confirmation.
-- Inspect the Git root, branch, SHA, remotes and status before Git changes. Remotes exist in this installation; discover their actual names and URLs, never invent a destination. Preserve unrelated work and stage named paths only. Report which refs were pushed and verify their SHA.
+- Inspect the Git root, branch, SHA, remotes and status before Git changes. Discover configured remote names and URLs; if no destination exists, ask for it instead of inventing one. Preserve unrelated work and stage named paths only. Report which refs were pushed and verify their SHA.
 
 ## Code structure and responsibilities
 
@@ -12,6 +12,8 @@
 - Canonical package imports must not create databases, directories, threads or models. Create a runtime through the application factory. Use its explicit context/configuration; do not obtain dependencies from `globals()`, `vars(app)` or imports of the root ASGI entry point.
 - HTTP, browser and Agent adapters call the same evidence transactions. Keep role/camera checks, optimistic revisions, QR provenance and immutable confirmations when moving code. Do not call HTTP route functions as an internal business service.
 - Keep numeric grammar, metric units, fallback rules and presentation utilities in their shared modules. Configuration parsing has one authoritative implementation; pass a validated snapshot into workers/pipelines instead of silently rereading a different environment contract.
+- First-clone defaults must be portable: never use a site-specific device ID, host directory or real account as an implicit runtime default. New production databases use explicitly supplied local registries; bundled samples belong to test mode or explicit sample selection. Registry metadata never proves a decoded QR match or creates scan evidence.
+- Changes to startup or installation need a model-free cold-source regression with an empty home and a clone path containing spaces. Validate generated units with the actual systemd parser when available; do not download or invoke real models to prove clone readiness.
 - Split files by coherent responsibility when that reduces coupling. Avoid new one-function wrappers, duplicate implementations, generic frameworks or artificial file-size targets. Preserve intentional compatibility facades and distinct operational tools.
 - Reusable test fixtures/doubles belong in `tests/support/`; tests live in the matching domain folder. Do not import one test module from another. Historical reports live in `docs/history/`; keep their recorded evidence/version claims intact.
 - See `docs/CodeStructure.md` for dependencies, resources, compatibility and maintenance checks.
@@ -36,9 +38,9 @@
 ## Data, storage and evidence
 
 - Preserve QR identities, source bytes/photos, timestamps, bindings, databases and historical receipts. New fingerprints resolve canonical source files while retaining legacy receipt keys; never rewrite old fingerprints as if they were new runs.
-- Keep code, this project's environment, current models and live SQLite/queues/locks on local SSD. Follow the host storage preference for verified NAS archival and bounded SSD caches; do not relocate active resources during an unrelated refactor.
+- Keep code, this project's environment, current models and live SQLite/queues/locks on local storage. Use explicitly configured, verified archive targets and bounded temporary caches; do not relocate active resources during an unrelated refactor.
 - `Data/`, `Verification/`, `VerificationData/`, `output/`, `tmp/`, environments, weights, logs and secrets stay out of Git. Secrets belong in environment variables or ignored local stores; never print their values.
-- Do not access NAS, live cameras or real models outside the requested task. Before authorized NAS access verify the actual share and volume identity; fail closed on an absent/wrong mount. CPU remains an explicit portable option; this host's current OCR uses RTX 3090 Ti with `FIELD_OCR_DEVICE=gpu:0`.
+- Do not access NAS, live cameras or real models outside the requested task. Before authorized NAS access verify the actual share and volume identity; fail closed on an absent/wrong mount. CPU is the default; GPU requires explicit device selection and compatible dependencies. Discover the actual deployment configuration instead of assuming particular hardware or host paths.
 - Tests and synthetic panels do not prove real instrument accuracy. Report `PROVEN`, `PARTIAL_EVIDENCE` and `NOT_PROVEN` with evidence and missing gates. QR identity must come from decoding. Model confidence is not measured accuracy; OCR text does not establish a physical action.
 
 ## Verification and completion

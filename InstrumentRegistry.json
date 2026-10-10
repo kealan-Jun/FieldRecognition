@@ -29,8 +29,7 @@
       "serial_number": null,
       "scene_id": "18a0cff5-eda6-4363-abe5-f7147e4ab2c1",
       "files": [
-        "InstrumentA.png",
-        "InstrumentA.svg"
+        "InstrumentA.png"
       ],
       "decode_verified": true,
       "scene_name": "湿实验实验台",
@@ -58,8 +57,7 @@
       "serial_number": null,
       "scene_id": "18a0cff5-eda6-4363-abe5-f7147e4ab2c1",
       "files": [
-        "InstrumentB.png",
-        "InstrumentB.svg"
+        "InstrumentB.png"
       ],
       "decode_verified": true,
       "scene_name": "湿实验实验台",

@@ -118,15 +118,19 @@ def create_runtime(
     the HTTP transport and security. Configuration is captured at construction.
     """
     config = config if config is not None else ProductionConfig.from_environment()
-    root = Path(project_root or PROJECT_ROOT).resolve()
+    root = Path(project_root or PROJECT_ROOT).expanduser().resolve()
     role = service_role if service_role is not None else config.service_role
     if role not in {"combined", "api", "capture", "ocr", "archive"}:
         raise ValueError("FIELD_SERVICE_ROLE must be combined, api, capture, ocr or archive")
     enabled = config.production_enabled if production_enabled is None else production_enabled
-    database_path = Path(config.database_path)
+    if (config.receiver_url or config.camera_snapshot_url) and not (config.camera_id or "").strip():
+        raise ValueError(
+            "FIELD_CAMERA_ID is required when FIELD_RECEIVER_URL or FIELD_CAMERA_SNAPSHOT_URL is configured"
+        )
+    database_path = Path(config.database_path).expanduser()
     if not database_path.is_absolute():
         database_path = root / database_path
-    data = Path(data_dir or config.data_dir or database_path.parent)
+    data = Path(data_dir or config.data_dir or database_path.parent).expanduser()
     if not data.is_absolute():
         data = root / data
     data = data.resolve()
@@ -209,9 +213,7 @@ def create_runtime(
     elif role not in {"ocr", "archive"} and config.receiver_url:
         from field_recognition.capture.receiver import ReceiverCamera
 
-        runtime["receiver_camera"] = ReceiverCamera(
-            config.receiver_url, config.camera_id or "lubancat-52d2ef0c_cam01"
-        )
+        runtime["receiver_camera"] = ReceiverCamera(config.receiver_url, config.camera_id)
     _bind_actions(runtime)
     runtime["lifespan"] = partial(lifespan, runtime)
     runtime["task_queue"] = TaskQueue(runtime.database)

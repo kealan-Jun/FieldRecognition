@@ -17,6 +17,7 @@ def direct(tmp_path, monkeypatch, request):
         "FIELD_PRODUCTION_ENABLED": "1",
         "FIELD_SERVICE_ROLE": "api",
         "FIELD_RECORD_MODE": request.param,
+        "FIELD_REGISTRY_POLICY": "sample",
         "FIELD_CAMERA_ID": "cam-a",
         "FIELD_ALIYUN_FALLBACK_ENABLED": "0",
         "FIELD_ARCHIVE_ENABLED": "0",
