@@ -16,10 +16,86 @@ from field_recognition.recognition.red_geometry import (
 )
 
 
+def _off_row_mask(mask):
+    """Locate a native character row without filling or changing its pixels."""
+    rows = np.flatnonzero(mask.sum(axis=1))
+    runs = np.split(rows, np.flatnonzero(np.diff(rows) > 1) + 1) if len(rows) else []
+    full_rows = [run for run in runs if int(run[-1] - run[0] + 1) >= 8]
+    receipt = {
+        "source_row_runs": [[int(run[0]), int(run[-1]) + 1] for run in runs],
+        "eligible_row_count": len(full_rows),
+        "basis": "unmodified_source_mask",
+        "excluded_row_pixel_count": 0,
+    }
+    if len(full_rows) != 1:
+        return mask, receipt
+    top, bottom = int(full_rows[0][0]), int(full_rows[0][-1]) + 1
+    grouped = mask.copy()
+    grouped[:top] = 0
+    grouped[bottom:] = 0
+    receipt.update(
+        basis="single_native_foreground_row",
+        row_bounds=[top, bottom],
+        excluded_row_pixel_count=int(mask.sum() - grouped.sum()),
+    )
+    return grouped, receipt
+
+
+def _off_f_bars(glyph):
+    """Prove two F arms and their open right side on the original native mask.
+
+    Fixed segment probes can touch a thick top arm or left stem in a narrow F.
+    Measure its actual horizontal arm rows instead; their intervening gaps
+    must still contain a left stem and no contrary right-hand stroke.
+    """
+    height, width = glyph.shape
+    right_start = math.ceil(width * 0.65)
+    right = glyph[:, right_start:]
+    arm_rows = np.flatnonzero((glyph.sum(axis=1) >= width * 0.5) & (right.mean(axis=1) >= 0.3))
+    arms = np.split(arm_rows, np.flatnonzero(np.diff(arm_rows) > 1) + 1) if len(arm_rows) else []
+    proof = {
+        "basis": "native_source_f_bar_topology",
+        "arm_rows": [[int(arm[0]), int(arm[-1]) + 1] for arm in arms],
+        "matches_f": False,
+    }
+    if len(arms) != 2:
+        return dict(proof, reason="f_arm_count")
+    upper, middle = arms
+    if (
+        upper[0] > height * 0.25
+        or middle[0] < height * 0.3
+        or middle[-1] > height * 0.75
+        or middle[0] - upper[-1] <= 1
+    ):
+        return dict(proof, reason="f_arm_positions")
+    left = glyph[:, : math.ceil(width * 0.4)]
+    gaps = [(int(upper[-1]) + 1, int(middle[0])), (int(middle[-1]) + 1, height)]
+    left_levels = [float(left[top:bottom].mean()) for top, bottom in gaps]
+    right_levels = [float(right[top:bottom].mean()) for top, bottom in gaps]
+    stem_coverage = float(np.mean(left.sum(axis=1) > 0))
+    proof.update(
+        gap_rows=[list(gap) for gap in gaps],
+        left_stem_levels=[round(level, 4) for level in left_levels],
+        right_counterevidence_levels=[round(level, 4) for level in right_levels],
+        left_stem_row_coverage=round(stem_coverage, 4),
+    )
+    if stem_coverage < 0.7 or any(level < 0.3 for level in left_levels):
+        return dict(proof, reason="f_left_stem_incomplete")
+    if any(level >= 0.3 for level in right_levels):
+        return dict(proof, reason="f_right_stroke_counterevidence")
+    return dict(proof, matches_f=True, reason="complete_source_f_bars")
+
+
 def _off_shape(image):
     """Check O/F/F bar direction at native resolution, independently of OCR."""
-    evidence = {"status": "inconclusive", "method": "native_red_off_bars_v2", "views": []}
-    if image.ndim != 3 or image.shape[2] != 3 or not image.size:
+    evidence = {"status": "inconclusive", "method": "native_red_off_bars_v3", "views": []}
+    if (
+        not isinstance(image, np.ndarray)
+        or image.ndim != 3
+        or image.shape[2] != 3
+        or not image.size
+        or image.dtype != np.uint8
+    ):
         return dict(evidence, reason="invalid_source_image")
     blue, green, red = cv2.split(image.astype(np.int16))
     channel = np.maximum(blue, green).astype(np.uint8)
@@ -39,15 +115,18 @@ def _off_shape(image):
     for factor in (0.2, 0.4):
         cut = threshold + contrast * factor
         mask = ((channel > cut) & red_source).astype(np.uint8)
-        columns = np.flatnonzero(mask.sum(axis=0))
+        grouped_mask, row_receipt = _off_row_mask(mask)
+        columns = np.flatnonzero(grouped_mask.sum(axis=0))
         groups = np.split(columns, np.flatnonzero(np.diff(columns) > 1) + 1) if len(columns) else []
         view = {
             "threshold_factor": factor,
             "threshold": round(cut, 3),
             "foreground_pixel_count": int(np.count_nonzero(mask)),
             "group_count": len(groups),
+            "row_grouping": row_receipt,
             "glyph_boxes": [],
             "patterns": [],
+            "glyph_proofs": [],
             "matches_off": False,
         }
         views.append(view)
@@ -56,8 +135,10 @@ def _off_shape(image):
             continue
         for group in groups:
             left, right = int(group[0]), int(group[-1]) + 1
-            rows = np.flatnonzero(mask[:, left:right].sum(axis=1))
+            rows = np.flatnonzero(grouped_mask[:, left:right].sum(axis=1))
             top, bottom = int(rows[0]), int(rows[-1]) + 1
+            # Grouping may exclude short, separate reflection rows. Pattern
+            # and contrary-stroke checks always use the untouched source mask.
             glyph = mask[top:bottom, left:right]
             h, w = glyph.shape
             view["glyph_boxes"].append([left, top, w, h])
@@ -80,7 +161,16 @@ def _off_shape(image):
                 sx, ex = max(0, int((cx - 0.17) * w)), min(w, math.ceil((cx + 0.17) * w))
                 sy, ey = max(0, int((cy - 0.1) * h)), min(h, math.ceil((cy + 0.1) * h))
                 levels.append(float(glyph[sy:ey, sx:ex].mean()))
-            view["patterns"].append("".join("1" if level >= 0.3 else "0" for level in levels))
+            pattern = "".join("1" if level >= 0.3 else "0" for level in levels)
+            view["patterns"].append(pattern)
+            expected = "1111110" if len(view["patterns"]) == 1 else "1000111"
+            proof = {"basis": "native_seven_segment_probes", "matches": pattern == expected}
+            if expected == "1000111":
+                proof["source_f_bars"] = _off_f_bars(glyph)
+                if not proof["matches"] and proof["source_f_bars"]["matches_f"]:
+                    proof["basis"] = "native_source_f_bar_topology"
+                proof["matches"] = proof["matches"] or proof["source_f_bars"]["matches_f"]
+            view["glyph_proofs"].append(proof)
         if len(view["patterns"]) == 3 and not view.get("reason"):
             boxes = view["glyph_boxes"]
             common_height = min(top + h for _, top, _, h in boxes) - max(
@@ -88,11 +178,11 @@ def _off_shape(image):
             )
             if common_height < min(h for _, _, _, h in boxes) * 0.5:
                 view["reason"] = "glyph_row_alignment"
-        view["matches_off"] = not view.get("reason") and view["patterns"] == [
-            "1111110",
-            "1000111",
-            "1000111",
-        ]
+        view["matches_off"] = (
+            not view.get("reason")
+            and len(view["glyph_proofs"]) == 3
+            and all(proof["matches"] for proof in view["glyph_proofs"])
+        )
         view.setdefault(
             "reason", "complete_off_bars" if view["matches_off"] else "off_pattern_mismatch"
         )

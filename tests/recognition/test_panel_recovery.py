@@ -8,6 +8,7 @@ from field_recognition.recognition.panel_layout import resolve_type_boxes, roles
 from field_recognition.recognition.panel_recovery import (
     detect,
     photo_pair_context,
+    photo_weak_pair_context,
     source_box,
     window_pixels,
 )
@@ -128,6 +129,386 @@ def panel_image(windows=(ANCHOR, PARTNER)):
             cv2.rectangle(image, (x1 + offset, y1 + 4), (x1 + offset + 7, y2 - 5), (0, 0, 210), 1)
             cv2.line(image, (x1 + offset, y1 + 12), (x1 + offset + 7, y1 + 12), (0, 0, 210), 1)
     return image
+
+
+def dense_red_window():
+    """A dim red surround, actual dark gaps and native synthetic OFF strokes."""
+    image = np.full((100, 100, 3), 35, np.uint8)
+    image[28:67, 28:72] = (0, 0, 90)
+    image[35:60, 39:45] = 35
+    image[35:60, 51:57] = 35
+    cv2.putText(
+        image, "OFF", (35, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 220), 2, lineType=cv2.LINE_8
+    )
+    return image
+
+
+def test_dense_red_window_separates_native_light_from_dim_hue_without_changing_dark_evidence():
+    image = dense_red_window()
+    before = image.copy()
+    evidence = window_pixels(cv2.cvtColor(image, cv2.COLOR_BGR2HSV), [35, 35, 65, 60])
+    assert np.array_equal(image, before)
+    assert evidence["pixel_basis"] == "source_bright_red_otsu"
+    assert evidence["red_fraction"] > 0.5 and evidence["inner_red_fraction"] < 0.9
+    assert 0.06 <= evidence["bright_red_fraction"] <= 0.5
+    assert evidence["red_hue_also_dark_count"] > 0
+    assert evidence["dark_fraction"] >= 0.25 and evidence["value_contrast"] >= 35
+    assert evidence["bright_native_fill"] < 0.9
+    assert evidence["bright_native_span"] == [24, 10]
+    assert evidence["evidence_bbox"] == [28, 28, 72, 67]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "solid",
+        "gradient_label",
+        "bright_block",
+        "reflection",
+        "narrow_light",
+        "clipped",
+        "tiny",
+        "no_dark_window",
+        "low_contrast",
+    ],
+)
+def test_dense_native_red_gate_keeps_solid_gradient_reflection_and_source_geometry_counterevidence(
+    failure,
+):
+    image = dense_red_window()
+    coords = [35, 35, 65, 60]
+    if failure == "solid":
+        image[28:67, 28:72] = (0, 0, 220)
+    elif failure == "gradient_label":
+        image[35:60, 35:65] = np.stack(
+            [
+                np.zeros((25, 30), np.uint8),
+                np.zeros((25, 30), np.uint8),
+                np.tile(np.linspace(0, 255, 30, dtype=np.uint8), (25, 1)),
+            ],
+            axis=2,
+        )
+    elif failure == "bright_block":
+        image = dense_red_window()
+        image[35:60, 35:65] = 35
+        image[39:55, 38:59] = (0, 0, 220)
+    elif failure == "reflection":
+        image[35:60, 35:65] = 35
+        image[39:55, 38:59] = 255  # Specular white light supplies no red source strokes.
+    elif failure == "narrow_light":
+        image[35:60, 35:65] = 35
+        image[35:60, 49:51] = (0, 0, 220)
+    elif failure == "clipped":
+        coords = [0, 35, 30, 60]
+    elif failure == "tiny":
+        coords = [35, 35, 65, 42]
+    elif failure == "no_dark_window":
+        image[28:67, 28:72] = (0, 0, 220)
+        image[35:60, 39:45] = 255
+        image[35:60, 51:57] = 255
+    elif failure == "low_contrast":
+        image[(image == 35).all(axis=2)] = 90
+        image[(image == (0, 0, 220)).all(axis=2)] = (0, 0, 110)
+    assert window_pixels(cv2.cvtColor(image, cv2.COLOR_BGR2HSV), coords) is None
+
+
+def test_original_sparse_window_evidence_return_remains_exactly_unchanged():
+    evidence = window_pixels(cv2.cvtColor(panel_image(), cv2.COLOR_BGR2HSV), ANCHOR)
+    assert set(evidence) == {
+        "red_fraction",
+        "inner_red_fraction",
+        "dark_fraction",
+        "value_contrast",
+        "dark_threshold",
+        "evidence_bbox",
+    }
+    assert evidence["red_fraction"] <= 0.5 and "pixel_basis" not in evidence
+
+
+def weak_votes(coords=PARTNER):
+    return [
+        box(0.19, coords=coords) | {"view": "gamma_scale"},
+        box(0.16, coords=coords) | {"view": "gamma_tilt_6"},
+    ]
+
+
+def run_weak_context(image, responses, *, candidates=None, imgsz=960, existing_boxes=()):
+    calls = []
+
+    def infer(pixels, size, threshold):
+        calls.append((pixels.copy(), size, threshold))
+        assert len(calls) <= 2, "weak context must never authorize a third detector vote"
+        return {"boxes": copy.deepcopy(responses[len(calls) - 1]), "speed_ms": {"inference": 2.0}}
+
+    result = photo_weak_pair_context(
+        image,
+        cv2.cvtColor(image, cv2.COLOR_BGR2HSV),
+        weak_votes() if candidates is None else candidates,
+        infer,
+        imgsz,
+        0.25,
+        existing_boxes,
+    )
+    return result, calls
+
+
+def test_weak_photo_proposal_is_replaced_by_two_actual_complete_pair_views():
+    image = panel_image()
+    before = image.copy()
+    first = [box(0.4, coords=ANCHOR), box(0.5, coords=PARTNER)]
+    second = [box(0.6, coords=ANCHOR), box(0.7, coords=PARTNER)]
+    result, calls = run_weak_context(image, [first, second])
+    assert np.array_equal(image, before) and len(calls) == 2
+    assert [c[1:] for c in calls] == [(640, 0.25), (960, 0.25)]
+    assert result["speed_ms"] == {"inference": 4.0}
+    assert [b["xyxy"] for b in result["boxes"]] == [ANCHOR, PARTNER]
+    assert [b["confidence"] for b in result["boxes"]] == [0.6, 0.7]
+    assert len(roles_for_boxes(result["boxes"])) == 2
+    for b in result["boxes"]:
+        assert b["localization_method"] == "photo_weak_pair_context_v1"
+        assert b["supporting_views"] == ["weak_pair_gamma_medium", "weak_pair_gamma_wide"]
+        assert b["pair_proposal_xyxy"] == PARTNER
+        assert set(b["pair_window_pixels"]) == {"left", "right"}
+        assert "instrument_id" not in b and "source_orientation" not in b
+    receipt = result["diagnostics"]
+    assert receipt["proposal_only"] and receipt["proposal"]["confidence"] == 0.19
+    assert [p["eligible_window_count"] for p in receipt["passes"]] == [2, 2]
+    assert receipt["passes"][1]["model_candidates"] == [
+        b | {"source_xyxy": b["xyxy"]} for b in second
+    ]
+    assert receipt["reason"] == "recovered"
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "no_votes",
+        "one_vote",
+        "same_view",
+        "wrong_class",
+        "ambiguous_cue",
+        "no_pixels",
+        "clipped_cue",
+        "nonfinite_cue",
+    ],
+)
+def test_weak_photo_context_requires_unique_two_view_source_proposal_before_new_calls(failure):
+    image = panel_image()
+    candidates = weak_votes()
+    if failure == "no_votes":
+        candidates = []
+    elif failure == "one_vote":
+        candidates.pop()
+    elif failure == "same_view":
+        candidates[1]["view"] = candidates[0]["view"]
+    elif failure == "wrong_class":
+        for candidate in candidates:
+            candidate["class_id"] = 1
+    elif failure == "ambiguous_cue":
+        candidates += weak_votes(ANCHOR)
+    elif failure == "no_pixels":
+        image[:] = 220
+    elif failure == "clipped_cue":
+        candidates = weak_votes([0, 90, 30, 115])
+        image = panel_image(([0, 90, 30, 115],))
+    elif failure == "nonfinite_cue":
+        candidates = weak_votes([float("nan"), 90, float("inf"), 115])
+    result, calls = run_weak_context(image, [], candidates=candidates)
+    assert not calls and not result["boxes"] and not result["diagnostics"]["attempted"]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "single_window",
+        "single_complete_view",
+        "low_confidence",
+        "overlap",
+        "adjacent_row",
+        "distant_device",
+        "multiple_devices",
+        "solid_red",
+        "different_pair",
+        "duplicate_context",
+        "existing_region",
+        "not_reconfirmed",
+        "nonfinite_confidence",
+    ],
+)
+def test_weak_context_never_assigns_roles_without_two_complete_unambiguous_source_pairs(failure):
+    left, right = list(ANCHOR), list(PARTNER)
+    image = panel_image()
+    responses = [[box(coords=left), box(coords=right)]] * 2
+    kwargs = {}
+    expected_status = None
+    if failure == "single_window":
+        responses = [[box(coords=right)]] * 2
+        expected_status = "incomplete_pair"
+    elif failure == "single_complete_view":
+        responses[1] = [box(coords=right)]
+    elif failure == "low_confidence":
+        responses = [[box(0.24, coords=left), box(coords=right)]] * 2
+    elif failure == "overlap":
+        left = [92, 90, 122, 115]
+        image = panel_image((left, right))
+        responses = [[box(coords=left), box(coords=right)]] * 2
+        expected_status = "pair_layout_unconfirmed"
+    elif failure == "adjacent_row":
+        left = [80, 60, 110, 85]
+        image = panel_image((left, right))
+        responses = [[box(coords=left), box(coords=right)]] * 2
+        expected_status = "pair_layout_unconfirmed"
+    elif failure == "distant_device":
+        left = [30, 90, 60, 115]
+        image = panel_image((left, right))
+        responses = [[box(coords=left), box(coords=right)]] * 2
+        expected_status = "pair_window_gap_exceeded"
+    elif failure == "multiple_devices":
+        extra = [44, 90, 74, 115]
+        image = panel_image((extra, left, right))
+        responses = [[box(coords=extra), box(coords=left), box(coords=right)]] * 2
+        expected_status = "ambiguous_pair_windows"
+    elif failure == "solid_red":
+        image[90:115, 80:110] = (0, 0, 210)
+    elif failure == "different_pair":
+        other = [152, 90, 182, 115]
+        image = panel_image((left, right, other))
+        responses[1] = [box(coords=right), box(coords=other)]
+    elif failure == "duplicate_context":
+        kwargs["imgsz"] = 640
+    elif failure == "existing_region":
+        kwargs["existing_boxes"] = [box(class_id=1, coords=left)]
+    elif failure == "not_reconfirmed":
+        left, right = [44, 90, 74, 115], list(ANCHOR)
+        image = panel_image((left, right, PARTNER))
+        responses = [[box(coords=left), box(coords=right)]] * 2
+        expected_status = "proposal_window_not_reconfirmed"
+    elif failure == "nonfinite_confidence":
+        responses = [[box(float("inf"), coords=left), box(coords=right)]] * 2
+    result, calls = run_weak_context(image, responses, **kwargs)
+    assert len(calls) == (2 if failure in {"single_complete_view", "different_pair"} else 1)
+    assert not result["boxes"] and result["diagnostics"]["reason"] == "no_complete_pair_consensus"
+    if expected_status:
+        assert all(p["pair_status"] == expected_status for p in result["diagnostics"]["passes"])
+
+
+def test_weak_context_maps_two_actual_crops_and_preserves_native_window_provenance():
+    image = np.full((740, 900, 3), 200, np.uint8)
+    image[350:375, 330:396] = panel_image()[90:115, 80:146]
+    candidates = weak_votes(FRACTIONAL_ANCHOR)
+    before = copy.deepcopy(candidates)
+    calls = []
+
+    def infer(pixels, size, threshold):
+        origin = [152, 153] if not calls else [34, 54]
+        calls.append((pixels.shape[:2], size, threshold))
+        return {
+            "boxes": [
+                box(coords=[v - origin[i % 2] for i, v in enumerate(coords)])
+                for coords in (FRACTIONAL_ANCHOR, FRACTIONAL_PARTNER)
+            ]
+        }
+
+    result = photo_weak_pair_context(
+        image, cv2.cvtColor(image, cv2.COLOR_BGR2HSV), candidates, infer, 960, 0.25
+    )
+    assert candidates == before
+    assert calls == [((419, 386), 640, 0.25), ((617, 622), 960, 0.25)]
+    assert [b["xyxy"] for b in result["boxes"]] == [FRACTIONAL_ANCHOR, FRACTIONAL_PARTNER]
+    assert [p["view_to_source_matrix"] for p in result["diagnostics"]["passes"]] == [
+        [[1, 0, 152], [0, 1, 153]],
+        [[1, 0, 34], [0, 1, 54]],
+    ]
+
+
+@pytest.mark.parametrize("photo", [False, True])
+def test_weak_context_integrates_only_in_photos_and_preserves_all_actual_forward_costs(photo):
+    image = panel_image()
+    # The actual rotation envelope contains the native dark window surround.
+    image[84:121, 74:152] = 35
+    image[90:115, 80:146] = panel_image()[90:115, 80:146]
+    for offset in (4, 16):
+        cv2.rectangle(image, (116 + offset, 94), (116 + offset + 7, 110), (0, 0, 210), 2)
+    before = image.copy()
+    calls = []
+
+    def infer(pixels, size, threshold):
+        calls.append((pixels.copy(), size, threshold))
+        index = len(calls)
+        if index == 2:
+            boxes = [box(0.19, coords=PARTNER)]
+        elif index == 3:
+            matrix = cv2.getRotationMatrix2D((130, 105), 6, 1.0)
+            x1, y1, x2, y2 = PARTNER
+            points = cv2.transform(
+                np.asarray([[[x1, y1], [x2, y1], [x2, y2], [x1, y2]]], np.float32), matrix
+            )[0]
+            boxes = [
+                box(
+                    0.16,
+                    coords=[
+                        float(points[:, 0].min()),
+                        float(points[:, 1].min()),
+                        float(points[:, 0].max()),
+                        float(points[:, 1].max()),
+                    ],
+                )
+            ]
+        elif index in {5, 6}:
+            boxes = [box(coords=ANCHOR), box(coords=PARTNER)]
+        else:
+            boxes = []
+        return {"boxes": boxes, "speed_ms": {"inference": 2.0}}
+
+    result = detect(image, infer, photo=photo)
+    count = 6 if photo else 4
+    assert np.array_equal(image, before)
+    assert len(calls) == result["recovery"]["passes"] == count
+    assert result["speed_ms"]["inference"] == count * 2
+    assert result["diagnostics"]["raw_candidate_count"] == (6 if photo else 2)
+    assert result["recovery"]["recovered_count"] == (2 if photo else 0)
+    if photo:
+        assert [b["xyxy"] for b in result["boxes"]] == [ANCHOR, PARTNER]
+        assert (
+            "photo_closeup" not in result["diagnostics"]
+            and "photo_pair_context" not in result["diagnostics"]
+        )
+    else:
+        assert not result["boxes"] and "photo_weak_pair_context" not in result["diagnostics"]
+
+
+def test_weak_pair_failure_does_not_promote_single_window_or_start_strong_anchor_recovery():
+    image = panel_image()
+    calls = []
+
+    def infer(pixels, size, threshold):
+        calls.append((size, threshold))
+        if len(calls) in {2, 3}:
+            # Both views use the actual source mapping; a proposal can never
+            # become an accepted anchor even after two strong single windows.
+            xyxy = PARTNER
+            if len(calls) == 3:
+                matrix = cv2.getRotationMatrix2D((130, 105), 6, 1.0)
+                xyxy = source_box(PARTNER, cv2.invertAffineTransform(matrix), 260, 210)
+            boxes = [box(0.19, coords=xyxy)]
+        elif len(calls) == 5:
+            boxes = [box(coords=PARTNER)]
+        else:
+            boxes = []
+        return {"boxes": boxes, "speed_ms": {"inference": 2.0}}
+
+    image[84:121, 74:152] = 35
+    image[90:115, 80:146] = panel_image()[90:115, 80:146]
+    for offset in (4, 16):
+        cv2.rectangle(image, (116 + offset, 94), (116 + offset + 7, 110), (0, 0, 210), 2)
+    result = detect(image, infer, photo=True)
+    assert len(calls) == result["recovery"]["passes"] == 9
+    assert result["speed_ms"]["inference"] == 18.0
+    assert not result["boxes"] and result["recovery"]["recovered_count"] == 0
+    assert "photo_pair_context" not in result["diagnostics"]
+    pair = result["diagnostics"]["photo_weak_pair_context"]
+    assert len(pair["passes"]) == 1 and pair["reason"] == "no_complete_pair_consensus"
+    assert all(p["pair_status"] == "incomplete_pair" for p in pair["passes"])
 
 
 def context_box(coords=PARTNER, score=0.6, class_id=0):

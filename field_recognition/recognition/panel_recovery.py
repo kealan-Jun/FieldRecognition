@@ -71,7 +71,7 @@ def window_pixels(hsv, coords):
     red_fraction, dark_fraction = float(red.mean()), float((value <= threshold).mean())
     ys, xs = np.where(red)
     if (
-        not 0.06 <= red_fraction <= 0.5
+        red_fraction < 0.06
         # Padding must not dilute a solid red object into apparent glyphs.
         or inner_red_fraction >= 0.9
         or dark_fraction < 0.25
@@ -81,7 +81,7 @@ def window_pixels(hsv, coords):
         or np.ptp(ys) < 0.25 * crop.shape[0]
     ):
         return None
-    return {
+    evidence = {
         "red_fraction": round(red_fraction, 4),
         "inner_red_fraction": round(inner_red_fraction, 4),
         "dark_fraction": round(dark_fraction, 4),
@@ -89,12 +89,58 @@ def window_pixels(hsv, coords):
         "dark_threshold": threshold,
         "evidence_bbox": [x1 - pad, y1 - pad, x2 + pad, y2 + pad],
     }
+    if red_fraction > 0.5:
+        # A dim red surround can share the glyph hue. It remains part of the
+        # original solid-red counterevidence above, but does not establish
+        # bright source strokes. Split it using the existing dark threshold.
+        bright = red & (value > threshold)
+        bys, bxs = np.where(bright)
+        bright_fraction = float(bright.mean())
+        if not bxs.size:
+            return None
+        x_span, y_span = int(np.ptp(bxs)), int(np.ptp(bys))
+        fill = int(bright.sum()) / ((x_span + 1) * (y_span + 1))
+        if (
+            not 0.06 <= bright_fraction <= 0.5
+            or x_span < 0.2 * crop.shape[1]
+            or y_span < 0.25 * crop.shape[0]
+            # Thresholding a red gradient/label must not manufacture a solid
+            # bright block and claim sparse native display strokes.
+            or fill >= 0.9
+        ):
+            return None
+        evidence.update(
+            pixel_basis="source_bright_red_otsu",
+            bright_red_fraction=round(bright_fraction, 4),
+            inner_bright_red_fraction=round(float(bright[pad:-pad, pad:-pad].mean()), 4),
+            bright_native_span=[x_span, y_span],
+            bright_native_fill=round(fill, 4),
+            red_hue_also_dark_count=int((red & (value <= threshold)).sum()),
+        )
+    return evidence
+
+
+def _pair_geometry_reason(anchor, box):
+    """The same source window/layout contract governs both photo recoveries."""
+    from field_recognition.recognition.panel_layout import roles_for_boxes
+
+    x1, y1, x2, y2 = anchor["xyxy"]
+    bx1, by1, bx2, by2 = box["xyxy"]
+    width, height = x2 - x1, y2 - y1
+    gap = max(bx1 - x2, x1 - bx2, 0)
+    gap_limit = max(width, bx2 - bx1)
+    box.update(pair_horizontal_gap=gap, pair_horizontal_gap_limit=gap_limit)
+    if not (0.6 <= (bx2 - bx1) / width <= 1.7 and 0.65 <= (by2 - by1) / height <= 1.5):
+        return "pair_window_size_mismatch"
+    if gap > gap_limit:
+        return "pair_window_gap_exceeded"
+    if len(roles_for_boxes([anchor, box])) != 2:
+        return "pair_layout_unconfirmed"
+    return None
 
 
 def photo_pair_context(image, hsv, anchor, infer, imgsz, confidence, existing_boxes=()):
     """Two actual views corroborate a partner, using at most three forwards."""
-    from field_recognition.recognition.panel_layout import roles_for_boxes
-
     diagnostics = {"attempted": False, "passes": [], "excluded_candidates": []}
     result = {"box": None, "speed_ms": {}, "diagnostics": diagnostics}
     anchor_pixels = window_pixels(hsv, anchor["xyxy"])
@@ -162,9 +208,7 @@ def photo_pair_context(image, hsv, anchor, infer, imgsz, confidence, existing_bo
                 item["xyxy"][3] + top,
             ]
             bx1, by1, bx2, by2 = box["xyxy"]
-            gap = max(bx1 - x2, x1 - bx2, 0)
-            gap_limit = max(width, bx2 - bx1)
-            box.update(pair_horizontal_gap=gap, pair_horizontal_gap_limit=gap_limit)
+            geometry_reason = _pair_geometry_reason(anchor, box)
             reason = (
                 "wrong_pair_class"
                 if box["class_id"] != anchor["class_id"]
@@ -176,13 +220,8 @@ def photo_pair_context(image, hsv, anchor, infer, imgsz, confidence, existing_bo
                 if iou(box["xyxy"], anchor["xyxy"]) >= 0.4
                 else "duplicate_existing_region"
                 if any(iou(box["xyxy"], b["xyxy"]) >= 0.4 for b in existing_boxes)
-                else "pair_window_size_mismatch"
-                if not (0.6 <= (bx2 - bx1) / width <= 1.7 and 0.65 <= (by2 - by1) / height <= 1.5)
-                # Wider chassis context can include another device in the same row.
-                else "pair_window_gap_exceeded"
-                if gap > gap_limit
-                else "pair_layout_unconfirmed"
-                if len(roles_for_boxes([anchor, box])) != 2
+                else geometry_reason
+                if geometry_reason
                 else "pair_window_evidence_missing"
                 if not (pixels_evidence := window_pixels(hsv, box["xyxy"]))
                 else None
@@ -246,8 +285,163 @@ def photo_pair_context(image, hsv, anchor, infer, imgsz, confidence, existing_bo
     return result
 
 
+def photo_weak_pair_context(image, hsv, candidates, infer, imgsz, confidence, existing_boxes=()):
+    """Weak votes propose one context; two new full-confidence pairs must agree.
+
+    A proposal is never an accepted box or a field role. This photo-only path
+    adds at most two forwards and cannot promote a lone local window.
+    """
+    diagnostics = {
+        "attempted": False,
+        "passes": [],
+        "excluded_candidates": [],
+        "maximum_forwards": 2,
+        "proposal_only": True,
+    }
+    result = {"boxes": [], "speed_ms": {}, "diagnostics": diagnostics}
+    eligible = [
+        b
+        for b in candidates
+        if b["class_id"] == 0
+        and max(0.1, confidence * 0.4) <= b["confidence"] < confidence
+        and all(math.isfinite(v) for v in b["xyxy"])
+        and window_pixels(hsv, b["xyxy"])
+    ]
+    proposals = []
+    for box in sorted(eligible, key=lambda b: b["confidence"], reverse=True):
+        if any(iou(box["xyxy"], b["xyxy"]) >= 0.5 for b in proposals):
+            continue
+        support = [b for b in eligible if iou(box["xyxy"], b["xyxy"]) >= 0.5]
+        if len({b["view"] for b in support}) >= 2:
+            proposals.append(box | {"supporting_views": sorted({b["view"] for b in support})})
+    if len(proposals) != 1:
+        diagnostics["reason"] = "ambiguous_weak_context" if proposals else "no_weak_context"
+        diagnostics["proposal_count"] = len(proposals)
+        return result
+    cue = proposals[0]
+    diagnostics.update(
+        attempted=True, proposal=cue, proposal_window_pixels=window_pixels(hsv, cue["xyxy"])
+    )
+    x1, y1, x2, y2 = cue["xyxy"]
+    width, height = x2 - x1, y2 - y1
+    signatures = set()
+    pairs = []
+
+    def context(name, horizontal, vertical, size):
+        left, top, right, bottom = (
+            max(0, math.floor(x1 - horizontal * width)),
+            max(0, math.floor(y1 - vertical * height)),
+            min(image.shape[1], math.ceil(x2 + horizontal * width)),
+            min(image.shape[0], math.ceil(y2 + vertical * height)),
+        )
+        return {
+            "view": name,
+            "context_bbox": [left, top, right, bottom],
+            "imgsz": size,
+            "confidence_threshold": confidence,
+            "context_basis": "continuous_source_box",
+            "view_to_source_matrix": [[1, 0, left], [0, 1, top]],
+        }
+
+    def skip(view, reason):
+        diagnostics.setdefault("skipped_views", []).append(view | {"reason": reason})
+
+    def run_view(view):
+        name, size = view["view"], view["imgsz"]
+        left, top, right, bottom = view["context_bbox"]
+        signature = (left, top, right, bottom, size)
+        if signature in signatures:
+            skip(view, "duplicate_context_views")
+            return {"eligible_window_count": 0, "pair_status": "duplicate_context_views"}
+        signatures.add(signature)
+        detection = infer(cv2.LUT(image[top:bottom, left:right], GAMMA_LUT), size, confidence)
+        receipt = view | {"candidate_count": len(detection["boxes"]), "model_candidates": []}
+        diagnostics["passes"].append(receipt)
+        for key, value in detection.get("speed_ms", {}).items():
+            result["speed_ms"][key] = result["speed_ms"].get(key, 0) + value
+        windows = []
+        for item in detection["boxes"]:
+            box = dict(
+                item,
+                xyxy=[v + (left if i % 2 == 0 else top) for i, v in enumerate(item["xyxy"])],
+                view=name,
+            )
+            receipt["model_candidates"].append(dict(item, source_xyxy=box["xyxy"]))
+            bx1, by1, bx2, by2 = box["xyxy"]
+            reason = (
+                "wrong_pair_class"
+                if box["class_id"] != 0
+                else "pair_context_out_of_bounds"
+                if not (left <= bx1 < bx2 <= right and top <= by1 < by2 <= bottom)
+                else "below_recovery_confidence"
+                if not math.isfinite(box["confidence"]) or box["confidence"] < confidence
+                else "duplicate_existing_region"
+                if any(iou(box["xyxy"], b["xyxy"]) >= 0.4 for b in existing_boxes)
+                else "pair_window_evidence_missing"
+                if not (evidence := window_pixels(hsv, box["xyxy"]))
+                else None
+            )
+            if reason:
+                diagnostics["excluded_candidates"].append(box | {"reason": reason})
+            else:
+                windows.append(box | {"window_pixels": evidence})
+        receipt["eligible_window_count"] = len(windows)
+        receipt["eligible_windows"] = windows
+        # Do not select a convenient pair among several devices, overlapping
+        # windows or adjacent rows. Each actual view must supply one full pair.
+        reason = (
+            "ambiguous_pair_windows"
+            if len(windows) > 2
+            else "incomplete_pair"
+            if len(windows) < 2
+            else None
+        )
+        if reason is None:
+            windows.sort(key=lambda b: b["xyxy"][0])
+            reason = _pair_geometry_reason(windows[0], windows[1])
+            if reason is None and not any(iou(b["xyxy"], cue["xyxy"]) >= 0.4 for b in windows):
+                reason = "proposal_window_not_reconfirmed"
+        receipt["pair_status"] = reason or "eligible"
+        if reason is None:
+            pairs.append((name, windows))
+        return receipt
+
+    medium = context("weak_pair_gamma_medium", 6, 8, min(imgsz, 640))
+    wide = context("weak_pair_gamma_wide", 10, 12, imgsz)
+    first = run_view(medium)
+    if first["pair_status"] == "eligible":
+        run_view(wide)
+    else:
+        skip(wide, "no_complete_pair_first_view")
+    # Multiple windows or a two-window geometry/cue contradiction cannot
+    # authorize another crop that discards the contrary source evidence.
+    if len(pairs) != 2 or not all(
+        iou(a["xyxy"], b["xyxy"]) >= 0.5 for a, b in zip(pairs[0][1], pairs[1][1])
+    ):
+        diagnostics["reason"] = "no_complete_pair_consensus"
+        return result
+    _, windows = max(pairs, key=lambda pair: min(b["confidence"] for b in pair[1]))
+    support = [name for name, _ in pairs]
+    result["boxes"] = [
+        {k: v for k, v in box.items() if k not in {"view", "window_pixels"}}
+        | {
+            "localization_method": "photo_weak_pair_context_v1",
+            "supporting_views": support,
+            "pair_proposal_xyxy": list(cue["xyxy"]),
+            "pair_window_pixels": {
+                "left": windows[0]["window_pixels"],
+                "right": windows[1]["window_pixels"],
+            },
+            "pair_layout_basis": "model_horizontal_pair_contract",
+        }
+        for box in windows
+    ]
+    diagnostics["reason"] = "recovered"
+    return result
+
+
 def detect(image, infer, *, imgsz=960, confidence=0.25, photo=False):
-    """Four video forwards; photos allow three local and eight closeup forwards."""
+    """Four video forwards; photos add at most three local and eight closeup calls."""
     height, width = image.shape[:2]
     primary = infer(image, imgsz, confidence)
     accepted = [dict(b, localization_method="original") for b in primary["boxes"]]
@@ -333,6 +527,20 @@ def detect(image, infer, *, imgsz=960, confidence=0.25, photo=False):
         )
         recovery["recovered_count"] += 1
     anchors = [b for b in accepted if b["class_id"] == 0]
+    if photo and not anchors and len(accepted) <= 4:
+        pair = photo_weak_pair_context(image, hsv, candidates, infer, imgsz, confidence, accepted)
+        pair_diagnostics = pair["diagnostics"]
+        diagnostics["photo_weak_pair_context"] = pair_diagnostics
+        recovery["passes"] += len(pair_diagnostics["passes"])
+        diagnostics["passes"].extend(pair_diagnostics["passes"])
+        diagnostics["raw_candidate_count"] += sum(
+            p["candidate_count"] for p in pair_diagnostics["passes"]
+        )
+        diagnostics["excluded_candidates"].extend(pair_diagnostics["excluded_candidates"])
+        for key, value in pair["speed_ms"].items():
+            speed[key] = speed.get(key, 0) + value
+        accepted.extend(pair["boxes"])
+        recovery["recovered_count"] += len(pair["boxes"])
     if photo and len(anchors) == 1 and len(accepted) < 6:
         pair = photo_pair_context(image, hsv, anchors[0], infer, imgsz, confidence, accepted)
         pair_diagnostics = pair["diagnostics"]
