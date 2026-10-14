@@ -8,6 +8,7 @@ import re
 
 import cv2
 import numpy as np
+from field_recognition.recognition.aliyun_vision import answer_lines
 from field_recognition.measurements.readout_rules import NUMBER, READOUT, fallback_reason
 from field_recognition.recognition.pipeline_context import ReadoutPipeline
 from field_recognition.recognition.digit_regions import refine_digits, extract_digits
@@ -526,26 +527,42 @@ def finish(
                                 clock_basis="process_monotonic",
                             )
                         attempt.update(cloud, finished_at=core["now"]())
-                        if cloud.get("answer", {}).get("readings"):
-                            lines = [
-                                {
-                                    "text": r["text"],
-                                    "value": r["value"],
-                                    "unit": r.get("unit"),
-                                    "label": r.get("label"),
-                                    "numeric_candidates": [r["value"]],
-                                    "confidence": None,
-                                    "polygon": None,
-                                    "reading_source": "vision",
-                                }
-                                for r in cloud["answer"]["readings"]
-                            ]
+                        answer = cloud.get("answer", {})
+                        if answer.get("readings") or answer.get("display_states"):
+                            lines = answer_lines(answer)
+                            states = answer.get("display_states", [])
+                            if states:
+                                # Only a single isolated field under the existing task
+                                # snapshot may acquire a formal state. Multi-screen or
+                                # conflicting outputs remain reviewable raw evidence.
+                                if (
+                                    len(states) == 1
+                                    and not answer.get("readings")
+                                    and name
+                                    and states[0].get("label") in (None, name)
+                                    and not result.get("display_state_rejection")
+                                    and not region.get("display_state_rejection")
+                                ):
+                                    region["display_state"] = {
+                                        "text": "OFF",
+                                        "raw_text": states[0]["text"],
+                                        "basis": "vision_transcription_of_localized_field",
+                                        "source": "fallback.answer.display_states",
+                                        "human_verified": False,
+                                    }
+                                else:
+                                    region["display_state_rejection"] = {
+                                        "basis": "ambiguous_or_conflicting_vision_state"
+                                    }
+                                    lines = []
                             if primary and display_rules:
                                 from field_recognition.measurements.measurement_records import (
                                     apply_fixed_decimal,
                                 )
 
                                 for line in lines:
+                                    if line.get("display_state"):
+                                        continue
                                     normalized = apply_fixed_decimal(
                                         name, dict(line, text=line["value"]), region["instrument"]
                                     )
@@ -589,11 +606,14 @@ def finish(
         workbench=next(iter(benches.values())) if len(benches) == 1 else None,
         outcome="numeric_readout"
         if any(READOUT.fullmatch(l.get("text", "")) or l.get("value") for l in combined)
+        else "display_state"
+        if any(r.get("display_state") for r in document["panel_regions"])
         else "no_numeric_readout",
     )
     if all(
         r["local_ocr"].get("status") == "failed"
         and not r.get("fallback", {}).get("answer", {}).get("readings")
+        and not r.get("fallback", {}).get("answer", {}).get("display_states")
         for r in document["panel_regions"]
     ):
         document.update(status="failed", error="panel_ocr_failed")

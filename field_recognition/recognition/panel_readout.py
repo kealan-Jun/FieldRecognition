@@ -128,6 +128,7 @@ def primary_unbound_photo(core, document, panel, *, valid, clock, pause, started
     if cloud.get("status") != "completed":
         return False  # Preserve the provider failure and try local OCR once.
     readings = cloud["answer"]["readings"]
+    states = cloud["answer"].get("display_states", [])
     document["capture_association"] = {
         k: document.get(k)
         for k in ("instrument", "binding_id", "instrument_candidates", "workbench")
@@ -147,23 +148,12 @@ def primary_unbound_photo(core, document, panel, *, valid, clock, pause, started
         instrument_association="unbound_photo",
         instrument_identity_basis="unconfirmed",
         association_status="unbound",
-        lines=[
-            apply_rule(
-                {
-                    "text": r["text"],
-                    "value": r["value"],
-                    "unit": r.get("unit"),
-                    "label": r.get("label"),
-                    "numeric_candidates": [r["value"]],
-                    "confidence": None,
-                    "polygon": None,
-                    "reading_source": "vision",
-                },
-                rules,
-            )
-            for r in readings
-        ],
-        outcome="numeric_readout" if readings else "no_numeric_readout",
+        lines=[apply_rule(line, rules) for line in vision.answer_lines(cloud["answer"])],
+        outcome="numeric_readout"
+        if readings
+        else "display_state"
+        if states
+        else "no_numeric_readout",
     )
     document.pop("error", None)
     return True
@@ -519,29 +509,21 @@ def run(core, document, *, clock=time.monotonic, pause=time.sleep):
             document.update(status="failed", error="local_ocr_timeout", lines=[])
         # When local OCR finishes during the vision call, prefer its valid numeric result.
         local_has_digits = local and fallback_reason(local["lines"], local.get("error")) is None
-        if cloud and cloud.get("answer", {}).get("readings") and not local_has_digits:
+        cloud_lines = vision.answer_lines(cloud.get("answer", {})) if cloud else []
+        if cloud_lines and not local_has_digits:
             document.update(
                 status="completed",
                 model=cloud["model"],
                 device="cloud",
                 actual_model_invocation=True,
-                lines=[
-                    {
-                        "text": r["text"],
-                        "value": r["value"],
-                        "unit": r.get("unit"),
-                        "label": r.get("label"),
-                        "numeric_candidates": [r["value"]],
-                        "confidence": None,
-                        "polygon": None,
-                    }
-                    for r in cloud["answer"]["readings"]
-                ],
+                lines=cloud_lines,
             )
             document.pop("error", None)
         document["outcome"] = (
             "numeric_readout"
             if local_has_digits or (cloud and cloud.get("answer", {}).get("readings"))
+            else "display_state"
+            if cloud_lines
             else "no_numeric_readout"
         )
     except Exception as exc:
