@@ -22,6 +22,7 @@ class ProductionConfig(BaseModel):
     registry_policy: Literal["auto", "none", "sample"] = Field(default="auto")
     data_dir: str | None = None
     database_path: str = Field(default="Data/Demo.sqlite3")
+    event_tenant: str | None = Field(default=None, min_length=1, max_length=200)
 
     # Optional account login; independent of process and record modes.
     auth_enabled: bool = Field(default=False)
@@ -157,6 +158,7 @@ class ProductionConfig(BaseModel):
             record_mode=os.environ.get("FIELD_RECORD_MODE", "test"),
             registry_policy=os.environ.get("FIELD_REGISTRY_POLICY", "auto"),
             data_dir=os.environ.get("FIELD_DEMO_DATA"),
+            event_tenant=os.environ.get("FIELD_EVENT_TENANT"),
             database_path=os.environ.get("FIELD_DATABASE_PATH")
             or str(Path(os.environ.get("FIELD_DEMO_DATA", "Data")) / "Demo.sqlite3"),
             auth_enabled=os.environ.get("FIELD_AUTH_ENABLED", "0") == "1",
