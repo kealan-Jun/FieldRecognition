@@ -73,6 +73,8 @@ def configured_rules(raw: str | None = None):
 
 
 def apply_rule(line, rules):
+    if line.get("display_state") or line.get("value") is None:
+        return line
     matching = [
         r
         for r in rules
