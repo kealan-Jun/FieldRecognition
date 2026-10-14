@@ -151,7 +151,7 @@ class ArchiveStore:
         self.browse_digests = {}
         self.status = {"status": "disabled", "last_error": None, "last_archived_at": None}
         self.index_version = (
-            "3:"
+            "4:"
             + hashlib.sha256(
                 b"".join(
                     source_path(p).read_bytes()
@@ -161,12 +161,22 @@ class ArchiveStore:
                         "evidence_timeline.py",
                         "archive_paths.py",
                         "archive_migration.py",
+                        "field_recognition/archive/source_layout.py",
+                        "field_recognition/archive/archive_recovery.py",
                         "measurement_records.py",
                         "field_recognition/measurements/readout_rules.py",
                         "static/archive.html",
                         "static/archive.js",
                         "static/view-utils.js",
                     )
+                )
+                + canonical(
+                    {
+                        "layout": core["config"].archive_layout if core.get("config") else "events",
+                        "source_roots": core["config"].saved_photo_roots
+                        if core.get("config")
+                        else (),
+                    }
                 )
             ).hexdigest()[:16]
         )
@@ -370,6 +380,16 @@ class ArchiveStore:
         return paths.asset(destination.as_posix(), raw, save=False)
 
     def _capture_artifacts(self, root, capture, *, paths=None):
+        from field_recognition.archive.source_layout import source_relative
+
+        if paths is not None and paths.layout == "metadata":
+            relative = source_relative(paths.root, capture)
+            if relative:
+                original = paths.adopt_source(relative, capture["source_sha256"])
+                return {
+                    "original": original,
+                    "image_status": "local_normalized_png_derived_from_retained_original",
+                }
         ident = str(uuid.UUID(capture["capture_id"]))
         result = {
             "image": self._artifact(
@@ -390,7 +410,12 @@ class ArchiveStore:
         root = self._root()
         # Reuse this publication's ledger, never a previous publication's
         # object bytes or validation. Every artifact still uses immutable_write.
-        paths = ArchivePaths(root)
+        config = self.core.get("config")
+        paths = ArchivePaths(
+            root,
+            layout=config.archive_layout if config else "events",
+            source_roots=config.saved_photo_roots if config else (),
+        )
         doc = json.loads(row["document"])
         artifacts = {}
         capture_id = (
@@ -408,7 +433,17 @@ class ArchiveStore:
                     raise ValueError("Source capture receipt missing")
                 capture = json.loads(capture_row[0])
             artifacts = self._capture_artifacts(root, capture, paths=paths)
-        if doc.get("crop_image_sha256"):
+        full_source_view = (
+            (
+                artifacts.get("original", {}).get("source_owned")
+                and doc.get("crop") == [0, 0, capture.get("width"), capture.get("height")]
+            )
+            if capture_id
+            else False
+        )
+        if full_source_view and doc.get("crop_image_sha256"):
+            artifacts["panel_status"] = "full_frame_crop_derived_locally_from_retained_original"
+        if doc.get("crop_image_sha256") and not full_source_view:
             ident = str(uuid.UUID(doc["job_id"]))
             artifacts["panel"] = self._artifact(
                 root, Path("Images") / (ident + ".png"), doc["crop_image_sha256"], paths=paths

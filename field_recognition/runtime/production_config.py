@@ -1,6 +1,7 @@
 """Production deployment configuration and validation."""
 
 import os
+import json
 import sys
 from pathlib import Path
 from typing import Literal
@@ -38,6 +39,7 @@ class ProductionConfig(BaseModel):
 
     # Photo watch
     saved_photo_root: str | None = None
+    saved_photo_additional_roots: tuple[str, ...] = Field(default=(), max_length=4)
     saved_photo_watch_enabled: bool = Field(default=False)
     saved_photo_timezone: str = Field(default="Asia/Shanghai")
 
@@ -46,6 +48,7 @@ class ProductionConfig(BaseModel):
     archive_root: str | None = None
     archive_mount: str | None = None
     archive_check_seconds: int = Field(default=86400, ge=3600)
+    archive_layout: Literal["events", "metadata"] = "events"
 
     # Video OCR
     video_ocr_enabled: bool = Field(default=False)
@@ -66,6 +69,23 @@ class ProductionConfig(BaseModel):
     # Server
     host: str = Field(default="127.0.0.1")
     port: int = Field(default=8188, ge=1024, le=65535)
+
+    @field_validator("saved_photo_additional_roots", mode="before")
+    @classmethod
+    def validate_photo_roots(cls, value):
+        if not isinstance(value, (list, tuple)) or any(
+            not isinstance(root, str) or not root.strip() for root in value
+        ):
+            raise ValueError("Additional photo roots must be a list of nonempty paths")
+        return tuple(dict.fromkeys(root.strip() for root in value))
+
+    @property
+    def saved_photo_roots(self):
+        return tuple(
+            dict.fromkeys(
+                root for root in (self.saved_photo_root, *self.saved_photo_additional_roots) if root
+            )
+        )
 
     @property
     def use_sample_registry(self) -> bool:
@@ -166,6 +186,9 @@ class ProductionConfig(BaseModel):
             camera_id=os.environ.get("FIELD_CAMERA_ID"),
             camera_snapshot_url=os.environ.get("FIELD_CAMERA_SNAPSHOT_URL"),
             saved_photo_root=os.environ.get("FIELD_SAVED_PHOTO_ROOT"),
+            saved_photo_additional_roots=json.loads(
+                os.environ.get("FIELD_SAVED_PHOTO_ADDITIONAL_ROOTS", "[]")
+            ),
             saved_photo_watch_enabled=os.environ.get("FIELD_SAVED_PHOTO_WATCH_ENABLED", "0").lower()
             in {"1", "true", "yes"},
             saved_photo_timezone=os.environ.get("FIELD_SAVED_PHOTO_TIMEZONE", "Asia/Shanghai"),
@@ -174,6 +197,7 @@ class ProductionConfig(BaseModel):
             archive_root=os.environ.get("FIELD_ARCHIVE_ROOT"),
             archive_mount=os.environ.get("FIELD_ARCHIVE_MOUNT"),
             archive_check_seconds=int(os.environ.get("FIELD_ARCHIVE_CHECK_SECONDS", "86400")),
+            archive_layout=os.environ.get("FIELD_ARCHIVE_LAYOUT", "events"),
             video_ocr_enabled=os.environ.get("FIELD_VIDEO_OCR_ENABLED", "0").lower()
             in {"1", "true", "yes"},
             aliyun_fallback_enabled=os.environ.get("FIELD_ALIYUN_FALLBACK_ENABLED", "0") == "1",

@@ -399,7 +399,7 @@ def prepare(rows, paths):
 
 
 def standard_records(job_rows, group, *, diagnostics=None):
-    """Aggregate only an explicit burst; conflicting values remain null for correction."""
+    """Keep the single-value review projection separate from per-capture observations."""
     by_capture = {}
     from field_recognition.measurements.result_reprocessing import preferred_jobs
 
@@ -452,7 +452,7 @@ def standard_records(job_rows, group, *, diagnostics=None):
                 )
             continue  # A burst cannot collapse usage periods into its first wearer.
         first = copy.deepcopy(parts[0])
-        conflicts = []
+        conflicts, varying = [], []
         for value in first["record"]["values"]:
             name = value["name"]
             alternatives = [v for p in parts for v in p["record"]["values"] if v["name"] == name]
@@ -463,7 +463,12 @@ def standard_records(job_rows, group, *, diagnostics=None):
                     unit=value["unit"] if len({v["unit"] for v in alternatives}) == 1 else None,
                 )
                 value.pop("display_state", None)
-                conflicts.append(name)
+                if len({v["unit"] for v in alternatives}) == 1 and all(
+                    v["value"] is not None and not v.get("display_state") for v in alternatives
+                ):
+                    varying.append(name)
+                else:
+                    conflicts.append(name)
             field = next(
                 (
                     f
@@ -485,11 +490,14 @@ def standard_records(job_rows, group, *, diagnostics=None):
                     value.pop("display_state", None)
                 if field.get("corrected") and name in conflicts:
                     conflicts.remove(name)
+                if field.get("corrected") and name in varying:
+                    varying.remove(name)
         first["evidence"] = {
             "schema_version": "instrument-measurement/1",
             "rule_version": RULE_VERSION,
             "observations": [p["evidence"] for p in parts],
             "conflicting_fields": conflicts,
+            "varying_fields": varying,
             "human_verified": bool(group and group.get("status") == "confirmed"),
         }
         result.append(first)
@@ -528,11 +536,14 @@ def photo_candidates(jobs, sources, *, unbound_only=True):
                     "recognition_revision": job.get("recognition_revision", 1),
                     "captured_at": captured_at,
                     "capture_time_basis": basis,
+                    "observed_at": (job.get("video_observation") or {}).get("observed_at"),
                     "reading_id": reading.get("reading_id"),
                     "instrument_id": (reading.get("instrument") or {}).get("id")
                     if not unbound_only
                     else None,
                     "qr_hash": None,
+                    "binding_id": reading.get("binding_id") if not unbound_only else None,
+                    "identity_basis": reading.get("association_basis") or "unbound",
                     "raw_text": reading.get("text"),
                     "raw_value": reading.get(
                         "raw_value", (normalization or {}).get("raw_value", reading.get("value"))
@@ -572,9 +583,9 @@ def photo_readme(content, *, jobs=(), measurement_files=(), records=(), aggregat
             if unbound
             else "逐张识别候选与合并结果分别展示；候选未经人工核实。"
         )
-        + "</strong>逐张候选不替代合并后的测量结果。</p>"
+        + "</strong>每张照片的读数分别记录；数值变化不自动判为识别错误，也不取平均或多数值。</p>"
     )
-    body += '<p><a href="Evidence.json">完整证据与历史版本</a>'
+    body += '<p><a href="Readings.json">逐次读数 JSON</a> · <a href="Evidence.json">完整证据与历史版本</a>'
     if unbound:
         body += ' · <a href="UnboundReadings.json">未绑定候选 JSON</a>'
     for measurement in measurement_files:
@@ -583,7 +594,7 @@ def photo_readme(content, *, jobs=(), measurement_files=(), records=(), aggregat
             + esc(PurePosixPath(measurement["result"]).name)
             + '">'
             + esc(measurement["instrument_name"] or measurement["instrument_id"])
-            + " 合并结果</a>"
+            + " 单值复核结果</a>"
         )
     body += "</p>"
     conflicts = list(
@@ -596,6 +607,17 @@ def photo_readme(content, *, jobs=(), measurement_files=(), records=(), aggregat
             "<p><strong>连拍存在冲突，已识别的逐张数字见下表。冲突字段的合并值保持 null，不能视为有效读数。</strong> "
             + esc("、".join(conflicts) or "归属/使用时段冲突")
             + "</p>"
+        )
+    varying = list(
+        dict.fromkeys(
+            name for entry in records for name in entry["evidence"].get("varying_fields", [])
+        )
+    )
+    if varying:
+        body += (
+            "<p>"
+            + esc("、".join(varying))
+            + "读数有变化，所有逐张数值已记录如下；单值复核视图暂不选定一个数值。</p>"
         )
     body += "<table><tr><th>拍摄时间 / 任务</th><th>面板原文</th><th>候选值 / 单位</th><th>规则与质量问题</th></tr>"
     for reading in content["readings"]:
@@ -618,11 +640,19 @@ def photo_readme(content, *, jobs=(), measurement_files=(), records=(), aggregat
             + "</td></tr>"
         )
     if not content["readings"]:
-        body += (
-            '<tr><td colspan="4">当前没有结构化候选；处理状态与原因请查看 Evidence.json。</td></tr>'
+        state = (
+            "已完成识别，未读出结构化数值。"
+            if jobs and all(j.get("status") == "completed" for j in jobs)
+            else "当前没有结构化候选。"
         )
+        body += '<tr><td colspan="4">' + state + "处理状态与原因请查看 Evidence.json。</td></tr>"
     body += "</table>"
     for job in jobs:
+        cloud = (job.get("fallback") or {}).get("answer") or {}
+        if cloud.get("status") == "unreadable":
+            body += (
+                "<p>已完成识别，未读出仪器数值：" + esc(cloud.get("notes") or "面板不可读") + "</p>"
+            )
         body += (
             "<details><summary>逐张原始识别文字 · "
             + esc(job["job_id"])
@@ -630,12 +660,22 @@ def photo_readme(content, *, jobs=(), measurement_files=(), records=(), aggregat
             + esc(json.dumps(job.get("lines", []), ensure_ascii=False, indent=2))
             + "</pre></details>"
         )
-    return page("未绑定照片读数候选 · 待核实" if unbound else "照片逐张读数与合并结果", body)
+    return page("逐次读数记录 · 未绑定" if unbound else "逐次读数记录", body)
 
 
 def make_views(bundles, paths, receipts, *, preserve_asset_locations=False, placed_assets=None):
     views, days = {}, {}
     owners = {}
+    from field_recognition.archive.source_layout import source_relative
+
+    uploads = {
+        source["source_sha256"]: relative
+        for bundle in bundles
+        for source in bundle["sources"]
+        if paths.layout == "metadata"
+        and source.get("source_sha256")
+        and (relative := source_relative(paths.root, source, source_roots=paths.source_roots))
+    }
     # Choose one physical location per hash, even if QR and readout share a photograph.
     for bundle in sorted(bundles, key=lambda b: (b["kind"] == "SourceMaterials", b["directory"])):
         artifacts = {}
@@ -664,9 +704,12 @@ def make_views(bundles, paths, receipts, *, preserve_asset_locations=False, plac
             )
             folder = "Regions" if "panel" in label else "Photos"
             owners.setdefault(digest, f"{bundle['directory']}/{folder}/{role}{digest[:16]}{suffix}")
+            if digest in uploads:
+                owners[digest] = uploads[digest]
             stored = paths.data["assets"].get(digest, {}).get("path", "")
             if (
                 preserve_asset_locations
+                and paths.layout != "metadata"
                 and stored
                 and not stored.startswith((".System/PendingAssets/", "Objects/"))
             ):
@@ -678,7 +721,11 @@ def make_views(bundles, paths, receipts, *, preserve_asset_locations=False, plac
     for bundle in bundles:
         for digest, (_, item) in bundle["artifacts"].items():
             if digest not in placed:
-                placed[digest] = paths.place(item, owners[digest])
+                placed[digest] = (
+                    paths.place(item, owners[digest], pin_source=True)
+                    if digest in uploads
+                    else paths.place(item, owners[digest])
+                )
     for bundle in bundles:
         directory = bundle["directory"]
         file = directory + "/" + bundle["file"]
@@ -914,16 +961,59 @@ def make_views(bundles, paths, receipts, *, preserve_asset_locations=False, plac
                     "sha256": hashlib.sha256(raw).hexdigest(),
                     "human_verified": False,
                 }
-            if bundle["kind"] == "VoicePhotoReadings":
+            if bundle["kind"] in {"VoicePhotoReadings", "PhotoReadings", "VideoReadings"}:
+                readings = photo_candidates(current_jobs, bundle["sources"], unbound_only=False)
+                # A compact observation ledger. Full raw/model/rule history stays
+                # in Evidence.json and immutable receipts, rather than each row.
+                reading_file = directory + "/Readings.json"
+                reading_content = {
+                    "schema": "field-numeric-observations/1",
+                    "event_id": bundle["key"],
+                    "camera_id": bundle["camera_id"],
+                    "record_scope": "test_only"
+                    if content["record_scope"] == "test_only"
+                    else "field_observation",
+                    "human_verified": False,
+                    "aggregation": "per_capture_not_merged",
+                    "readings": [
+                        {
+                            k: r[k]
+                            for k in (
+                                "capture_id",
+                                "captured_at",
+                                "capture_time_basis",
+                                "observed_at",
+                                "job_id",
+                                "reading_id",
+                                "instrument_id",
+                                "binding_id",
+                                "identity_basis",
+                                "measurement_name",
+                                "value",
+                                "display_value",
+                                "unit",
+                                "quality_issues",
+                            )
+                        }
+                        for r in readings
+                    ],
+                    "evidence": "Evidence.json",
+                }
+                raw = raw_json(reading_content)
+                views[reading_file] = raw
+                content["reading_observations"] = {
+                    "path": reading_file,
+                    "count": len(readings),
+                    "sha256": hashlib.sha256(raw).hexdigest(),
+                    "human_verified": False,
+                }
                 content["readings_readme"] = directory + "/Readme.html"
                 views[content["readings_readme"]] = photo_readme(
                     {
                         "record_scope": "unbound_candidates"
                         if not measurement_files
                         else "per_photo_candidates",
-                        "readings": photo_candidates(
-                            current_jobs, bundle["sources"], unbound_only=False
-                        ),
+                        "readings": readings,
                     },
                     jobs=current_jobs,
                     measurement_files=measurement_files,

@@ -65,12 +65,16 @@ class SavedPhotoWatcher:
         return receiver.target if receiver else os.environ.get("FIELD_CAMERA_ID")
 
     def configured_root(self):
+        roots = self.configured_roots()
+        return roots[0] if roots else None
+
+    def configured_roots(self):
+        from field_recognition.runtime.production_config import ProductionConfig
+
         config = self.core.get("config")
         return (
-            config.saved_photo_root
-            if config is not None
-            else os.environ.get("FIELD_SAVED_PHOTO_ROOT")
-        )
+            config if config is not None else ProductionConfig.from_environment()
+        ).saved_photo_roots
 
     def timezone(self):
         config = self.core.get("config")
@@ -95,6 +99,7 @@ class SavedPhotoWatcher:
         return result | {
             "enabled": self.enabled(),
             "configured": bool(self.configured_root()),
+            "source_roots": list(self.configured_roots()),
             "persisted_pending_files": queued,
             "pending_files": queued,
             "retrying_files": sum(i.get("attempts", 0) > 0 for i in items),
@@ -194,6 +199,7 @@ class SavedPhotoWatcher:
                 {
                     "action": "discover",
                     "root": configured,
+                    "roots": self.configured_roots(),
                     "camera": camera,
                     "since": window,
                     "zone": self.timezone(),
@@ -270,6 +276,7 @@ class SavedPhotoWatcher:
             last_checked_at=self.core["now"](),
             submitted_files=count,
             discovery_error=None,
+            source_root_status=found.get("source_roots", []),
             **({"backfill_error": None} if not recent else {}),
         )
 

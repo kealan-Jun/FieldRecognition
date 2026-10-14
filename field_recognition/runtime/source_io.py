@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from field_recognition.capture.photo_sources import photo_location
 from field_recognition.runtime.paths import PROJECT_ROOT
 import re
 import subprocess
@@ -96,11 +97,43 @@ def read_stable(path, limit):
 
 
 def read(request):
+    roots = request.get("roots") or [request["root"]]
+    supplied = Path(request["path"])
+    outside = supplied.is_absolute()
+    for root in roots:
+        if supplied.is_absolute():
+            try:
+                supplied.relative_to(Path(root).absolute())
+            except ValueError:
+                continue
+            outside = False
+        attempts = [request["path"]]
+        if not supplied.is_absolute():
+            try:
+                location = photo_location(supplied.as_posix())
+                attempts.extend([location.metadata_path, location.identity])
+            except ValueError:
+                pass
+        for candidate in dict.fromkeys(attempts):
+            try:
+                return read_one(request | {"root": root, "path": candidate})
+            except FileNotFoundError:
+                continue
+    if outside:
+        raise SourceError("照片路径不属于已配置的输入目录", 422)
+    raise SourceError("照片存储暂不可读", 503)
+
+
+def read_one(request):
     path, relative = safe_path(request["root"], request["path"])
-    if len(relative.parts) != 4:
-        raise SourceError("照片目录不匹配", 422)
-    if relative.parts[0] != request["camera"]:
+    try:
+        location = photo_location(relative.as_posix())
+    except ValueError:
+        raise SourceError("照片目录不匹配", 422) from None
+    if location.camera != request["camera"]:
         raise SourceError("照片相机不匹配", 409)
+    if (path.parent / ".uploading").exists():
+        raise SourceError("照片目录仍在上传，保留队列等待", 503)
     raw, info = read_stable(path, request["max_bytes"])
     receipt = path.parent / "PhotoReceipt.json"
     metadata = None
@@ -116,12 +149,13 @@ def read(request):
     elif request.get("batch_mode") == "directory_triplet":
         # Explicit deployment contract: ONE capture directory contains EXACTLY
         # three photos. Opt-in only; never apply a same-second heuristic by default.
-        metadata = directory_triplet(request, path, relative)
+        metadata = directory_triplet(request, path, Path(location.identity))
         receipt_basis = "configured_directory_triplet"
     elif request.get("require_receipt"):
         raise SourceError("等待连拍回执 PhotoReceipt.json", 503)
     return {
-        "relative": relative.as_posix(),
+        "relative": location.identity,
+        "source_relative": relative.as_posix(),
         "path": str(path),
         "mtime": info.st_mtime,
         "signature": f"{info.st_size}:{info.st_mtime_ns}",
@@ -144,7 +178,11 @@ def directory_triplet(request, path, relative):
         raise SourceError("目录超过三张照片，不能确定一次拍照边界", 409)
     photos, signatures = [], []
     for member in paths:
-        safe, rel = safe_path(request["root"], member)
+        safe, physical = safe_path(request["root"], member)
+        try:
+            rel = Path(photo_location(physical.as_posix()).identity)
+        except ValueError:
+            raise SourceError("三连拍目录不符合上传协议", 422) from None
         match = re.fullmatch(r"(\d{8})_(\d{6})(?:_\d+)?\.(?:jpg|jpeg|png)", safe.name, re.I)
         if not match:
             raise SourceError("三连拍文件名不符合已配置的目录协议", 422)
@@ -194,39 +232,83 @@ def directory_triplet(request, path, relative):
 
 
 def discover(request):
+    files, statuses, errors = {}, [], []
+    for root in request.get("roots") or [request["root"]]:
+        try:
+            result = discover_one(request | {"root": root})
+        except (OSError, SourceError) as exc:
+            if isinstance(exc, SourceError) and exc.status != 503:
+                raise
+            statuses.append({"root": root, "status": "unavailable"})
+            continue
+        statuses.append(
+            {
+                "root": root,
+                "status": "missing_camera" if result.get("missing_camera") else "watching",
+                "discovered_files": len(result["files"]),
+            }
+        )
+        errors.extend(result.get("errors", []))
+        for row in result["files"]:
+            # Relative capture identities survive a source-root move. The saved
+            # photo transaction still checks bytes before reusing any OCR job.
+            files.setdefault(photo_location(row[0]).identity, row)
+    if statuses and all(s["status"] == "unavailable" for s in statuses):
+        raise SourceError("照片存储暂不可读", 503)
+    return {
+        "files": list(files.values()),
+        "errors": errors,
+        "source_roots": statuses,
+        "missing_camera": all(s["status"] != "watching" for s in statuses),
+    }
+
+
+def discover_one(request):
     root = Path(request["root"])
     camera = request["camera"]
     if not re.fullmatch(r"[A-Za-z0-9_-]+", camera):
         raise SourceError("相机目录无效", 422)
     if not root.is_dir():
         raise SourceError("照片存储未连接")
-    folder = root / camera
-    if not folder.exists():
-        return {"files": [], "missing_camera": True}
-    if folder.is_symlink():
-        raise SourceError("相机目录不能为符号链接", 422)
     zone = ZoneInfo(request["zone"])
     started = datetime.fromisoformat(request["since"]).astimezone(zone)
     today = datetime.now(zone).strftime("%Y-%m-%d")
-    rows, errors = [], []
-    # Recent pass is independent of historical traversal, so a bad old directory
-    # cannot block fresh files. Full passes are scheduled separately.
-    for day in sorted(folder.iterdir(), reverse=True):
+    directories = []
+    # Only MetaData is an input under the day/camera tree. Regions and exported
+    # Photos are never traversed, even when their filenames resemble uploads.
+    for parent in sorted(root.iterdir(), reverse=True):
         if (
-            not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day.name)
-            or not started.strftime("%Y-%m-%d") <= day.name <= today
+            len(parent.name) > 11
+            and parent.name[10:] == "_" + camera
+            and re.fullmatch(r"\d{4}-\d{2}-\d{2}", parent.name[:10])
+            and not parent.is_symlink()
+            and parent.is_dir()
         ):
-            continue
-        if request.get("recent") and day.name != today:
-            continue
-        if day.is_symlink() or not day.is_dir():
+            metadata = parent / "MetaData"
+            if metadata.is_dir() and not metadata.is_symlink():
+                directories.append((metadata, parent.name[:10]))
+    folder = root / camera
+    if folder.is_symlink():
+        raise SourceError("相机目录不能为符号链接", 422)
+    if folder.is_dir():
+        directories.extend(
+            (day, day.name)
+            for day in sorted(folder.iterdir(), reverse=True)
+            if not day.is_symlink() and day.is_dir()
+        )
+    rows, errors = [], []
+    for day, day_name in directories:
+        if (
+            not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day_name)
+            or not started.strftime("%Y-%m-%d") <= day_name <= today
+            or (request.get("recent") and day_name != today)
+        ):
             continue
         try:
             moments = sorted(day.iterdir(), reverse=True)
         except OSError:
-            errors.append(day.name)
+            errors.append(str(day.relative_to(root)))
             continue
-        # Full pass eventually visits every folder; recent pass avoids old scans.
         if request.get("recent"):
             moments = moments[:32]
         for moment in moments:
@@ -234,26 +316,21 @@ def discover(request):
                 not re.fullmatch(r"\d{2}-\d{2}-\d{2}", moment.name)
                 or moment.is_symlink()
                 or not moment.is_dir()
+                or (moment / ".uploading").exists()
             ):
                 continue
             try:
                 for path in sorted(moment.iterdir()):
-                    match = re.fullmatch(
-                        r"(\d{8})_(\d{6})(?:_\d+)?\.(?:jpg|jpeg|png)", path.name, re.I
-                    )
-                    if not match or path.is_symlink() or not path.is_file():
+                    if path.is_symlink() or not path.is_file():
                         continue
                     try:
-                        captured = datetime.strptime(match[1] + match[2], "%Y%m%d%H%M%S").replace(
-                            tzinfo=zone
-                        )
+                        location = photo_location(path.relative_to(root).as_posix())
+                        captured = datetime.strptime(
+                            location.day + location.moment, "%Y-%m-%d%H-%M-%S"
+                        ).replace(tzinfo=zone)
                     except ValueError:
                         continue
-                    if (
-                        captured < started
-                        or day.name != captured.strftime("%Y-%m-%d")
-                        or moment.name != captured.strftime("%H-%M-%S")
-                    ):
+                    if location.camera != camera or captured < started:
                         continue
                     stat = path.stat()
                     rows.append(
@@ -264,8 +341,8 @@ def discover(request):
                         ]
                     )
             except OSError:
-                errors.append(day.name + "/" + moment.name)
-    return {"files": rows, "errors": errors}
+                errors.append(str(moment.relative_to(root)))
+    return {"files": rows, "errors": errors, "missing_camera": not directories}
 
 
 if __name__ == "__main__":

@@ -72,6 +72,8 @@ class VideoOcr:
                 "target_fps": 1 / self.interval,
                 "saves_every_frame": False,
                 "stable_samples": 2,
+                "stability_required_for_recording": False,
+                "observation_policy": "readable_changes/1",
                 "periodic_evidence_seconds": self.periodic_seconds,
                 "confirmation_rule": "2_of_3_distinct_frames",
                 "confirmation_window_seconds": 1.6,
@@ -227,7 +229,13 @@ class VideoOcr:
                 self.state.update(latest_lines=[], latest_panels=[])
                 self.no_digits_since, self.stable_count, self.signature = None, 0, None
                 return
-        lines = [line for line in local.get("lines", []) if READOUT.fullmatch(line.get("text", ""))]
+        lines = [
+            line
+            for line in local.get("lines", [])
+            if not line.get("quality_issue")
+            and not line.get("quality_issues")
+            and READOUT.fullmatch(line.get("text", ""))
+        ]
         decoded = decode_qr(frame, fast=True)
         hits = self.core["qr_matches"](*decoded[:2])["matches"]
         panels = local.get("panel_regions", [])
@@ -328,7 +336,7 @@ class VideoOcr:
         change = (
             bool(changed_panels)
             if localized
-            else bool(lines) and self.stable_count >= 2 and signature != self.last_saved_signature
+            else bool(lines) and signature != self.last_saved_signature
         )
         periodic_panels = (
             [r for r in panels if self.confirmation.periodic_due(r, current, self.periodic_seconds)]
@@ -338,9 +346,7 @@ class VideoOcr:
         periodic = (
             bool(periodic_panels)
             if localized
-            else bool(lines)
-            and self.stable_count >= 2
-            and current - self.last_saved >= self.periodic_seconds
+            else bool(lines) and current - self.last_saved >= self.periodic_seconds
         )
         unreadable = (
             self.no_digits_since is not None
@@ -368,7 +374,8 @@ class VideoOcr:
                 region["local_ocr"]["lines"] = [
                     l for l in local["lines"] if l.get("panel_id") == region["panel_id"]
                 ]
-        # Only evidence frames reach disk. No stream frame is stored while waiting for stability.
+        # Readable changes are observations even before temporal agreement.
+        # Keep the existing rate/queue bounds and reuse this exact frame's OCR.
         with self.core["ocr_submit_lock"]:
             with self.core["db"]() as conn:
                 if (
@@ -405,6 +412,8 @@ class VideoOcr:
                     if periodic
                     else "unreadable_timeout",
                     "periodic_evidence_seconds": self.periodic_seconds,
+                    "observation_policy": "readable_changes/1",
+                    "stability_required_for_recording": False,
                     "stable_samples": min(
                         r["temporal_confirmation"]["votes"] for r in evidence_panels.values()
                     )

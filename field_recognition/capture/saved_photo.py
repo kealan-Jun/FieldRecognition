@@ -89,10 +89,12 @@ class PhotoReceipt(BaseModel):
 
 def load_saved_bundle(image_path, *, expected_camera, max_bytes, config=None):
     from field_recognition.runtime.source_io import call, SourceError
+    from field_recognition.runtime.production_config import ProductionConfig
 
-    configured = (
-        config.saved_photo_root if config is not None else os.environ.get("FIELD_SAVED_PHOTO_ROOT")
-    )
+    roots = (
+        config if config is not None else ProductionConfig.from_environment()
+    ).saved_photo_roots
+    configured = roots[0] if roots else None
     zone = (
         config.saved_photo_timezone
         if config is not None
@@ -108,6 +110,7 @@ def load_saved_bundle(image_path, *, expected_camera, max_bytes, config=None):
             {
                 "action": "read",
                 "root": configured,
+                "roots": roots,
                 "path": image_path,
                 "camera": expected_camera,
                 "max_bytes": max_bytes,

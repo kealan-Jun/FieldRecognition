@@ -137,7 +137,8 @@ def test_same_numeric_candidates_with_different_clarity_keep_raw_precision():
     group["fields"] = candidates([first, second])
     record = next(r for r in standard_records(rows, group) if r["instrument_id"] == "b")
     assert record["record"]["values"][0]["value"] is None
-    assert record["evidence"]["conflicting_fields"] == ["质量"]
+    assert record["evidence"]["varying_fields"] == ["质量"]
+    assert record["evidence"]["conflicting_fields"] == []
     assert len(record["evidence"]["observations"]) == 2
 
 

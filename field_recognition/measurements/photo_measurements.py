@@ -25,7 +25,7 @@ from field_recognition.measurements.readout_rules import UNITS
 
 from field_recognition.runtime.paths import source_path
 
-RULE_VERSION = "photo-measurement/4"
+RULE_VERSION = "photo-measurement/5"
 TERMINAL = {"completed", "failed", "cancelled", "interrupted"}
 
 
@@ -262,6 +262,7 @@ def candidates(jobs):
                 {
                     "job_id": job["job_id"],
                     "capture_id": job["capture_id"],
+                    "captured_at": (job.get("external_photo") or {}).get("captured_at"),
                     "image_sha256": job.get("image_sha256"),
                     "raw_text": reading.get("text"),
                     "raw_value": reading.get("value"),
@@ -317,7 +318,21 @@ def summarize_candidates(field):
         len({(r.get("binding_id"), r.get("operator"), r.get("wearer_id")) for r in rows}) > 1
     )
     units = {r["unit"] for r in usable}
+    varying = (
+        len(unique) > 1
+        and len(units) == 1
+        and None not in units
+        and not any(states)
+        and not session_conflict
+        and len({r["capture_id"] for r in usable}) == len(usable)
+    )
     field.update(
+        observation_status="varying"
+        if varying
+        else "consistent"
+        if len(unique) == 1
+        else "unresolved",
+        observation_count=len({r["capture_id"] for r in usable}),
         value=next(iter(unique))[0]
         if len(unique) == 1 and not state_conflict and not session_conflict
         else None,
@@ -356,7 +371,7 @@ def summarize_candidates(field):
     issues = []
     if session_conflict:
         issues.append("跨使用时段或实际人员的读数不能合并")
-    if len(unique) > 1 or state_conflict:
+    if (len(unique) > 1 and not varying) or state_conflict:
         issues.append("多图读数或单位冲突")
     if not usable:
         issues.append("没有可用读数：原始结果不可读或格式异常")
@@ -392,7 +407,14 @@ def blockers(group):
         if field_binding_issue(group, field):
             issues.append(prefix + "缺少采集时有效绑定，不能确认仪器归属")
         if field.get("value") is None and field.get("display_state") != "OFF":
-            issues.append(prefix + "需要校正数值")
+            issues.append(
+                prefix
+                + (
+                    "已逐张记录不同读数；确认单值前请选择并核对读数"
+                    if field.get("observation_status") == "varying"
+                    else "需要校正数值"
+                )
+            )
         if field.get("display_state") != "OFF" and field.get("unit") not in UNITS.get(
             field.get("name"), set()
         ):

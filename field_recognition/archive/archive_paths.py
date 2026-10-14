@@ -70,12 +70,14 @@ def resolve_file(root, relative):
 
 
 class ArchivePaths:
-    def __init__(self, root):
+    def __init__(self, root, *, layout="events", source_roots=()):
         from field_recognition.archive.archive_store import canonical
 
         # The root is stable for this single-writer operation. Every child path
         # still undergoes a real resolve before filesystem access.
         self.root = Path(root).resolve()
+        self.layout = layout
+        self.source_roots = tuple(source_roots)
         self.data = load(self.root, resolved_root=self.root)
         self.saved = canonical(self.data)
 
@@ -156,7 +158,7 @@ class ArchivePaths:
             self.save()
         return result
 
-    def place(self, artifact, target):
+    def place(self, artifact, target, *, pin_source=False):
         """Move a hash-addressed image into its event; aliases preserve all receipts."""
         digest = artifact["sha256"]
         stored = self.data["assets"].get(digest, artifact)
@@ -167,16 +169,70 @@ class ArchivePaths:
         raw = path.read_bytes()
         if hashlib.sha256(raw).hexdigest() != digest or len(raw) != artifact["size_bytes"]:
             raise ValueError("Cannot migrate corrupt archive evidence")
+        if stored.get("source_owned"):
+            # Capture-owned originals are pinned. Recognition never renames or
+            # unlinks an uploader's photograph to arrange its own outputs.
+            old = artifact["path"]
+            if (
+                old != source
+                and not artifact.get("source_owned")
+                and (old.startswith(("Objects/", ".System/PendingAssets/")) or "/Photos/" in old)
+            ):
+                old_name, old_path, present = self._resolve(old)
+                if present and old_name != source:
+                    # Reclaim only a verified processing-owned duplicate. The
+                    # uploader's original and its other capture files stay put.
+                    if old_path.read_bytes() != raw:
+                        raise ValueError("Historical original differs from uploaded source")
+                    self._move(old_name, source, old_path, path)
+            return stored | {"path": source}
+        if pin_source and any(
+            self.root.joinpath(*PurePosixPath(target).parts[:i]).is_symlink()
+            for i in range(1, len(PurePosixPath(target).parts) + 1)
+        ):
+            raise ValueError("Source photograph cannot contain symlinks")
         if artifact["path"] not in (source, target):
             self._checked(artifact["path"])
-        if source == target and self.data["assets"].get(digest) == (artifact | {"path": target}):
+        if (
+            not pin_source
+            and source == target
+            and self.data["assets"].get(digest) == (artifact | {"path": target})
+        ):
             self._set_alias(artifact["path"], target)
             return self.data["assets"][digest]
         self._move(source, target, path, target_path)
         self._set_alias(artifact["path"], target)
-        self.data["assets"][digest] = artifact | {"path": target}
+        self.data["assets"][digest] = (
+            artifact | {"path": target} | ({"source_owned": True} if pin_source else {})
+        )
         self.save()
         return self.data["assets"][digest]
+
+    def adopt_source(self, relative, digest):
+        """Reference an uploaded original only after verifying its actual bytes."""
+        path = self._checked(relative)
+        if any(
+            (self.root.joinpath(*PurePosixPath(relative).parts[:i])).is_symlink()
+            for i in range(1, len(PurePosixPath(relative).parts) + 1)
+        ):
+            raise ValueError("Source photograph cannot contain symlinks")
+        before = path.stat()
+        if not 0 < before.st_size <= 16 * 1024 * 1024:
+            raise ValueError("Invalid source photograph size")
+        raw = path.read_bytes()
+        after = path.stat()
+        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+            raise ValueError("Source photograph changed while archiving")
+        if hashlib.sha256(raw).hexdigest() != digest:
+            raise ValueError("Source photograph SHA-256 mismatch")
+        result = {"path": relative, "sha256": digest, "size_bytes": len(raw), "source_owned": True}
+        # Existing immutable receipts may still name their historical artifact.
+        # Never delete that artifact here; migration verifies it separately.
+        previous = self.data["assets"].get(digest)
+        if previous and previous["path"] != relative:
+            self._set_alias(previous["path"], relative)
+        self.data["assets"][digest] = result
+        return result
 
     def directory(self, key, proposed):
         # Allocation is in-memory; every filesystem operation still uses checked().

@@ -53,7 +53,7 @@ def test_three_photos_one_confirmed_record_retry_and_raw_evidence(setup):
             raw.status_code == 200
             and hashlib.sha256(raw.content).hexdigest() == source["source_sha256"]
         )
-        assert source["versions"]["rules"] == "photo-measurement/4"
+        assert source["versions"]["rules"] == "photo-measurement/5"
         assert source["panel_detection"]["weights_sha256"] == "a" * 64
     decision = {"actor": "Reader", "revision": draft["revision"]}
     first = client.post(f"/api/photo-measurements/{mid}/confirm", json=decision)
@@ -78,7 +78,7 @@ def test_three_photos_one_confirmed_record_retry_and_raw_evidence(setup):
 @pytest.mark.parametrize(
     "values,unit,qr,issue",
     [
-        (["51", "52"], None, True, "冲突"),
+        (["51", "52"], None, True, "逐张记录"),
         (["51", "51"], "rpm", True, "单位"),
         (["51", "51"], None, False, "二维码"),
     ],

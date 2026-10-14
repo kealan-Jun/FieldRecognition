@@ -33,8 +33,14 @@ def test_burst_conflict_correction_confirmation_and_retry_share_one_folder(setup
         is None
     )
     readme = (file.parent / "Readme.html").read_text()
-    assert "连拍存在冲突" in readme and "51" in readme and "52" in readme
-    assert "逐张原始识别文字" in readme and "合并值保持 null" in readme
+    assert "读数有变化" in readme and "51" in readme and "52" in readme
+    assert "逐张原始识别文字" in readme and "单值复核" in readme
+    assert "连拍存在冲突" not in readme
+    observations = json.loads((file.parent / "Readings.json").read_text())
+    assert [r["value"] for r in observations["readings"]] == [51, 52, 51]
+    assert len({r["capture_id"] for r in observations["readings"]}) == 3
+    assert all(r["captured_at"] and r["binding_id"] for r in observations["readings"])
+    assert not observations["human_verified"]
     assert not (file.parent / "UnboundReadings.json").exists()
     draft = get_draft(client, mid)
     body = {
@@ -68,6 +74,7 @@ def test_burst_conflict_correction_confirmation_and_retry_share_one_folder(setup
     assert len(result["decision"]["corrections"]) == 1
     assert result["measurement_files"][0]["evidence"]["human_verified"]
     assert result["observations"][1]["readings"][0]["value"] == "52"
+    assert json.loads((file.parent / "Readings.json").read_text()) == observations
     before = {
         p.relative_to(root).as_posix(): p.read_bytes()
         for p in root.glob("**/*")

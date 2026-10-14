@@ -51,19 +51,20 @@ def accept(context, text="12.34 g"):
     reader.accept(frame, {"sequence": int(tick[0] * 100)}, app.now(), local(text))
 
 
-def test_video_only_changed_stable_evidence_is_saved_and_ocr_reused(video, monkeypatch):
+def test_video_readable_changes_are_saved_without_waiting_for_stability(video, monkeypatch):
     app, client, _, reader, frame, tick = video
     monkeypatch.setattr(
         app, "predict_panel", lambda *args: pytest.fail("Evidence must reuse the video inference")
     )
     accept(video)
-    assert not list((app.DATA / "Images").iterdir())
+    assert reader.state["evidence_saved"] == 1
     tick[0] = 0.5
     accept(video)
     jid = reader.state["last_job_id"]
     done = wait_for_job(client, jid)
     assert done["request_trigger"] == "video_stream" and done["readings"][0]["value"] == "12.34"
-    assert done["video_observation"]["stable_samples"] == 2
+    assert done["video_observation"]["stable_samples"] == 1
+    assert done["video_observation"]["stability_required_for_recording"] is False
     for n in range(1, 15):
         tick[0] = n + 0.5
         accept(video)
@@ -91,11 +92,11 @@ def test_unchanged_stable_reading_gets_fresh_periodic_frame_without_voice_captur
     accept(video)
     first = wait_for_job(client, reader.state["last_job_id"])
     assert first["record_scope"] == "field_observation"
-    tick[0] = 30.4
+    tick[0] = 29.9
     accept(video)
     assert reader.state["evidence_saved"] == 1
     frame[:] = 40  # A fresh real frame, even though the observed number is unchanged.
-    tick[0] = 30.5
+    tick[0] = 30
     accept(video)
     second = wait_for_job(client, reader.state["last_job_id"])
     assert reader.state["evidence_saved"] == 2
@@ -268,18 +269,23 @@ def test_localized_panel_votes_and_saved_receipts_are_independent(video, monkeyp
         }
 
     reader.accept(frame, synced(1), app.now(), sample("100", "0.0000"))
-    assert reader.state["latest_lines"] == [] and reader.state["evidence_saved"] == 0
+    first = wait_for_job(client, reader.state["last_job_id"])
+    assert [r["text"] for r in first["readings"]] == ["100", "0.0000"]
+    assert reader.state["evidence_saved"] == 1
+    assert all(r["temporal_confirmation"]["votes"] == 1 for r in first["readings"])
     tick[0] = 0.5
     reader.accept(frame, synced(2), app.now(), sample("101", "0.0000"))
-    result = wait_for_job(client, reader.state["last_job_id"])
-    assert [r["text"] for r in result["readings"]] == ["0.0000"]
-    assert result["readings"][0]["binding_id"] == bindings[1]["binding_id"]
-    assert result["readings"][0]["temporal_confirmation"]["votes"] == 2
+    assert reader.state["evidence_saved"] == 1  # Existing two-second rate bound.
     tick[0] = 1
     reader.accept(frame, synced(3), app.now(), sample("101", "0.0000"))
+    assert reader.state["evidence_saved"] == 1
+    tick[0] = 2
+    reader.accept(frame, synced(4), app.now(), sample("102", "0.0000"))
     result = wait_for_job(client, reader.state["last_job_id"])
-    assert [r["text"] for r in result["readings"]] == ["101"]
+    assert [r["text"] for r in result["readings"]] == ["102"]
     assert result["readings"][0]["binding_id"] == bindings[0]["binding_id"]
+    assert result["readings"][0]["temporal_confirmation"]["votes"] == 1
+    assert result["readings"][0]["temporal_confirmation"]["status"] == "pending"
     assert reader.state["evidence_saved"] == 2
 
 

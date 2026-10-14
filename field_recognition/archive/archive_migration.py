@@ -105,7 +105,15 @@ def publish_events(archive, rows=None, *, sequences=None):
     result = "failed"
     try:
         root = archive._root()
-        paths = measured("path_ledger_load_ms", lambda: ArchivePaths(root))
+        config = archive.core.get("config")
+        paths = measured(
+            "path_ledger_load_ms",
+            lambda: ArchivePaths(
+                root,
+                layout=config.archive_layout if config else "events",
+                source_roots=config.saved_photo_roots if config else (),
+            ),
+        )
 
         def closure():
             with archive.core["db"]() as conn:
@@ -140,6 +148,10 @@ def publish_events(archive, rows=None, *, sequences=None):
                     receipts[seq] = receipt
 
         measured("receipt_validation_ms", verify_receipts)
+        if paths.layout == "metadata":
+            from field_recognition.archive.archive_recovery import recover_missing
+
+            recover_missing(paths, receipts.values(), archive.core["DATA"])
         # Same operation only: every dependency is byte-validated in this pass.
         placed_assets = {}
         views = measured(
@@ -299,7 +311,12 @@ def rebuild(archive, rows):
     from field_recognition.archive.archive_store import canonical
 
     root = archive._root()
-    paths = ArchivePaths(root)
+    config = archive.core.get("config")
+    paths = ArchivePaths(
+        root,
+        layout=config.archive_layout if config else "events",
+        source_roots=config.saved_photo_roots if config else (),
+    )
     with archive.core["db"]() as conn:
         old_links = conn.execute(
             "SELECT value FROM archive_meta WHERE key='legacy_links'"
@@ -334,6 +351,10 @@ def rebuild(archive, rows):
         receipts[row["seq"]] = receipt
         advance("checking_receipts", number, len(rows))
     archive.receipt_cache = dict(list(cache.items())[-4096:])
+    if paths.layout == "metadata":
+        from field_recognition.archive.archive_recovery import recover_missing
+
+        recover_missing(paths, receipts.values(), archive.core["DATA"])
     bundles, _ = prepare(rows, paths)
     with archive.core["db"]() as conn:
         history_state(conn, bundles)
@@ -371,7 +392,9 @@ def rebuild(archive, rows):
     paths.retire_views(views)
     retire_legacy(root, paths)
     paths.save()
-    empty_directories(root)
+    # Input folders now share the archive root; they belong to the uploader.
+    if paths.layout != "metadata":
+        empty_directories(root)
     with archive.core["db"]() as conn:
         for key, value in [
             ("readable_files", json.dumps(sorted(views))),

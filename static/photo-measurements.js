@@ -101,6 +101,8 @@
       (incomplete.length
         ? "面板字段不完整，尚缺 " + incomplete.join("；") + "。 "
         : "") +
+      (g.fields.some((f) => f.observation_status === "varying")
+        ? "各照片读数有变化，逐张数值和时间均已记录。 " : "") +
       (g.status === "confirmed"
         ? "已确认；原始识别和修订记录均已保留。"
         : (g.blockers || []).join("；") ||
@@ -121,7 +123,7 @@
               )
               .join(
                 "",
-              )}</select><select class="name" aria-label="目标字段">${["", "温度", "转速", "质量"].map((n) => `<option ${n === f.name ? "selected" : ""} value="${n}">${n || "指标不明确"}</option>`).join("")}</select></td><td>${f.display_state ? `<strong>状态 ${esc(f.display_state)}</strong><br>` : ""}<input class="value" aria-label="数值" type="number" step="any" value="${esc(f.display_value ?? f.value)}"><input class="unit" aria-label="单位" value="${esc(f.unit)}"></td><td>${f.original_candidates.map((r) => `<small>原文 ${esc(r.raw_text ?? "未读出")} · ${r.display_state ? "状态 " + esc(r.display_state) : "值 " + esc(r.raw_value ?? "空")} · 单位 ${esc(r.unit ?? "未知")}（${r.unit_basis === "instrument_registry" ? "仪器登记" : r.unit_basis === "recognition_text" ? "识别文本" : "无依据"}）</small>${r.panel_image_url ? `<a href="${esc(r.panel_image_url)}" target="_blank" rel="noopener">对应数字区域</a>` : ""}<small>${r.confidence == null ? "无置信度" : "模型分数 " + esc(r.confidence) + "，非实测准确率"}</small>`).join("")}<small>${f.agreement.matching_photos}/${f.agreement.photos_with_region} 张照片数值与单位一致</small></td></tr>`,
+              )}</select><select class="name" aria-label="目标字段">${["", "温度", "转速", "质量"].map((n) => `<option ${n === f.name ? "selected" : ""} value="${n}">${n || "指标不明确"}</option>`).join("")}</select></td><td>${f.display_state ? `<strong>状态 ${esc(f.display_state)}</strong><br>` : ""}${f.observation_status === "varying" ? "<strong>逐张记录，数值有变化</strong><br>" : ""}<input class="value" aria-label="单值复核" type="number" step="any" value="${esc(f.display_value ?? f.value)}"><input class="unit" aria-label="单位" value="${esc(f.unit)}"></td><td>${f.original_candidates.map((r) => `<small>${esc(r.captured_at || "采集时间未提供")} · 照片 ${esc(r.capture_id)}<br>原文 ${esc(r.raw_text ?? "未读出")} · ${r.display_state ? "状态 " + esc(r.display_state) : "值 " + esc(r.raw_value ?? "空")} · 单位 ${esc(r.unit ?? "未知")}（${r.unit_basis === "instrument_registry" ? "仪器登记" : r.unit_basis === "recognition_text" ? "识别文本" : "无依据"}）</small>${r.panel_image_url ? `<a href="${esc(r.panel_image_url)}" target="_blank" rel="noopener">对应数字区域</a>` : ""}<small>${r.confidence == null ? "无置信度" : "模型分数 " + esc(r.confidence) + "，非实测准确率"}</small>`).join("")}<small>${f.observation_status === "varying" ? "不同数值分别保留，未自动选定单值" : `${f.agreement.matching_photos}/${f.agreement.photos_with_region} 张照片数值与单位一致`}</small></td></tr>`,
         )
         .join("")}</tbody></table>`;
     $("#context").value = g.context.experiment_context_ref || "";
