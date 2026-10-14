@@ -105,7 +105,7 @@ PaddleOCR 支持 GPU / CPU、常驻模型与面板区域处理；视觉模型按
 <summary><strong>绑定何时结束？三连拍和视觉模型如何处理？</strong></summary>
 
 - **视频留证：** 稳定读数变化时保存，不变时按配置周期保存新观测，默认 30 秒；须满足新鲜画面、稳定识别与资源条件。
-- **绑定生命周期：** 同会话重复扫码沿用有效关系；[短断流恢复候选规则（待部署）](docs/BindingReconnect20261014.md)为传输异常保留 30 秒恢复窗口，恢复在线状态与新画面后延续原绑定；超时、明确设备重启、采集进程异常或北京时间零点仍结束旧关系。历史证据保留，断流空档的照片归属待核实。
+- **绑定生命周期：** 同会话重复扫码沿用有效关系；[短断流恢复规则](docs/BindingReconnect20261014.md)为传输异常保留 30 秒恢复窗口，恢复在线状态与新画面后延续原绑定；超时、明确设备重启、采集进程异常或北京时间零点仍结束旧关系。历史证据保留，断流空档的照片归属待核实。
 - **三连拍：** 默认按明确的 `PhotoReceipt.json` 回执归组。只有已核对来源约定的部署才启用 `directory_triplet`；同一秒或文件后缀不能单独证明连拍关系，历史照片不强行重新归组。
 - **默认识别：** 本地 OCR 先处理；单张任务运行 5 秒仍无完整数字候选时，满足可用性、串行槽位与冷却条件才尝试视觉兜底。**5 秒是触发条件，不是出结果时延承诺。**
 - **照片视觉优先：** 可配置 `FIELD_VISION_PHOTO_MODE=primary`。无绑定照片直接产生待复核候选；绑定照片先定位授权面板。调用失败可尝试本地 OCR，不能据此制造仪器身份。
@@ -272,7 +272,7 @@ FieldRecognition/
 | :--- | :--- |
 | **系统实现与安装** | [技术方案](docs/Architecture.md) · [GPU 部署](docs/GPU部署.md) · [托管运行](docs/ProductionRuntime.md) |
 | **让 Agent 获取读数** | [工具参数、发现接口与 Python 示例](AgentTools.md) |
-| **采集与身份关联** | [自动运行](docs/本机自动运行.md) · [绑定快照](docs/FieldRepair20260920.md) · [自动解绑](docs/AutomaticBindingRelease20260921.md) · [短断流恢复（待部署）](docs/BindingReconnect20261014.md) · [两路采集](docs/TwoStreamEvidence20260923.md) |
+| **采集与身份关联** | [自动运行](docs/本机自动运行.md) · [绑定快照](docs/FieldRepair20260920.md) · [自动解绑](docs/AutomaticBindingRelease20260921.md) · [短断流恢复](docs/BindingReconnect20261014.md) · [两路采集](docs/TwoStreamEvidence20260923.md) |
 | **照片、结果与复核** | [NAS 留存指南](docs/NAS文件夹与留存指南.md) · [六字段契约](schemas/InstrumentMeasurement.schema.json) · [视觉配置](docs/NianfengVision20260925.md) · [界面演示](docs/ReadmeShowcase.md) |
 | **维护与目录** | [文档索引](docs/README.md) · [代码结构](docs/CodeStructure.md) · [Agent 指南](AGENTS.md) · [贡献指南](CONTRIBUTING.md) · [安全说明](SECURITY.md) |
 | **验证与升级** | [升级入口](docs/RuntimeReliability.md#升级入口) · [数据库迁移](docs/BindingMigration.md) · [时延验收](docs/PublicationLatency20261008.md) · [项目进展](docs/ProjectHistory.md) |
