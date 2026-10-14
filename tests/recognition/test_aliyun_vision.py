@@ -8,6 +8,62 @@ import numpy as np
 import pytest
 
 import field_recognition.recognition.aliyun_vision as vision
+from field_recognition.recognition.config import RecognitionConfig
+
+
+@pytest.mark.parametrize("thinking", [None, "0", "1"])
+def test_flash_request_uses_snapshot_thinking_mode_and_retains_reading(monkeypatch, thinking):
+    environment = {
+        "FIELD_VISION_PROVIDER": "aliyun",
+        "FIELD_ALIYUN_FALLBACK_ENABLED": "1",
+        "DASHSCOPE_API_KEY": "test-only-secret",
+        "FIELD_ALIYUN_MODEL": "qwen3.8-flash",
+        "FIELD_VISION_PHOTO_MODE": "primary",
+    }
+    if thinking is not None:
+        environment["FIELD_ALIYUN_ENABLE_THINKING"] = thinking
+    config = RecognitionConfig.from_environment(environment)
+    monkeypatch.setenv("FIELD_ALIYUN_ENABLE_THINKING", "1" if thinking == "0" else "0")
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        assert str(request.url) == vision.DEFAULT_BASE_URL + "/chat/completions"
+        assert request.headers["Authorization"] == "Bearer test-only-secret"
+        return httpx.Response(
+            200,
+            json=response(
+                {
+                    "status": "readable",
+                    "readings": [{"text": "-0.0123 g", "value": "-0.0123", "unit": "g"}],
+                }
+            )
+            | {"model": "qwen3.8-flash"},
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        monkeypatch.setattr(
+            httpx,
+            "stream",
+            lambda method, url, **kw: client.stream(
+                method, url, headers=kw["headers"], json=kw["json"]
+            ),
+        )
+        result = vision.read_panel(np.zeros((40, 50, 3), np.uint8), config=config)
+
+    assert len(requests) == 1
+    payload = json.loads(requests[0].content)
+    expected = thinking != "0"
+    assert payload["enable_thinking"] is expected
+    assert ("thinking_budget" in payload) is expected
+    assert payload["max_completion_tokens"] == 4096
+    assert payload["model"] == "qwen3.8-flash"
+    assert result["status"] == "completed"
+    assert result["answer"]["readings"][0]["value"] == "-0.0123"
+    assert result["enable_thinking"] is expected
+    assert result["returned_model"] == "qwen3.8-flash"
+    assert result["human_verified"] is False
+    assert "test-only-secret" not in json.dumps(result)
 
 
 def test_cloud_receives_only_exact_panel_and_structured_readout(enabled, monkeypatch):

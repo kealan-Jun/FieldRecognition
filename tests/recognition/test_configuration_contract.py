@@ -20,6 +20,30 @@ from field_recognition.runtime.production_config import ProductionConfig
 
 @pytest.mark.parametrize(
     ("value", "expected"),
+    [("0", False), (" false ", False), ("NO", False), ("1", True), ("true", True), ("yes", True)],
+)
+def test_thinking_mode_uses_one_immutable_startup_snapshot(monkeypatch, value, expected):
+    monkeypatch.setenv("FIELD_ALIYUN_ENABLE_THINKING", value)
+    config = ProductionConfig.from_environment()
+    monkeypatch.setenv("FIELD_ALIYUN_ENABLE_THINKING", "1" if not expected else "0")
+    assert config.recognition.enable_thinking is expected
+    assert aliyun_vision.public_config(config.recognition)["enable_thinking"] is expected
+
+
+@pytest.mark.parametrize("value", ["", "sometimes", "2"])
+def test_invalid_environment_thinking_mode_is_rejected(value):
+    with pytest.raises(ValueError, match="FIELD_ALIYUN_ENABLE_THINKING"):
+        RecognitionConfig.from_environment({"FIELD_ALIYUN_ENABLE_THINKING": value})
+
+
+@pytest.mark.parametrize("value", [0, 1, "false", None])
+def test_explicit_thinking_mode_requires_a_boolean(value):
+    with pytest.raises(ValueError, match="enable_thinking"):
+        RecognitionConfig(enable_thinking=value)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
     [
         ("0.1", 0.1),
         (".25", 0.25),

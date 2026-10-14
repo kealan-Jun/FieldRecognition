@@ -148,6 +148,7 @@ def public_config(config=None):
         "endpoint_valid": endpoint_valid,
         "available": enabled and configured and endpoint_valid and bool(model),
         "photo_mode": "primary" if primary_photos(config) else "fallback",
+        "enable_thinking": config.enable_thinking if selected == "aliyun" else None,
         "sends": "panel_crop_or_current_camera_frame",
         "no_digits_seconds": config.no_digits_seconds,
     }
@@ -219,6 +220,8 @@ def read_panel(panel, *, display_rules=None, config=None):
         "actual_model_invocation": False,
         "human_verified": False,
     }
+    if config["provider"] == "aliyun":
+        receipt["enable_thinking"] = settings.enable_thinking
     if not config["available"]:
         reason = (
             "disabled"
@@ -278,7 +281,9 @@ def read_panel(panel, *, display_rules=None, config=None):
             "stream": False,
         }
         if config["provider"] == "aliyun":
-            payload.update(enable_thinking=True, thinking_budget=2048, max_completion_tokens=4096)
+            payload.update(enable_thinking=settings.enable_thinking, max_completion_tokens=4096)
+            if settings.enable_thinking:
+                payload["thinking_budget"] = 2048
         else:
             # Common Chat Completions fields; do not send Qwen-only thinking flags
             # to a Claude/OpenAI-compatible gateway.
