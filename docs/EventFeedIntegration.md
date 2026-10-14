@@ -1,8 +1,11 @@
 # 可恢复的跨项目事件消费
 
-`GET /api/events?camera_id=<登记相机>&after_seq=0&limit=100` 使用已有
+`GET /api/events/feed?camera_id=<登记相机>&after_seq=0&limit=100` 使用已有
 `archive_outbox` 的不可变业务快照。该 outbox 由同一数据库事务中的触发器写入；
 无需增加另一条队列，不读取原图、不运行 OCR，也不确认 NAS 归档。
+
+网页原有 `GET /api/events` 保留 SSE 变更通知，无需 `camera_id` 查询参数。
+跨项目 JSON 消费者使用专用 `/api/events/feed`，与网页订阅分别维护契约。
 
 返回 `field-event-feed/1`，包含 `source_instance`、`camera_id`、`after_seq`、
 `next_cursor`、`high_watermark`、`has_more` 和 `items`。游标是全局 outbox 序号，

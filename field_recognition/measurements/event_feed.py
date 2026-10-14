@@ -148,7 +148,7 @@ def install(core):
         if scope != tenant:
             raise ValueError("FIELD_EVENT_TENANT changed within an existing producer epoch")
 
-    @core["app"].get("/api/events")
+    @core["app"].get("/api/events/feed")
     def read(camera_id: str = Query(min_length=1, max_length=200),
              after_seq: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1, le=100),
              source_instance: str | None = None):

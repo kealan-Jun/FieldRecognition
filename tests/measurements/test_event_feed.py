@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import pytest
@@ -18,7 +19,72 @@ def write(app, entity, ident, document, status=None):
 
 
 def read(client, **params):
-    return client.get("/api/events", params={"camera_id": "Camera1", **params})
+    return client.get("/api/events/feed", params={"camera_id": "Camera1", **params})
+
+
+def test_composed_app_has_distinct_sse_and_bounded_json_routes(app_client):
+    app, client = app_client
+    paths = {"/api/events", "/api/events/feed"}
+
+    def entries(router):
+        for route in router.routes:
+            if hasattr(route, "original_router"):  # FastAPI lazily included routers.
+                yield from entries(route.original_router)
+            else:
+                yield route
+
+    routes = [route.path for route in entries(app.app)
+              if getattr(route, "path", None) in paths and "GET" in route.methods]
+    assert sorted(routes) == sorted(paths)
+    before = read(client).json()["next_cursor"]
+    for index in range(101):
+        write(app, "scans", f"page-{index}", {"camera_id": "Camera1"})
+    response = read(client, after_seq=before, limit=100)
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/json")
+    page = response.json()
+    assert len(page["items"]) == 100
+    assert page["has_more"] is True
+    assert len(read(client, after_seq=page["next_cursor"]).json()["items"]) == 1
+
+
+def test_composed_app_sse_subscribes_without_camera_query(app_client):
+    app, _ = app_client
+
+    async def subscribe():
+        disconnected = asyncio.Event()
+        sent = []
+        initial_request = True
+
+        async def receive():
+            nonlocal initial_request
+            if initial_request:
+                initial_request = False
+                return {"type": "http.request", "body": b"", "more_body": False}
+            await disconnected.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            sent.append(message)
+            if message["type"] == "http.response.body" and message.get("body"):
+                disconnected.set()
+
+        scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.0"},
+                 "http_version": "1.1", "scheme": "http", "method": "GET",
+                 "path": "/api/events", "raw_path": b"/api/events", "root_path": "",
+                 "query_string": b"", "headers": [],
+                 "client": ("127.0.0.1", 12345), "server": ("testserver", 80)}
+        await asyncio.wait_for(app.app(scope, receive, send), timeout=5)
+        return sent
+
+    messages = asyncio.run(subscribe())
+    start = next(message for message in messages if message["type"] == "http.response.start")
+    assert start["status"] == 200
+    headers = dict(start["headers"])
+    assert headers[b"content-type"].startswith(b"text/event-stream")
+    assert headers[b"cache-control"] == b"no-store"
+    body = b"".join(message.get("body", b"") for message in messages)
+    assert b"event: changed\ndata: {\"refresh\":true}" in body
 
 
 def test_feed_is_installed_and_delivers_transactional_versions_without_archive(app_client):
