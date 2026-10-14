@@ -24,7 +24,11 @@ def configured(monkeypatch, request):
         refresh_recognition_config(app)
 
 
-def test_nianfeng_uses_exact_authorized_endpoint_and_common_payload(configured, monkeypatch):
+@pytest.mark.parametrize("aliyun_thinking", ["0", "1"])
+def test_nianfeng_uses_exact_authorized_endpoint_and_common_payload(
+    configured, monkeypatch, aliyun_thinking
+):
+    monkeypatch.setenv("FIELD_ALIYUN_ENABLE_THINKING", aliyun_thinking)
     sent = []
 
     def request(payload, key, *, config=None):

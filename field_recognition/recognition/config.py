@@ -36,8 +36,11 @@ class RecognitionConfig:
     no_digits_seconds: float = DEFAULT_NO_DIGITS_SECONDS
     ocr_service_url: str | None = None
     display_rules: tuple[DisplayRule, ...] = ()
+    enable_thinking: bool = True
 
     def __post_init__(self):
+        if not isinstance(self.enable_thinking, bool):
+            raise ValueError("enable_thinking must be a boolean")
         seconds = float(self.no_digits_seconds)
         if not math.isfinite(seconds) or not 0.1 <= seconds <= 120:
             raise ValueError("no_digits_seconds must be finite and between 0.1 and 120")
@@ -53,6 +56,9 @@ class RecognitionConfig:
         env = os.environ if environment is None else environment
         provider = env.get("FIELD_VISION_PROVIDER", "aliyun").strip().lower()
         nianfeng = provider == "nianfeng"
+        thinking = env.get("FIELD_ALIYUN_ENABLE_THINKING", "1").strip().lower()
+        if thinking not in {"0", "1", "false", "true", "no", "yes"}:
+            raise ValueError("FIELD_ALIYUN_ENABLE_THINKING must be 0/1, false/true or no/yes")
         return cls(
             provider=provider,
             enabled=env.get(
@@ -69,6 +75,7 @@ class RecognitionConfig:
             if nianfeng
             else env.get("FIELD_ALIYUN_MODEL", DEFAULT_MODEL),
             photo_mode=env.get("FIELD_VISION_PHOTO_MODE", "fallback").strip().lower(),
+            enable_thinking=thinking in {"1", "true", "yes"},
             no_digits_seconds=parse_no_digits_seconds(
                 env.get("FIELD_ALIYUN_NO_DIGITS_SECONDS", "5")
             ),
