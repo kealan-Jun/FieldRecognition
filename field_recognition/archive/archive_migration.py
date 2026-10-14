@@ -359,7 +359,13 @@ def rebuild(archive, rows):
     with archive.core["db"]() as conn:
         history_state(conn, bundles)
     paths.save()  # Persist stable event directories before moving their photos.
-    views = make_views(bundles, paths, receipts)
+    previous_integrity, _ = archive.integrity.latest()
+    known_missing = frozenset(
+        issue["path"]
+        for issue in (previous_integrity or {}).get("issues", [])
+        if issue.get("kind") == "object" and issue.get("code") == "missing"
+    )
+    views = make_views(bundles, paths, receipts, known_missing_assets=known_missing)
     advance("building_navigation")
     # Retain orphaned historical evidence without placing it among valid measurements.
     for source in (root / "Objects").glob("*/*"):

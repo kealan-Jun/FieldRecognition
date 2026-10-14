@@ -573,7 +573,9 @@ def photo_candidates(jobs, sources, *, unbound_only=True):
     return result
 
 
-def photo_readme(content, *, jobs=(), measurement_files=(), records=(), aggregation_issues=()):
+def photo_readme(
+    content, *, jobs=(), measurement_files=(), records=(), aggregation_issues=(), missing_assets=()
+):
     esc = lambda value: html.escape(str(value if value is not None else "未知"), quote=True)
     unbound = content.get("record_scope") == "unbound_candidates"
     body = (
@@ -597,6 +599,21 @@ def photo_readme(content, *, jobs=(), measurement_files=(), records=(), aggregat
             + " 单值复核结果</a>"
         )
     body += "</p>"
+    if missing_assets:
+        body += (
+            f"<p><strong>历史图片证据缺失 {len(missing_assets)} 项，"
+            "已在此前完整性巡检中发现；未恢复的图片不可查看。"
+            "读数与原回执保留，缺失明细见 Evidence.json。</strong></p>"
+        )
+    if jobs and all(
+        (j.get("external_photo") or {}).get("batch_basis") == "configured_directory_triplet"
+        for j in jobs
+    ):
+        count = len({j["capture_id"] for j in jobs})
+        body += (
+            f"<p>同一三连拍批次已到达 {count}/3 张；现有照片分别处理并记录，"
+            "后续照片继续加入此批次，重复上传复用原任务。</p>"
+        )
     conflicts = list(
         dict.fromkeys(
             name for entry in records for name in entry["evidence"].get("conflicting_fields", [])
@@ -663,7 +680,10 @@ def photo_readme(content, *, jobs=(), measurement_files=(), records=(), aggregat
     return page("逐次读数记录 · 未绑定" if unbound else "逐次读数记录", body)
 
 
-def make_views(bundles, paths, receipts, *, preserve_asset_locations=False, placed_assets=None):
+def make_views(
+    bundles, paths, receipts, *, preserve_asset_locations=False, placed_assets=None,
+    known_missing_assets=frozenset(),
+):
     views, days = {}, {}
     owners = {}
     from field_recognition.archive.source_layout import source_relative
@@ -721,6 +741,18 @@ def make_views(bundles, paths, receipts, *, preserve_asset_locations=False, plac
     for bundle in bundles:
         for digest, (_, item) in bundle["artifacts"].items():
             if digest not in placed:
+                stored = paths.data["assets"].get(digest, item)
+                if (
+                    item["path"] in known_missing_assets
+                    and not paths._resolve(stored["path"])[2]
+                ):
+                    # Rebuild navigation around a previously audited loss. Do
+                    # not manufacture bytes, move aliases or claim restoration.
+                    placed[digest] = item | {
+                        "available": False,
+                        "availability_basis": "previous_integrity_report_missing",
+                    }
+                    continue
                 placed[digest] = (
                     paths.place(item, owners[digest], pin_source=True)
                     if digest in uploads
@@ -860,6 +892,14 @@ def make_views(bundles, paths, receipts, *, preserve_asset_locations=False, plac
             "photos": photos,
             "receipt_versions": history,
         }
+        missing_assets = [p for p in photos.values() if p.get("available") is False]
+        if missing_assets:
+            content["evidence_integrity"] = {
+                "status": "historical_assets_missing",
+                "missing_assets": missing_assets,
+                "bytes_reconstructed": False,
+                "immutable_receipts_rewritten": False,
+            }
         if observations:
             people = {
                 (b.get("operator"), b.get("wearer_id"))
@@ -1019,6 +1059,7 @@ def make_views(bundles, paths, receipts, *, preserve_asset_locations=False, plac
                     measurement_files=measurement_files,
                     records=records,
                     aggregation_issues=aggregation_issues,
+                    missing_assets=missing_assets,
                 )
             latest_attempts = {}
             for row in bundle["jobs"]:
@@ -1035,10 +1076,21 @@ def make_views(bundles, paths, receipts, *, preserve_asset_locations=False, plac
             content["task_ids"] = [j["job_id"] for j in processing_jobs]
             content["task_outcomes"] = [processing_outcome(j) for j in processing_jobs]
             expected = (group or {}).get("context", {}).get("expected_photos", 1)
+            arrived = len({j.get("capture_id") for j in processing_jobs})
+            directory_batch = bool(processing_jobs) and all(
+                (j.get("external_photo") or {}).get("batch_basis") == "configured_directory_triplet"
+                for j in processing_jobs
+            )
+            content["photo_collection"] = {
+                "arrived_photos": arrived,
+                "expected_photos": expected,
+                "complete": arrived >= expected,
+                "processing_requires_all_expected_photos": not directory_batch,
+            }
             content["processing_terminal"] = (
                 bool(processing_jobs)
                 and all(t["terminal"] for t in content["task_outcomes"])
-                and len({j.get("capture_id") for j in processing_jobs}) >= expected
+                and (directory_batch or arrived >= expected)
             )
             outcomes = {t["outcome"] for t in content["task_outcomes"]}
             content["processing_outcome"] = (
@@ -1155,8 +1207,10 @@ def make_views(bundles, paths, receipts, *, preserve_asset_locations=False, plac
                         for m in content.get("measurement_files", [])
                     ],
                     "photo": next(
-                        (v["path"] for v in photos.values() if "original" in v["kind"]),
-                        next((v["path"] for v in photos.values()), None),
+                        (v["path"] for v in photos.values()
+                         if "original" in v["kind"] and v.get("available") is not False),
+                        next((v["path"] for v in photos.values()
+                              if v.get("available") is not False), None),
                     ),
                 }
             )

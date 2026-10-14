@@ -147,8 +147,8 @@ def read_one(request):
         except (ValueError, UnicodeError):
             raise SourceError("连拍回执格式无效", 422) from None
     elif request.get("batch_mode") == "directory_triplet":
-        # Explicit deployment contract: ONE capture directory contains EXACTLY
-        # three photos. Opt-in only; never apply a same-second heuristic by default.
+        # Explicit directory contract: one planned triplet has one stable batch
+        # identity. Available photographs can be read before the others arrive.
         metadata = directory_triplet(request, path, Path(location.identity))
         receipt_basis = "configured_directory_triplet"
     elif request.get("require_receipt"):
@@ -172,11 +172,9 @@ def directory_triplet(request, path, relative):
         )
 
     paths = members()
-    if len(paths) < 3:
-        raise SourceError("语音三连拍尚未收齐，保留队列等待", 503)
-    if len(paths) != 3:
+    if len(paths) > 3:
         raise SourceError("目录超过三张照片，不能确定一次拍照边界", 409)
-    photos, signatures = [], []
+    photos, signatures = [], {}
     for member in paths:
         safe, physical = safe_path(request["root"], member)
         try:
@@ -194,10 +192,15 @@ def directory_triplet(request, path, relative):
             captured.strftime("%H-%M-%S"),
         ):
             raise SourceError("三连拍目录与采集时间不一致", 409)
-        raw, info = read_stable(safe, request["max_bytes"])
-        if time.time() - info.st_mtime < 0.5:
-            raise SourceError("语音三连拍仍在写入", 503)
-        signatures.append((info.st_size, info.st_mtime_ns))
+        try:
+            raw, info = read_stable(safe, request["max_bytes"])
+            if time.time() - info.st_mtime < 0.5:
+                raise SourceError("照片仍在写入", 503)
+        except SourceError as exc:
+            if safe == path or exc.status not in {409, 413, 503}:
+                raise
+            continue  # Another member's upload does not block this stable photo.
+        signatures[safe] = (info.st_size, info.st_mtime_ns)
         photos.append(
             {
                 "filename": safe.name,
@@ -206,9 +209,10 @@ def directory_triplet(request, path, relative):
                 "sha256": hashlib.sha256(raw).hexdigest(),
             }
         )
-    if paths != members() or signatures != [
-        (p.stat().st_size, p.stat().st_mtime_ns) for p in paths
-    ]:
+    if paths != members() or any(
+        signature != (p.stat().st_size, p.stat().st_mtime_ns)
+        for p, signature in signatures.items()
+    ):
         raise SourceError("语音三连拍目录发生变化，等待稳定", 503)
     batch = hashlib.sha256(
         ("directory-triplet/1:" + relative.parent.as_posix()).encode()
@@ -220,7 +224,9 @@ def directory_triplet(request, path, relative):
     except (ValueError, KeyError, TypeError):
         raise SourceError("实验关联配置无效，请核对相机、时间范围和实验编号", 422) from None
     return {
-        "schema_version": "field-photo-receipt/1",
+        "schema_version": "field-photo-receipt/1"
+        if len(photos) == 3
+        else "field-photo-directory-snapshot/1",
         "camera_id": request["camera"],
         "measurement": {
             "burst_id": "directory-triplet-" + batch,

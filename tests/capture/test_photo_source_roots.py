@@ -124,6 +124,35 @@ def test_unavailable_extra_source_cannot_hide_working_metadata_source(tmp_path):
     assert len(found["files"]) == 1 and found["source_roots"][0]["status"] == "unavailable"
 
 
+def test_stable_metadata_photo_does_not_wait_for_another_member_upload(tmp_path):
+    import os
+    import time
+
+    directory = tmp_path / "2026-10-14_Camera/MetaData/12-30-00"
+    directory.mkdir(parents=True)
+    stable = directory / "20261014_123000.jpg"
+    stable.write_bytes(b"completed photograph")
+    os.utime(stable, (1, 1))
+    writing = directory / "20261014_123000_001.jpg"
+    writing.write_bytes(b"")
+    request = {
+        "root": str(tmp_path), "camera": "Camera", "zone": "Asia/Shanghai",
+        "path": str(stable), "max_bytes": 1000, "batch_mode": "directory_triplet",
+    }
+    first = source_io.read(request)
+    assert len(first["receipt"]["photos"]) == 1
+    assert first["receipt"]["schema_version"] == "field-photo-directory-snapshot/1"
+    writing.write_bytes(b"still writing")
+    os.utime(writing, (time.time(), time.time()))
+    assert source_io.read(request)["receipt"] == first["receipt"]
+    with pytest.raises(source_io.SourceError, match="仍在写入"):
+        source_io.read(request | {"path": str(writing)})
+    os.utime(writing, (1, 1))
+    second = source_io.read(request | {"path": str(writing)})
+    assert len(second["receipt"]["photos"]) == 2
+    assert second["receipt"]["measurement"] == first["receipt"]["measurement"]
+
+
 @pytest.mark.parametrize("value", ['"path"', "[null]", '[""]', "invalid-json"])
 def test_invalid_additional_roots_fail_at_configuration(monkeypatch, value):
     monkeypatch.setenv("FIELD_SAVED_PHOTO_ADDITIONAL_ROOTS", value)

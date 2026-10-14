@@ -77,9 +77,15 @@ class PhotoReceipt(BaseModel):
 
     @model_validator(mode="after")
     def members(self):
-        if self.schema_version != "field-photo-receipt/1" or not self.measurement.burst_id:
+        directory_snapshot = self.schema_version == "field-photo-directory-snapshot/1"
+        if self.schema_version not in {
+            "field-photo-receipt/1", "field-photo-directory-snapshot/1"
+        } or not self.measurement.burst_id:
             raise ValueError("回执必须提供版本和连拍编号")
-        if self.measurement.expected_photos != len(self.photos):
+        if directory_snapshot:
+            if self.measurement.expected_photos != 3 or not 1 <= len(self.photos) <= 3:
+                raise ValueError("目录快照只能记录同一三连拍中已到达的照片")
+        elif self.measurement.expected_photos != len(self.photos):
             raise ValueError("连拍预期数量与回执列表不一致")
         for attr in ("filename", "capture_id"):
             if len({getattr(p, attr) for p in self.photos}) != len(self.photos):
@@ -138,6 +144,11 @@ def load_saved_bundle(image_path, *, expected_camera, max_bytes, config=None):
     basis = "nas_filename_local_time_not_hardware_verified"
     if loaded["receipt"] is not None:
         try:
+            if (
+                loaded.get("receipt_basis") != "configured_directory_triplet"
+                and loaded["receipt"].get("schema_version") != "field-photo-receipt/1"
+            ):
+                raise ValueError("Uploaded receipts must provide their complete manifest")
             receipt = PhotoReceipt.model_validate(loaded["receipt"])
         except ValueError:
             raise HTTPException(422, "连拍回执字段、数量或编号无效") from None

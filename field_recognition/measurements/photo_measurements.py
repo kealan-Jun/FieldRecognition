@@ -635,8 +635,18 @@ def refresh(core, conn, mid):
     ):
         group["fields"] = candidates(jobs)
         group["status"] = "draft"
-    elif sources == previous_sources:
-        return
+    else:
+        if sources == previous_sources:
+            return
+        if jobs and all(
+            j["status"] in TERMINAL
+            and not j.get("resume_pending")
+            and (j.get("external_photo") or {}).get("batch_basis") == "configured_directory_triplet"
+            for j in jobs
+        ):
+            # Keep the original three-photo context open for late arrivals, but
+            # expose all completed observations now. This never confirms a value.
+            group["fields"] = candidates(jobs)
     group["revision"] += 1
     group["updated_at"] = core["now"]()
     group["instrument_completeness"] = instrument_completeness(group)

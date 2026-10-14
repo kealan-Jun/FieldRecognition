@@ -157,6 +157,65 @@ def test_recovery_never_fabricates_missing_bytes_or_accepts_another_local_image(
     assert (data / "Images/photo.png").read_bytes() == b"wrong bytes"
 
 
+def test_rebuild_labels_audited_historical_loss_without_faking_bytes(archive, monkeypatch):
+    from field_recognition.archive.archive_store import ArchiveStore
+
+    app, client, root = archive
+    queued = []
+    monkeypatch.setattr(app.readout_pool, "submit", lambda fn, job: queued.append(job))
+    import io
+
+    out = io.BytesIO()
+    Image.new("RGB", (100, 80), "gray").save(out, format="JPEG")
+    response = client.post("/api/ocr/photo-result", json={"photo": {
+        "capture_id": "retained-history", "camera_id": "TestCamera",
+        "source_ref": "nas://historical-source-not-current-input",
+        "captured_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(),
+        "image_base64": base64.b64encode(out.getvalue()).decode(),
+    }})
+    assert response.status_code == 202
+    app.run_ocr(queued[0])
+    app.archive_store.step(100)
+    before = {p: p.read_bytes() for p in root.glob(".System/Receipts/**/*.json")}
+    missing = next(root.glob("**/*.png"))
+    digest = hashlib.sha256(missing.read_bytes()).hexdigest()
+    missing.unlink()
+    for local in (app.DATA / "Images").glob("*.png"):
+        if hashlib.sha256(local.read_bytes()).hexdigest() == digest:
+            local.unlink()
+    report = app.archive_store.integrity.run_once()
+    assert report["status"] == "findings" and report["issue_count"] > 0
+    monkeypatch.setenv("FIELD_ARCHIVE_LAYOUT", "metadata")
+    refresh_runtime_config(app, "archive_layout")
+    migrated = ArchiveStore(app.runtime)
+    migrated.step(100)
+    evidence_file = next(root.glob("*/VoicePhotoReadings/*/Evidence.json"))
+    evidence = json.loads(evidence_file.read_text())
+    assert evidence["evidence_integrity"]["status"] == "historical_assets_missing"
+    assert all(p["available"] is False for p in evidence["evidence_integrity"]["missing_assets"])
+    assert "历史图片证据缺失" in evidence_file.with_name("Readme.html").read_text()
+    assert not missing.exists()
+    assert (root / "Readme.html").is_file()
+    assert all(p.read_bytes() == raw for p, raw in before.items())
+    assert migrated.integrity.run_once()["issue_count"] > 0
+
+
+def test_unaudited_missing_artifact_still_blocks_event_publication(tmp_path):
+    from field_recognition.archive.archive_events import make_views, prepare
+    from tests.support.measurement_records import document
+
+    doc = document() | {"camera_id": "Cam"}
+    rows = [{"entity": "jobs", "entity_id": doc["job_id"], "seq": 1,
+             "document": json.dumps(doc), "recorded_at": "2026-10-14T00:00:00Z",
+             "receipt_path": ".System/Receipts/Original.json"}]
+    paths = ArchivePaths(tmp_path)
+    bundles, _ = prepare(rows, paths)
+    artifact = {"path": "Objects/Missing.png", "sha256": "a" * 64, "size_bytes": 10}
+    with pytest.raises(FileNotFoundError):
+        make_views(bundles, paths, {1: {"artifacts": {"image": artifact}}})
+    assert not list(tmp_path.glob("**/Evidence.json"))
+
+
 @pytest.mark.parametrize(
     "relative",
     [
