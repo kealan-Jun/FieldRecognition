@@ -166,5 +166,8 @@ def test_service_monitor_reports_session_identity_and_unavailable_status(
     monkeypatch.setattr(urllib.request, "build_opener", lambda *a: Opener())
     camera._status_loop()
     assert all(o.pop("observed_at") for o in observations)
+    assert all(o.pop("reconnectable") is True for o in observations)
+    if expected[0]["online"]:
+        assert observations[0].pop("frame_verified") is False
     assert observations == expected
     assert camera.snapshot()["service_status_available"] == expected[0]["online"]

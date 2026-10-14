@@ -20,6 +20,15 @@ BASE = struct.Struct("<4sHHIIIIQQ")
 # sustained failure, using the same interval as the stream read timeout.
 FRAME_MAX_AGE_SECONDS = 1
 SERVICE_STALL_SECONDS = 8
+RECONNECTABLE_FAILURES = {
+    "camera_stream_error",
+    "camera_decode_error",
+    "camera_frames_stale",
+    "receiver_status_unavailable",
+    "camera_not_found",
+    "camera_session_changed",
+    "camera_service_offline",
+}
 
 
 def read_exact(stream, count):
@@ -132,6 +141,25 @@ class ReceiverCamera:
                 and previous[key] != observation[key]
                 for key in ("media_session_id", "device_boot_id")
             )
+            rebooted = bool(
+                previous.get("device_boot_id")
+                and observation.get("device_boot_id")
+                and previous["device_boot_id"] != observation["device_boot_id"]
+            )
+            if changed and observation["online"] and not rebooted:
+                # The frame currently cached may belong to the old ingress.
+                # Recovery must wait for a newly decoded frame after this edge.
+                observation = observation | {
+                    "online": False,
+                    "failure_reason": "camera_session_changed",
+                    "frame_verified": False,
+                }
+            observation["reconnectable"] = (
+                observation["online"] or observation.get("failure_reason") in RECONNECTABLE_FAILURES
+            ) and not rebooted
+            for key in ("media_session_id", "device_boot_id"):
+                if key not in observation and previous.get(key):
+                    observation[key] = previous[key]
             if not observation["online"] or previous.get("online") is False or changed:
                 self.invalid_before = time.monotonic()
                 self.latest = None
@@ -184,8 +212,8 @@ class ReceiverCamera:
                         {"online": False, "failure_reason": "camera_not_found"}, available=False
                     )
             except Exception:
-                # An unavailable acquisition service ends authorization without
-                # claiming that the physical device was powered off.
+                # Suspend capture authorization while a bounded reconnect window
+                # retains occupancy; this does not prove physical power loss.
                 self._observe_service(
                     {"online": False, "failure_reason": "receiver_status_unavailable"},
                     available=False,
@@ -199,6 +227,7 @@ class ReceiverCamera:
                 age = time.monotonic() - frame_at
                 previous = self.info.get("service_status") or {}
                 fresh = self.latest is not None and age <= FRAME_MAX_AGE_SECONDS
+                observation = observation | {"frame_verified": fresh}
                 if observation["online"]:
                     if previous.get("online") is False and not fresh:
                         # A healthy heartbeat alone cannot restore failed RGB

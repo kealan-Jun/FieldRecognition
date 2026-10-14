@@ -26,6 +26,12 @@
       : "";
   }
 
+  function connectionMarkup(item) {
+    return item.connection_status === "recovering"
+      ? `<small>短暂断流，绑定暂存；${esc(stamp(item.reconnect_deadline))} 前恢复可继续使用，无需重扫。断流期间照片归属待核实。</small>`
+      : "";
+  }
+
   function scenesMarkup(visits) {
     if (!visits.length)
       return '<p class="caption">尚未绑定场景，可扫描场景二维码。</p>';
@@ -35,6 +41,7 @@
           visit,
         ) => `<div class="bound-item" data-scene-visit="${esc(visit.visit_id)}">
       <b>场景已绑定 · ${esc(visit.scene?.name || "未命名场景")}</b>
+      ${connectionMarkup(visit)}
       <small>实验员 · ${esc(visit.operator || "当时未记录")}</small>
       <small>绑定时间 · ${esc(stamp(visit.started_at))}（北京时间）</small>
       ${visit.valid_until ? `<small>有效至 · ${esc(stamp(visit.valid_until))}（北京时间）</small>` : ""}
@@ -82,7 +89,7 @@
       .join("");
   }
 
-  const api = { current, scenesMarkup, pendingInstruments };
+  const api = { current, scenesMarkup, pendingInstruments, connectionMarkup };
   root.BindingView = api;
   if (typeof module !== "undefined") module.exports = api;
 })(globalThis);

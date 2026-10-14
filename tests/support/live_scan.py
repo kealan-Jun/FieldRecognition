@@ -2,11 +2,13 @@
 
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 
 import cv2
 import pytest
 
 from tests.support.demo import app_client, enter_scene, register, scan  # noqa: F401
+from field_recognition.capture.receiver import ReceiverCamera
 
 
 class Camera:
@@ -50,6 +52,32 @@ def live(app_client, monkeypatch):
     camera = Camera()
     monkeypatch.setattr(app, "receiver_camera", camera)
     return app, client, camera
+
+
+@pytest.fixture
+def reconnecting(live, monkeypatch):
+    app, client, camera = live
+    clock = [datetime(2026, 10, 14, 11, 40, tzinfo=timezone.utc)]
+    monkeypatch.setattr(app, "now", lambda: clock[0].isoformat())
+    receiver = ReceiverCamera("http://unused.invalid", camera.target)
+
+    def observe(observation):
+        app.live_scanner.observe_service(observation | {"observed_at": app.now()})
+
+    receiver.on_service_status = observe
+    receiver._observe_receiver_service({"online": True, "media_session_id": 10})
+
+    def advance(seconds=1, *, fresh=False, **observation):
+        clock[0] += timedelta(seconds=seconds)
+        if fresh:
+            receiver.latest = (None, {}, time.monotonic())
+        if observation:
+            if observation["online"]:
+                receiver._observe_receiver_service(observation)
+            else:
+                receiver._observe_service(observation, available=False)
+
+    return app, client, receiver, advance
 
 
 def wait_for(client, sid, predicate):

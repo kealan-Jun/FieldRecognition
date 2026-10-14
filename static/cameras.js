@@ -134,7 +134,7 @@
         ? bindings
             .map(
               (binding) =>
-                `<div class="bound-item"><b>仪器已绑定 · ${esc(binding.instrument?.name || "未命名设备")}</b><small>${esc(binding.instrument?.device_category || "instrument")} · ${esc(binding.instrument?.scene || "未分类场景")}</small><small>开始 ${esc(stamp(binding.started_at))}</small></div>`,
+                `<div class="bound-item"><b>仪器已绑定 · ${esc(binding.instrument?.name || "未命名设备")}</b>${pageContext.BindingView.connectionMarkup(binding)}<small>${esc(binding.instrument?.device_category || "instrument")} · ${esc(binding.instrument?.scene || "未分类场景")}</small><small>开始 ${esc(stamp(binding.started_at))}</small></div>`,
             )
             .join("")
         : pending

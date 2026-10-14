@@ -50,7 +50,7 @@
           ? pageContext.activeBindings
               .map(
                 (b) =>
-                  `<div class="bound-item"><b>仪器已绑定 · ${pageContext.esc(b.instrument.name)}</b><small>${pageContext.esc(b.instrument.device_category || "instrument")}${b.instrument.device_type ? ` · ${pageContext.esc(b.instrument.device_type)}` : ""} · ${pageContext.esc(b.operator)} · ${pageContext.esc(pageContext.stamp(b.started_at))}${b.valid_until ? " · 当天有效" : ""}</small><a href="${pageContext.esc(b.image_url)}" target="_blank" rel="noopener">绑定命中帧 ↗</a></div>`,
+                  `<div class="bound-item"><b>仪器已绑定 · ${pageContext.esc(b.instrument.name)}</b>${pageContext.BindingView.connectionMarkup(b)}<small>${pageContext.esc(b.instrument.device_category || "instrument")}${b.instrument.device_type ? ` · ${pageContext.esc(b.instrument.device_type)}` : ""} · ${pageContext.esc(b.operator)} · ${pageContext.esc(pageContext.stamp(b.started_at))}${b.valid_until ? " · 当天有效" : ""}</small><a href="${pageContext.esc(b.image_url)}" target="_blank" rel="noopener">绑定命中帧 ↗</a></div>`,
               )
               .join("")
           : pending

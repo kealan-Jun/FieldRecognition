@@ -58,6 +58,24 @@ def test_camera_labels_keep_service_failure_above_streaming_and_page_overrides()
     }
 
 
+def test_reconnecting_bindings_remain_visible_with_deadline_and_gap_notice():
+    result = node("""
+    const v=require('./static/view-utils.js'),b=require('./static/binding-view.js');
+    const held={camera_id:'cam',connection_status:'recovering',reconnect_deadline:'2026-10-14T11:47:24Z'};
+    process.stdout.write(JSON.stringify({
+      camera:v.cameraStatus({service_status:{online:false,reconnectable:true}}),
+      held:b.current({bindings:[held]},'cam').instruments.length,
+      message:b.connectionMarkup(held),
+      restored:b.connectionMarkup({...held,connection_status:'connected'}),
+      ended:b.current({bindings:[{...held,ended_at:'2026-10-14T11:47:24Z'}]},'cam').instruments.length
+    }));
+    """)
+    assert result["camera"] == "连接恢复中 · 等待新画面"
+    assert result["held"] == 1 and result["ended"] == 0 and result["restored"] == ""
+    assert "无需重扫" in result["message"] and "断流期间照片归属待核实" in result["message"]
+    assert "19:47:24" in result["message"]
+
+
 def test_auth_csrf_is_same_origin_mutation_only_and_direct_access_stays_open():
     result = node("""
     const fs=require('fs'),vm=require('vm');

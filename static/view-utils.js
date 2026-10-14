@@ -111,6 +111,8 @@
     }),
   });
   function cameraStatus(camera, options = {}) {
+    if (camera?.service_status?.reconnectable && camera?.service_status?.online === false)
+      return "连接恢复中 · 等待新画面";
     if (camera?.service_status?.online === false)
       return labels.camera.service_unavailable;
     const status = camera?.status || "unknown";

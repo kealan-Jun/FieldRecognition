@@ -2,7 +2,7 @@
 
 import json
 from datetime import datetime
-from field_recognition.bindings.binding_policy import contains
+from field_recognition.bindings.binding_policy import contains, interruption_at
 from field_recognition.bindings.binding_operator import at_time
 
 
@@ -33,6 +33,7 @@ def at_capture(core, conn, capture, *, linked=None, automatic=False):
         return contains(document, moment)
 
     snapshots = [linked] if linked and (not captured_at or contained(linked)) else []
+    interrupted = False
     if automatic and not linked:
         snapshots = [
             json.loads(row["document"])
@@ -41,6 +42,7 @@ def at_capture(core, conn, capture, *, linked=None, automatic=False):
                 (capture["camera_id"],),
             )
         ]
+        interrupted = any(interruption_at(b, moment) for b in snapshots)
         snapshots = [
             b
             for b in snapshots
@@ -69,6 +71,8 @@ def at_capture(core, conn, capture, *, linked=None, automatic=False):
         if not snapshots
         else None
     )
+    if not snapshots and interrupted and captured_at:
+        attribution_reason = "camera_connection_interrupted"
     if attribution_reason:
         # Receive-time relations are diagnostic candidates, never evidence of
         # who wore the camera when an undated upload was captured.
