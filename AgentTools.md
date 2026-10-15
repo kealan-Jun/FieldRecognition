@@ -135,7 +135,7 @@ result = tools.call('get_panel_result', {'job_id': job['job_id']})
 
 同一照片和选框已有任务时返回原 job_id；不要通过重发来等待结果。默认 fallback 模式先用常驻 OCR，从任务真正运行开始计时，5 秒没有完整数字才用视觉兜底。该兜底每次最多一个云端请求，同一绑定（未绑定时同一相机）两次尝试至少隔 30 秒。收到 `completed` 后统一展示 `lines`；没有数字时如实回答看不清。`confidence`、`polygon` 允许 null，不要生成分数、坐标或额外读数。界面无需单列云端来源，后端 `local_ocr`、`fallback`、`external_photo` 保存过程和原图回执。
 
-待部署并行模式：显式设置 `FIELD_VISION_PHOTO_MODE=parallel`，并保留已有提供方、模型和凭据配置。本地与云端同时读取同一照片；绑定照片先共用一次授权面板定位，再并行识别相同的源区域。云端不等待本地数字，也不受五秒触发/三十秒兜底冷却约束；多面板每个授权面板单独请求，提供方调用仍串行。`result_stage=preliminary/reviewed`、`result_revision`、`result_updated_at`、`parallel_review` 表达当前投影及复核状态；模型复核不等于人工确认。初读优先归档，复核更新原事件目录的 Result/Readings，原始回执版本保留；未绑定照片仍只产生未归属候选。外部 Agent 必须轮询并编辑原读数位置，才能呈现同条更新。详见 [并行照片识别](docs/ParallelPhotoReview20261015.md)。
+照片并行模式：显式设置 `FIELD_VISION_PHOTO_MODE=parallel`，并保留已有提供方、模型和凭据配置。本地与云端同时读取同一照片；绑定照片先共用一次授权面板定位，再并行识别相同的源区域。云端不等待本地数字，也不受五秒触发/三十秒兜底冷却约束；多面板每个授权面板单独请求，提供方调用仍串行。`result_stage=preliminary/reviewed`、`result_revision`、`result_updated_at`、`parallel_review` 表达当前投影及复核状态；模型复核不等于人工确认。初读优先归档，复核更新原事件目录的 Result/Readings，原始回执版本保留；未绑定照片仍只产生未归属候选。外部 Agent 必须轮询并编辑原读数位置，才能呈现同条更新。详见 [并行照片识别](docs/ParallelPhotoReview20261015.md)。
 
 并行模式的[误报保护补丁](docs/CloudReviewRepair20261015.md)对已定位红色数码屏检查原始笔画完整性；低清且无有效本地支持的云端数值不会作为有效值覆盖。云端先返回时可显示初步候选，`parallel_review.crosscheck_pending=true` 表示还在等待本地交叉检查，须继续轮询同一任务。`conflicts` 或 `quality_issue` 必须如实标记待核对，不把保留的原始数字或模型调用成功当作有效读数或人工确认。
 

@@ -109,7 +109,7 @@ PaddleOCR 支持 GPU / CPU、常驻模型与面板区域处理；视觉模型按
 - **三连拍：** 默认按明确的 `PhotoReceipt.json` 回执归组。只有已核对来源约定的部署才启用 `directory_triplet`；同一秒或文件后缀不能单独证明连拍关系，历史照片不强行重新归组。
 - **默认识别：** 本地 OCR 先处理；单张任务运行 5 秒仍无完整数字候选时，满足可用性、串行槽位与冷却条件才尝试视觉兜底。**5 秒是触发条件，不是出结果时延承诺。**
 - **照片视觉优先：** 可配置 `FIELD_VISION_PHOTO_MODE=primary`。无绑定照片直接产生待复核候选；绑定照片先定位授权面板。调用失败可尝试本地 OCR，不能据此制造仪器身份。
-- **照片并行初读与复核（待部署）：** 配置 `FIELD_VISION_PHOTO_MODE=parallel`，本地与云端读取同一照片；绑定照片共用授权面板定位。初读先展示与归档，复核更新同一任务和结果路径，保留旧回执；详见 [并行照片识别](docs/ParallelPhotoReview20261015.md)。
+- **照片并行初读与复核：** 配置 `FIELD_VISION_PHOTO_MODE=parallel`，本地与云端读取同一照片；绑定照片共用授权面板定位。初读先展示与归档，复核更新同一任务和结果路径，保留旧回执；详见 [并行照片识别](docs/ParallelPhotoReview20261015.md) 和 [误报保护及本机上线记录](docs/CloudReviewRepair20261015.md)。
 
 参见 [自动解绑](docs/AutomaticBindingRelease20260921.md)、[视觉主识别](docs/NianfengVision20260925.md) 和 [Agent 接口](AgentTools.md)。
 

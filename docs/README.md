@@ -1,6 +1,6 @@
 # 文档索引
 
-照片本地初读与云端同时处理、同条读数更新及验证边界见 [并行照片识别（待部署）](ParallelPhotoReview20261015.md)。
+照片本地初读与云端同时处理、同条读数更新及验证边界见 [并行照片识别](ParallelPhotoReview20261015.md)；最新像素保护、覆盖率取舍和本机上线记录见 [云端复核误报保护](CloudReviewRepair20261015.md)。
 
 日常使用从 [项目介绍](../README.md) 与 [Agent 接口](../AgentTools.md) 开始。
 
