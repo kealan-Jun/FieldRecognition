@@ -77,7 +77,7 @@ def test_local_is_published_and_archived_while_cloud_is_still_reading(
     assert any(r.get("result_stage") == "reviewed" for r in snapshots)
 
 
-def test_cloud_can_finish_first_and_late_local_only_appends_raw_evidence(
+def test_cloud_first_is_provisional_until_local_can_check_sign_and_scale(
     parallel_context, monkeypatch
 ):
     app, client = parallel_context
@@ -86,7 +86,7 @@ def test_cloud_can_finish_first_and_late_local_only_appends_raw_evidence(
     def local(*args, **kwargs):
         started.set()
         assert release.wait(4)
-        return local_result("99.99 g")
+        return local_result("123.4 g")
 
     def cloud(*args, **kwargs):
         assert started.wait(3)
@@ -96,14 +96,19 @@ def test_cloud_can_finish_first_and_late_local_only_appends_raw_evidence(
     monkeypatch.setattr(aliyun_vision, "read_panel", cloud)
     job = enqueue(parallel_context)
     with running(app, job, release) as future:
-        future.result(timeout=3)
-        result = app.get_job(job["job_id"])
-        assert result["status"] == "completed" and result["readings"][0]["value"] == "12.34"
-        assert result["local_ocr"]["status"] == "running"
+        result = observe(client, job["job_id"], lambda r: r.get("result_available"))
+        assert not future.done()
+        assert result["status"] == "running" and result["readings"][0]["value"] == "12.34"
+        assert result["parallel_review"]["crosscheck_pending"]
         release.set()
-        late = observe(client, job["job_id"], lambda r: r.get("local_ocr_finished_late"))
-        assert late["local_ocr"]["lines"][0]["text"] == "99.99 g"
-        assert late["readings"][0]["value"] == "12.34" and late["result_revision"] == 1
+        future.result(timeout=4)
+    final = app.get_job(job["job_id"])
+    assert final["status"] == "completed" and final["readings"][0]["value"] == "123.4"
+    assert final["parallel_review"]["status"] == "conflict"
+    assert final["parallel_review"]["conflicts"][0]["reason"] == "decimal_scale_conflict"
+    assert not final["parallel_review"].get("crosscheck_pending")
+    assert final["first_result_at"] == result["first_result_at"]
+    assert final["result_revision"] == 2
 
 
 @pytest.mark.parametrize("cloud_first", [False, True])
@@ -138,7 +143,7 @@ def test_cloud_failure_keeps_local_answer_and_releases_queue_lease(
             client,
             job["job_id"],
             lambda r: (
-                r.get("parallel_review", {}).get("status") == "failed"
+                r.get("parallel_review", {}).get("crosscheck_pending")
                 if cloud_first
                 else r.get("result_available")
             ),
@@ -356,3 +361,84 @@ def test_numeric_scale_and_sign_disagreements_keep_initial_and_record_both_answe
     assert final["parallel_review"]["status"] == "conflict"
     assert final["parallel_review"]["conflicts"][0]["reason"] == reason
     assert final["fallback"]["answer"]["readings"][0]["value"] == reviewed
+
+
+@pytest.mark.parametrize(
+    "initial,cloud_value,reason",
+    [
+        (None, "510", "ambiguous_source_pixels"),
+        ("5", "5", "incomplete_cloud_readout"),
+        ("570", "570", None),
+    ],
+)
+def test_low_resolution_cloud_readout_needs_complete_independent_support(
+    parallel_context, archive, monkeypatch, initial, cloud_value, reason
+):
+    from field_recognition.recognition import led_digits
+
+    app, client = parallel_context
+    two_bindings(app, client)
+    configure(
+        app,
+        monkeypatch,
+        [
+            dict(class_id=0, instrument_id=A, confidence=0.8, xyxy=[20, 30, 80, 50]),
+            dict(class_id=0, instrument_id=A, confidence=0.8, xyxy=[110, 30, 146, 54]),
+        ],
+    )
+    # Segment geometry has its own native-pixel tests. Here the same diagnostic
+    # must constrain cloud publication, even when the provider claims success.
+    monkeypatch.setattr(
+        led_digits,
+        "native_diagnostics",
+        lambda image: {
+            "basis": "original_panel_pixels",
+            "status": "measured",
+            "group_count": 2,
+            "below_resolution_gate": True,
+            "merged_glyphs_possible": image.shape[1] < 45,
+        },
+    )
+    monkeypatch.setattr(
+        app,
+        "predict_panel",
+        lambda image, x=0, y=0: local_result(
+            "175 °C" if x < 100 else initial + " rpm" if initial else None
+        ),
+    )
+    release = Event()
+
+    def cloud(pixels, **kwargs):
+        assert release.wait(4)
+        result = cloud_result()
+        value = cloud_value if pixels.shape[1] < 45 else "175"
+        result["answer"]["readings"] = [{"text": value, "value": value}]
+        return result
+
+    monkeypatch.setattr(aliyun_vision, "read_panel", cloud)
+    job = enqueue(parallel_context)
+    with running(app, job, release) as future:
+        observe(client, job["job_id"], lambda r: r.get("result_available"))
+        release.set()
+        future.result(timeout=4)
+    final = app.get_job(job["job_id"])
+    assert final["status"] == "completed"
+    speed = final["panel_regions"][1]
+    assert speed["fallback"]["answer"]["readings"][0]["value"] == cloud_value
+    assert speed["source_pixel_review"]["basis"] == "original_panel_pixels"
+    if reason:
+        assert speed["review_conflict"]["reason"] == reason
+        assert final["parallel_review"]["status"] == "conflict"
+        # A partial local reading is not valid corroboration either.
+        assert not [
+            r
+            for r in final["readings"]
+            if r["panel_id"] == speed["panel_id"] and not r.get("quality_issue")
+        ]
+        assert next(f for f in final["display_fields"] if f["name"] == "转速")["value"] is None
+    else:
+        assert final["parallel_review"]["status"] == "completed"
+        assert {r["value"] for r in final["readings"]} == {"175", "570"}
+    app.archive_store.step(100)
+    evidence = next(archive[2].glob("*/VoicePhotoReadings/*/Evidence.json"))
+    assert cloud_value in evidence.read_text()

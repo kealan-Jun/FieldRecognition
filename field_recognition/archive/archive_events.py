@@ -612,6 +612,8 @@ def photo_readme(
                 "unreadable": "云端未读清 · 待核对",
                 "completed": "模型复核完成 · 未经人工核实",
             }.get(review_status, "本地与云端正在识别")
+            if (job.get("parallel_review") or {}).get("crosscheck_pending"):
+                label = "初步读数 · 本地交叉检查中"
             body += "<p>" + esc(job.get("job_id")) + "：" + esc(label) + "</p>"
     if missing_assets:
         body += (

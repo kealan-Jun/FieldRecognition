@@ -88,6 +88,7 @@
   function reviewLabel(job) {
     if (job.reading_mode !== "parallel_photo") return "";
     const review = job.parallel_review || {};
+    if (review.crosscheck_pending) return "初步读数 · 本地交叉检查中";
     if (["queued", "running"].includes(review.status)) return "本地初读 · 云端复核中";
     if (review.status === "failed") return "本地初读 · 云端复核未完成";
     if (review.status === "conflict") return "复核存在冲突 · 待核对";

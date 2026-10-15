@@ -2,13 +2,14 @@
 
 Bound photos share one detector result before both readers start. Cloud reads
 the same authorized source crops, independently of local OCR/refinement. A
-cloud-first completion may finish the task; a late local result is audit only.
+cloud-first candidate may be shown while the local cross-check is pending.
 """
 
 import copy
 import time
 from dataclasses import replace
 from decimal import Decimal
+import re
 
 from field_recognition.recognition.config import RecognitionConfig
 from field_recognition.recognition.panel_regions import finish as finish_regions
@@ -61,9 +62,37 @@ def _cloud(core, original, template, image, panel, pipeline, valid, started):
                 pause=time.sleep,
                 started=started,
             )
+        from field_recognition.recognition.led_digits import native_diagnostics
+
+        for region in document.get("panel_regions", []):
+            if region.get("class_id") == 0:
+                x, y, w, h = region["crop"]
+                region["source_pixel_review"] = native_diagnostics(image[y : y + h, x : x + w])
     except Exception as exc:
         document["fallback"] = {"status": "failed", "error": type(exc).__name__}
     return document
+
+
+def _source_conflict(cloud_region, initial_values, cloud_values):
+    """Cloud confidence cannot override insufficient native stroke evidence."""
+    native = cloud_region.get("source_pixel_review") or {}
+    candidates = [
+        line["value"]
+        for line in cloud_region.get("lines", [])
+        if re.fullmatch(r"[+-]?\d+(?:[.,]\d+)?", str(line.get("value", "")))
+    ]
+    if not candidates:
+        return None
+    digit_count = min(sum(char.isdigit() for char in value) for value in candidates)
+    if native.get("group_count", 0) > digit_count:
+        return "incomplete_cloud_readout"
+    ambiguous = native.get("low_resolution_collapsed_row") or (
+        native.get("below_resolution_gate")
+        and (native.get("merged_glyphs_possible") or native.get("possible_decimal_point"))
+    )
+    if ambiguous and (not initial_values or initial_values != cloud_values):
+        return "ambiguous_source_pixels"
+    return None
 
 
 def _merge(document, reviewed, local_ready):
@@ -72,13 +101,20 @@ def _merge(document, reviewed, local_ready):
 
     def values(doc):
         return {
-            (r.get("panel_id"), Decimal(r["value"]), r.get("unit"))
+            (
+                r.get("panel_id"),
+                Decimal(r["value"]),
+                (r.get("normalized_value") or {}).get("unit") or r.get("unit"),
+            )
             for r in build_readings(doc)
             if not r.get("quality_issue") and r.get("value") is not None
         }
 
     before = values(document)
     cloud_values = values(reviewed)
+    document["parallel_review"].pop("conflicts", None)
+    if local_ready:
+        document["parallel_review"].pop("crosscheck_pending", None)
 
     def conflict_for(panel_id):
         initial_values = [(value, unit) for pid, value, unit in before if pid == panel_id]
@@ -103,6 +139,22 @@ def _merge(document, reviewed, local_ready):
             return conflict
         return None
 
+    def source_conflict_for(region):
+        panel_id = region["panel_id"]
+        initial = {(value, unit) for pid, value, unit in before if pid == panel_id}
+        cloud = {(value, unit) for pid, value, unit in cloud_values if pid == panel_id}
+        reason = _source_conflict(region, initial, cloud)
+        if reason:
+            conflict = {
+                "panel_id": panel_id,
+                "reason": reason,
+                "initial_values": sorted(str(value) for value, _ in initial),
+                "reviewed_values": sorted(str(value) for value, _ in cloud),
+            }
+            document["parallel_review"].setdefault("conflicts", []).append(conflict)
+            return conflict
+        return None
+
     document["fallback"] = copy.deepcopy(fallback)
     cloud_timing = reviewed.get("timing", {}).get("monotonic_durations_ms", {})
     document.setdefault("timing", {}).setdefault("monotonic_durations_ms", {}).update(cloud_timing)
@@ -117,6 +169,8 @@ def _merge(document, reviewed, local_ready):
                 region.update(lines=[], display_state=None)
             attempt = cloud_region.get("fallback", {})
             region["fallback"] = copy.deepcopy(attempt)
+            if "source_pixel_review" in cloud_region:
+                region["source_pixel_review"] = copy.deepcopy(cloud_region["source_pixel_review"])
             if attempt.get("status") != "completed":
                 states.append("failed")
             elif initial and (
@@ -134,6 +188,18 @@ def _merge(document, reviewed, local_ready):
                 states.append("conflict")
             elif conflict := conflict_for(cloud_region["panel_id"]):
                 region["review_conflict"] = conflict
+                states.append("conflict")
+            elif conflict := source_conflict_for(cloud_region):
+                region["review_conflict"] = conflict
+                if conflict["reason"] == "incomplete_cloud_readout" and all(
+                    sum(char.isdigit() for char in value)
+                    < cloud_region["source_pixel_review"]["group_count"]
+                    for value in conflict["initial_values"]
+                ):
+                    region["lines"] = [
+                        dict(line, quality_issue="incomplete_source_readout")
+                        for line in region.get("lines", [])
+                    ]
                 states.append("conflict")
             else:
                 region["lines"] = copy.deepcopy(cloud_region.get("lines", []))
@@ -266,6 +332,7 @@ def run(core, document, image, panel, x, y, *, pipeline, valid, clock, pause, st
     )
     local_ready = False
     reviewed = None
+    cloud_published = False
     while valid():
         if local_future.done() and not local_ready:
             local_ready = True
@@ -284,17 +351,19 @@ def run(core, document, image, panel, x, y, *, pipeline, valid, clock, pause, st
                 result_stage="preliminary",
                 result_updated_at=core["now"](),
             )
-            if document["result_available"]:
+            if document["result_available"] and reviewed is None:
                 document.setdefault("first_result_at", document["result_updated_at"])
                 document["result_revision"] += 1
             document["readings"] = build_readings(document)
             document["measurement_records"] = build_records(document)
             document["display_fields"] = display_fields(document)
-            pipeline.save_document(document)
+            if reviewed is None:
+                pipeline.save_document(document)
         if cloud_future.done() and reviewed is None:
             reviewed = cloud_future.result()
+        if reviewed is not None and (local_ready or not cloud_published):
             accepted = _merge(document, reviewed, local_ready)
-            if accepted or local_ready:
+            if local_ready:
                 document.update(
                     status="failed"
                     if not accepted and document.get("local_ocr", {}).get("status") == "failed"
@@ -312,20 +381,34 @@ def run(core, document, image, panel, x, y, *, pipeline, valid, clock, pause, st
                 if document["status"] == "completed":
                     document.pop("error", None)
                 return local_future
-            pipeline.save_document(document)
-        if reviewed is not None and local_ready:
-            # Cloud failed before local OCR finished. Preserve the late local
-            # answer as the current initial reading, with the failure still visible.
+            # Both readers started together. An early cloud candidate remains
+            # provisional until the local result can participate in comparison.
             document.update(
-                status="failed"
-                if document.get("local_ocr", {}).get("status") == "failed"
-                else "completed",
-                phase="completed",
+                status="running",
+                phase="local_crosscheck_pending",
+                result_available=bool(
+                    document.get("lines")
+                    or any(r.get("display_state") for r in document.get("panel_regions", []))
+                ),
                 result_stage="preliminary",
+                result_updated_at=core["now"](),
             )
-            return local_future
+            document["parallel_review"].update(status="running", crosscheck_pending=True)
+            if document["result_available"]:
+                document.setdefault("first_result_at", document["result_updated_at"])
+                document["result_revision"] += 1
+            document["readings"] = build_readings(document)
+            document["measurement_records"] = build_records(document)
+            document["display_fields"] = display_fields(document)
+            pipeline.save_document(document)
+            cloud_published = True
         if reviewed is not None and clock() - started >= 90:
-            document.update(status="failed", phase="completed", error="local_ocr_timeout")
+            document.update(
+                status="completed" if document.get("result_available") else "failed",
+                phase="completed",
+                error="local_ocr_timeout",
+            )
+            document["parallel_review"].update(status="failed", reason="local_crosscheck_timeout")
             return local_future
         pause(0.02)
     document.update(

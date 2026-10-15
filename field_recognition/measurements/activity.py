@@ -58,6 +58,8 @@ def readout_event(conn, row, *, related_only=False):
             "conflict": "复核存在冲突 · 待核对",
             "unreadable": "云端未读清 · 待核对",
         }.get((doc.get("parallel_review") or {}).get("status"), label)
+        if (doc.get("parallel_review") or {}).get("crosscheck_pending"):
+            label = "初步读数 · 本地交叉检查中"
     notes = []
     if doc.get("panel_selection") == "user_selected_crop_or_full_photo" and not doc.get(
         "panel_detection"
