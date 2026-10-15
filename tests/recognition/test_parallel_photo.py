@@ -322,3 +322,37 @@ def test_video_keeps_its_existing_local_first_fallback_policy(parallel_context, 
     final = app.get_job(job["job_id"])
     assert final["status"] == "completed" and final["reading_mode"] == "one_requested_photo"
     assert "parallel_review" not in final
+
+
+@pytest.mark.parametrize(
+    "initial,reviewed,reason",
+    [
+        ("1500", "15.0", "decimal_scale_conflict"),
+        ("1.234", "12.34", "decimal_scale_conflict"),
+        ("12.34", "-12.34", "sign_conflict"),
+    ],
+)
+def test_numeric_scale_and_sign_disagreements_keep_initial_and_record_both_answers(
+    parallel_context, monkeypatch, initial, reviewed, reason
+):
+    app, client = parallel_context
+    release = Event()
+    monkeypatch.setattr(app, "predict_panel", lambda *a, **k: local_result(initial + " g"))
+
+    def cloud(*args, **kwargs):
+        assert release.wait(4)
+        result = cloud_result()
+        result["answer"]["readings"][0].update(text=reviewed + " g", value=reviewed)
+        return result
+
+    monkeypatch.setattr(aliyun_vision, "read_panel", cloud)
+    job = enqueue(parallel_context)
+    with running(app, job, release) as future:
+        first = observe(client, job["job_id"], lambda r: r.get("result_available"))
+        release.set()
+        future.result(timeout=4)
+    final = app.get_job(job["job_id"])
+    assert final["readings"][0]["value"] == first["readings"][0]["value"] == initial
+    assert final["parallel_review"]["status"] == "conflict"
+    assert final["parallel_review"]["conflicts"][0]["reason"] == reason
+    assert final["fallback"]["answer"]["readings"][0]["value"] == reviewed

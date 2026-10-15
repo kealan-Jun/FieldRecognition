@@ -13,6 +13,7 @@ from decimal import Decimal
 from field_recognition.recognition.config import RecognitionConfig
 from field_recognition.recognition.panel_regions import finish as finish_regions
 from field_recognition.measurements.reading_results import build_readings
+from field_recognition.measurements.readout_rules import numeric_review_conflict
 from field_recognition.measurements.measurement_records import build_records, display_fields
 
 
@@ -77,6 +78,31 @@ def _merge(document, reviewed, local_ready):
         }
 
     before = values(document)
+    cloud_values = values(reviewed)
+
+    def conflict_for(panel_id):
+        initial_values = [(value, unit) for pid, value, unit in before if pid == panel_id]
+        reviewed_values = [(value, unit) for pid, value, unit in cloud_values if pid == panel_id]
+        if len(initial_values) != 1 or len(reviewed_values) != 1:
+            return None
+        (initial_value, initial_unit), (reviewed_value, reviewed_unit) = (
+            initial_values[0],
+            reviewed_values[0],
+        )
+        if initial_unit and reviewed_unit and initial_unit != reviewed_unit:
+            return None  # Existing field/unit validation handles that conflict.
+        reason = numeric_review_conflict(initial_value, reviewed_value)
+        if reason:
+            conflict = {
+                "panel_id": panel_id,
+                "reason": reason,
+                "initial_value": str(initial_value),
+                "reviewed_value": str(reviewed_value),
+            }
+            document["parallel_review"].setdefault("conflicts", []).append(conflict)
+            return conflict
+        return None
+
     document["fallback"] = copy.deepcopy(fallback)
     cloud_timing = reviewed.get("timing", {}).get("monotonic_durations_ms", {})
     document.setdefault("timing", {}).setdefault("monotonic_durations_ms", {}).update(cloud_timing)
@@ -105,6 +131,9 @@ def _merge(document, reviewed, local_ready):
                 or line.get("label") not in (None, region.get("measurement_name"))
                 for line in cloud_region.get("lines", [])
             ):
+                states.append("conflict")
+            elif conflict := conflict_for(cloud_region["panel_id"]):
+                region["review_conflict"] = conflict
                 states.append("conflict")
             else:
                 region["lines"] = copy.deepcopy(cloud_region.get("lines", []))
@@ -135,7 +164,7 @@ def _merge(document, reviewed, local_ready):
                 if key in reviewed:
                     document[key] = copy.deepcopy(reviewed[key])
     elif fallback.get("status") == "completed":
-        if any(
+        if conflict_for(None) or any(
             line.get("quality_issue") or line.get("quality_issues")
             for line in reviewed.get("lines", [])
         ):

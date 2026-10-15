@@ -1,6 +1,7 @@
 """Provider-independent grammar and supported measurement units."""
 
 import re
+from decimal import Decimal
 
 
 NUMBER = r"[+-]?(?:\d+(?:[.,]\d+)?|[.,]\d+)(?:[eE][+-]?\d+)?"
@@ -10,6 +11,20 @@ READOUT = re.compile(
     re.I,
 )
 UNITS = {"温度": {"°C"}, "转速": {"rpm"}, "质量": {"g", "mg", "kg"}}
+
+
+def numeric_review_conflict(initial, reviewed):
+    """Same-photo sign/decimal-scale disagreements require review, not repair."""
+    first, second = Decimal(initial), Decimal(reviewed)
+    if not first.is_finite() or not second.is_finite() or first == second:
+        return None
+    if first * second < 0:
+        return "sign_conflict"
+    if first and second:
+        power = first.adjusted() - second.adjusted()
+        if 1 <= abs(power) <= 8 and abs(first) == abs(second).scaleb(power):
+            return "decimal_scale_conflict"
+    return None
 
 
 def fallback_reason(lines, local_error=None):
