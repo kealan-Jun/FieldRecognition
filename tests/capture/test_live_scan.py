@@ -58,6 +58,117 @@ def test_live_unregistered_instrument_keeps_scanning(live):
     assert client.delete("/api/camera/scan-sessions/" + sid).json()["status"] == "stopped"
 
 
+@pytest.mark.parametrize("error", [cv2.error, ValueError, RuntimeError])
+def test_frame_decode_error_retains_binding_and_resumes_on_new_frame(live, monkeypatch, error):
+    import field_recognition.capture.live_scan as live_scan
+
+    app, client, camera = live
+    client.put(
+        "/api/instruments/e9434a0a-3319-414a-b988-4cc6884edce4",
+        json={"name": "测试仪器", "scene": "湿实验实验台"},
+    )
+    camera.publish(label(app, "Scene01"))
+    sid = start(client)
+    visit = wait_for(client, sid, lambda r: bool(r.get("scene_visit")))["scene_visit"]
+    camera.publish(label(app, "InstrumentA"))
+    original = wait_for(client, sid, lambda r: bool(r.get("binding")))["binding"]
+    decode = live_scan.decode_qr
+
+    def broken(*args, **kwargs):
+        raise error("bad frame")
+
+    monkeypatch.setattr(live_scan, "decode_qr", broken)
+    camera.publish(np.zeros((300, 400, 3), np.uint8))
+    failed = wait_for(client, sid, lambda r: r.get("consecutive_decode_errors") == 1)
+    assert failed["status"] == "scanning"
+    assert failed["last_error"]["stage"] == "qr_decode"
+    assert failed["last_error"]["error_type"] == error.__name__
+    state = client.get("/api/state").json()
+    assert (
+        next(b for b in state["bindings"] if b["binding_id"] == original["binding_id"])["ended_at"]
+        is None
+    )
+    assert state["scene_visits"][0]["visit_id"] == visit["visit_id"]
+    client.put(
+        "/api/instruments/eae17924-9fa7-4445-ac45-3987f5687be9",
+        json={"name": "第二台仪器", "scene": "湿实验实验台"},
+    )
+    monkeypatch.setattr(live_scan, "decode_qr", decode)
+    camera.publish(label(app, "InstrumentB"))
+    resumed = wait_for(client, sid, lambda r: len(r.get("bindings", [])) == 2)
+    assert resumed["consecutive_decode_errors"] == 0
+    assert original["binding_id"] in {b["binding_id"] for b in resumed["bindings"]}
+    assert resumed["last_error"] == failed["last_error"]
+    assert "扫码失败" not in resumed["message"]
+
+
+def test_persistent_decode_failure_ends_session_at_fixed_deadline(live, monkeypatch):
+    import field_recognition.capture.live_scan as live_scan
+
+    app, client, camera = live
+    client.put(
+        "/api/instruments/e9434a0a-3319-414a-b988-4cc6884edce4",
+        json={"name": "测试仪器", "scene": "湿实验实验台"},
+    )
+    camera.publish(label(app, "InstrumentA"))
+    sid = start(client)
+    original = wait_for(client, sid, lambda r: bool(r.get("binding")))["binding"]
+    decode = live_scan.decode_qr
+
+    def broken(*args, **kwargs):
+        raise cv2.error("bad frame")
+
+    monkeypatch.setattr(live_scan, "decode_qr", broken)
+    camera.publish(np.zeros((300, 400, 3), np.uint8))
+    wait_for(client, sid, lambda r: r.get("consecutive_decode_errors") == 1)
+    # Expire the existing window without replacing a global clock or sleeping 30 seconds.
+    monkeypatch.setattr(live_scan, "QR_DECODE_RECOVERY_SECONDS", 0)
+    camera.publish(np.zeros((300, 400, 3), np.uint8))
+    failed = wait_for(client, sid, lambda r: r["status"] == "failed")
+    assert failed["consecutive_decode_errors"] == 2
+    assert failed["last_error"]["stage"] == "qr_decode"
+    ended = next(
+        b
+        for b in client.get("/api/state").json()["bindings"]
+        if b["binding_id"] == original["binding_id"]
+    )
+    assert ended["end_reason"] == "qr_scanner_error"
+    assert ended["ended_at"]
+    # A subsequent session retains diagnostics but cannot revive the ended binding.
+    monkeypatch.setattr(live_scan, "decode_qr", decode)
+    camera.publish(np.zeros((300, 400, 3), np.uint8))
+    next_sid = start(client)
+    fresh = client.get("/api/camera/scan-sessions/" + next_sid).json()
+    assert fresh["last_error"] == failed["last_error"]
+    assert not fresh["bindings"]
+
+
+def test_non_decode_failure_still_releases_binding_and_records_stage(live, monkeypatch):
+    app, client, camera = live
+    client.put(
+        "/api/instruments/e9434a0a-3319-414a-b988-4cc6884edce4",
+        json={"name": "测试仪器", "scene": "湿实验实验台"},
+    )
+    camera.publish(label(app, "InstrumentA"))
+    sid = start(client)
+    original = wait_for(client, sid, lambda r: bool(r.get("binding")))["binding"]
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("registry unavailable")
+
+    monkeypatch.setattr(app, "qr_matches", broken)
+    camera.publish(label(app, "InstrumentB"))
+    failed = wait_for(client, sid, lambda r: r["status"] == "failed")
+    assert failed["last_error"]["stage"] == "qr_matches"
+    assert failed["last_error"]["error_type"] == "RuntimeError"
+    ended = next(
+        b
+        for b in client.get("/api/state").json()["bindings"]
+        if b["binding_id"] == original["binding_id"]
+    )
+    assert ended["end_reason"] == "qr_scanner_error"
+
+
 def test_multiple_unconfigured_instruments_keep_scanning_without_binding(live):
     app, client, camera = live
     frame = np.full((500, 1000, 3), 255, np.uint8)

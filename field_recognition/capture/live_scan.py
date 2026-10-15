@@ -3,6 +3,7 @@
 import asyncio
 import copy
 import json
+import logging
 import threading
 import time
 import uuid
@@ -18,6 +19,8 @@ from field_recognition.capture.qr_decode import decode_qr
 
 ACTIVE = {"scanning", "waiting_camera"}
 LEASE_SECONDS = 20
+QR_DECODE_RECOVERY_SECONDS = 30
+logger = logging.getLogger(__name__)
 
 
 def frame_key(metadata):
@@ -40,6 +43,7 @@ class LiveScanner:
         self.last_seen = 0
         self.worker = None
         self.shutdown = threading.Event()
+        self.last_error = None
 
     def camera(self):
         camera = self.core["receiver_camera"]
@@ -153,6 +157,8 @@ class LiveScanner:
                 "message": "连续扫码中：对准仪器码即可绑定；场景码可单独识别",
                 "scan": None,
                 "binding": None,
+                "last_error": copy.deepcopy(self.last_error),
+                "consecutive_decode_errors": 0,
             }
             if owner == "automation":
                 self.session["after_frame_id"] = camera.snapshot().get("decoded_frames", 0)
@@ -193,6 +199,7 @@ class LiveScanner:
 
     def _run(self, session_id):
         previous, last_full, last_match = None, time.monotonic(), None
+        decode_failed_since = None
         while not self.shutdown.wait(0.015):
             with self.lock:
                 if not self._running(session_id):
@@ -215,12 +222,38 @@ class LiveScanner:
             from field_recognition.bindings.binding_policy import moment, ZONE
 
             observed_day = moment(self.core["now"]()).astimezone(ZONE).date()
+            stage = "qr_decode"
             try:
                 # Fast native decoding on fresh frames; periodically retry difficult labels.
                 full = acquired - last_full >= 1
-                decoded = decode_qr(frame, fast=not full)
+                try:
+                    decoded = decode_qr(frame, fast=not full)
+                except (cv2.error, ValueError, RuntimeError) as exc:
+                    with self.lock:
+                        if not self._running(session_id):
+                            return
+                        if decode_failed_since is None:
+                            decode_failed_since = acquired
+                            logger.exception("QR frame decode failed for %s", self.camera().target)
+                        self.last_error = {
+                            "stage": stage,
+                            "error_type": type(exc).__name__,
+                            "occurred_at": self.core["now"](),
+                            "frame": dict(zip(("decoded_frame_id", "sequence"), token[:2])),
+                        }
+                        self.session.update(
+                            last_error=copy.deepcopy(self.last_error),
+                            consecutive_decode_errors=self.session["consecutive_decode_errors"] + 1,
+                            message="当前画面扫码失败，正在重试；已有绑定保留",
+                        )
+                    if acquired - decode_failed_since < QR_DECODE_RECOVERY_SECONDS:
+                        self.shutdown.wait(0.2)
+                        continue
+                    raise
+                decode_failed_since = None
                 if full:
                     last_full = acquired
+                stage = "qr_matches"
                 matches = self.core["qr_matches"](*decoded[:2])
                 with self.lock:
                     if not self._running(session_id):
@@ -239,6 +272,9 @@ class LiveScanner:
                         last_frame_metadata=metadata,
                         decode_ms=decoded[2]["elapsed_ms"],
                     )
+                    if self.session["consecutive_decode_errors"]:
+                        self.session["consecutive_decode_errors"] = 0
+                        self.refresh_bindings()
                     if self.session["message"] == "等待相机新画面，恢复连接后继续扫码":
                         self.session["message"] = "连续扫码中：对准仪器码即可绑定；场景码可单独识别"
                     # Slow decoding must not commit an old frame as a new observation.
@@ -267,16 +303,26 @@ class LiveScanner:
                     if key == last_match:
                         continue
                     last_match = key
+                    stage = "accept_scan"
                     self._accept(frame, metadata, decoded, matches)
             except Exception as exc:
+                logger.exception(
+                    "Continuous QR scan failed at %s for %s", stage, self.camera().target
+                )
                 with self.lock:
                     if self._running(session_id):
+                        self.last_error = {
+                            "stage": stage,
+                            "error_type": type(exc).__name__,
+                            "occurred_at": self.core["now"](),
+                        }
                         self.observe_service(
                             {"online": False, "failure_reason": "qr_scanner_error"}
                         )
                         self.session.update(
                             status="failed",
                             message=f"连续扫码失败（{type(exc).__name__}），请重新开始",
+                            last_error=copy.deepcopy(self.last_error),
                         )
                 return
 
