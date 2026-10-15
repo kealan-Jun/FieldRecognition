@@ -82,6 +82,8 @@ class OCRWorker:
         self.core["stopping"].set()
         self.core["ocr_pool"].shutdown(wait=True, cancel_futures=True)
         self.core["readout_pool"].shutdown(wait=True, cancel_futures=True)
+        if self.core.get("vision_pool") is not None:
+            self.core["vision_pool"].shutdown(wait=True, cancel_futures=True)
         model = self.core.get("ocr_model")
         close_model = getattr(model, "close", None) if model is not None else None
         if callable(close_model):

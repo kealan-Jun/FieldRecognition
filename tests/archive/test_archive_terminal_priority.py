@@ -108,6 +108,24 @@ def test_terminal_arriving_inside_batch_preempts_next_selection(scheduler):
         ).fetchone()[0]
 
 
+def test_initial_reading_is_prioritized_while_review_still_runs(scheduler):
+    store, _, add, published, _, _, _ = scheduler
+    history = [add("automation_settings", "old", {"version": i}) for i in range(8)]
+    initial = add(
+        "jobs",
+        "initial",
+        {
+            "job_id": "initial",
+            "status": "running",
+            "reading_mode": "parallel_photo",
+            "result_available": True,
+            "result_stage": "preliminary",
+        },
+    )
+    store.step(batch_size=1)
+    assert published == [initial] and initial not in history
+
+
 def test_three_priority_selections_then_oldest_history_across_batches(scheduler):
     store, db, add, published, _, _, on_publish = scheduler
     history = [add("automation_settings", f"old-{i}", {"version": i}) for i in range(4)]

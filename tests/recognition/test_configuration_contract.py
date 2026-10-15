@@ -18,6 +18,13 @@ from field_recognition.recognition.pipeline_context import ReadoutPipeline
 from field_recognition.runtime.production_config import ProductionConfig
 
 
+def test_parallel_photo_mode_is_preserved_in_the_immutable_public_config(monkeypatch):
+    config = RecognitionConfig.from_environment({"FIELD_VISION_PHOTO_MODE": "parallel"})
+    monkeypatch.setenv("FIELD_VISION_PHOTO_MODE", "primary")
+    assert aliyun_vision.public_config(config)["photo_mode"] == "parallel"
+    assert not aliyun_vision.primary_photos(config)
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [("0", False), (" false ", False), ("NO", False), ("1", True), ("true", True), ("yes", True)],

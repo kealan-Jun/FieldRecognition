@@ -85,7 +85,17 @@
         : String(v.value) + (v.unit ? " " + v.unit : "")
       : line.text || "";
   }
+  function reviewLabel(job) {
+    if (job.reading_mode !== "parallel_photo") return "";
+    const review = job.parallel_review || {};
+    if (["queued", "running"].includes(review.status)) return "本地初读 · 云端复核中";
+    if (review.status === "failed") return "本地初读 · 云端复核未完成";
+    if (review.status === "conflict") return "复核存在冲突 · 待核对";
+    if (review.status === "unreadable") return "云端未读清 · 待核对";
+    return review.result === "consistent" ? "模型复核一致 · 未经人工核实" : "模型复核完成 · 未经人工核实";
+  }
   const api = {
+    reviewLabel,
     lineText,
     capturedAt,
     selectLatest,

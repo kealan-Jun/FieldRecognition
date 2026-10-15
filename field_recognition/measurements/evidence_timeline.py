@@ -165,7 +165,7 @@ def timeline(
             zip(members, clocks), key=lambda p: (p[1]["captured_at"] or "", p[0]["job_id"])
         ):
             summary = acquisition(doc, group)
-            measurements = build_records(doc) if doc.get("status") == "completed" else []
+            measurements = build_records(doc)
             instruments = {
                 (r.get("instrument") or {}).get("id"): (r.get("instrument") or {})
                 for r in doc.get("panel_regions", [])
@@ -185,6 +185,8 @@ def timeline(
                     "job_id": doc["job_id"],
                     "capture_id": doc.get("capture_id"),
                     "status": doc.get("status"),
+                    "result_stage": doc.get("result_stage"),
+                    "parallel_review": doc.get("parallel_review"),
                     "record_scope": doc.get("record_scope"),
                     "acquisition": summary,
                     "operator": doc.get("operator"),

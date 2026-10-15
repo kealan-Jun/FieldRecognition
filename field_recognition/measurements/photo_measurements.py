@@ -86,6 +86,8 @@ def versions():
             for name in (
                 "photo_measurements.py",
                 "panel_regions.py",
+                "field_recognition/recognition/panel_readout.py",
+                "field_recognition/recognition/parallel_photo.py",
                 "digit_regions.py",
                 "field_recognition/recognition/red_geometry.py",
                 "led_digits.py",
@@ -600,6 +602,8 @@ def refresh(core, conn, mid):
                 "job_id": jid,
                 "capture_id": job["capture_id"],
                 "status": row["status"],
+                "result_stage": job.get("result_stage"),
+                "parallel_review": job.get("parallel_review"),
                 "captured_at": (job.get("external_photo") or {}).get("captured_at"),
                 "external_photo": job.get("external_photo"),
                 "operator": job.get("operator"),

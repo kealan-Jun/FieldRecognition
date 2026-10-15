@@ -606,7 +606,10 @@ class ArchiveStore:
                 """SELECT * FROM archive_outbox AS candidate
                 WHERE (archived_at IS NULL OR readable_at IS NULL) AND retry_after<=?
                   AND entity IN ('jobs','photo_measurements','experiment_records')
-                  AND json_extract(document,'$.status') IN ('completed','failed','cancelled','interrupted','confirmed')
+                  AND (json_extract(document,'$.status') IN ('completed','failed','cancelled','interrupted','confirmed')
+                    OR (entity='jobs' AND json_extract(document,'$.status')='running'
+                      AND json_extract(document,'$.reading_mode')='parallel_photo'
+                      AND json_extract(document,'$.result_available')=1))
                   AND NOT EXISTS (SELECT 1 FROM archive_outbox AS newer
                     WHERE newer.entity=candidate.entity AND newer.entity_id=candidate.entity_id AND newer.seq>candidate.seq)
                 ORDER BY seq""",
@@ -617,7 +620,10 @@ class ArchiveStore:
                     root["entity"] == "jobs"
                     and not processing_outcome(json.loads(root["document"]))["terminal"]
                 ):
-                    continue
+                    from field_recognition.measurements.reading_results import result_ready
+
+                    if not result_ready(json.loads(root["document"])):
+                        continue
                 dependencies = self.event_dependencies(conn, root)
                 if dependencies is None:
                     continue

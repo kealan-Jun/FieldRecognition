@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import uuid
+from field_recognition.measurements.reading_results import result_ready
 
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -74,7 +75,7 @@ def preferred_jobs(documents):
         groups.setdefault(doc.get("recognition_root_job_id", doc["job_id"]), []).append(doc)
     result = []
     for group in groups.values():
-        finished = [j for j in group if j.get("status") == "completed"]
+        finished = [j for j in group if result_ready(j)]
         result.append(max(finished or group, key=lambda j: j.get("recognition_revision", 1)))
     return result
 

@@ -48,6 +48,16 @@ def readout_event(conn, row, *, related_only=False):
     }.get(status, status)
     if status == "completed":
         label = "自动识别完成" if lines else "未读出完整数字"
+    if doc.get("reading_mode") == "parallel_photo":
+        label = {
+            "running": "本地初读 · 云端复核中"
+            if doc.get("result_available")
+            else "本地与云端正在识别",
+            "completed": "模型复核完成 · 未经人工核实",
+            "failed": "本地初读 · 云端复核未完成",
+            "conflict": "复核存在冲突 · 待核对",
+            "unreadable": "云端未读清 · 待核对",
+        }.get((doc.get("parallel_review") or {}).get("status"), label)
     notes = []
     if doc.get("panel_selection") == "user_selected_crop_or_full_photo" and not doc.get(
         "panel_detection"
@@ -82,6 +92,11 @@ def readout_event(conn, row, *, related_only=False):
         "raw_status": status,
         "display_fields": fields,
         "recognition_revision": doc.get("recognition_revision", 1),
+        "reading_mode": doc.get("reading_mode"),
+        "result_available": doc.get("result_available"),
+        "result_stage": doc.get("result_stage"),
+        "result_revision": doc.get("result_revision"),
+        "parallel_review": doc.get("parallel_review"),
         "occurred_at": doc.get("finished_at") or doc["submitted_at"],
         "submitted_at": doc["submitted_at"],
         "captured_at": (doc.get("external_photo") or {}).get("captured_at"),

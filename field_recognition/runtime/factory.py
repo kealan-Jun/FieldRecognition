@@ -179,6 +179,7 @@ def create_runtime(
     runtime.update(
         ocr_pool=ThreadPoolExecutor(max_workers=1, thread_name_prefix="panel-ocr"),
         readout_pool=ThreadPoolExecutor(max_workers=4, thread_name_prefix="panel-request"),
+        vision_pool=ThreadPoolExecutor(max_workers=4, thread_name_prefix="panel-review"),
         vision_call_lock=threading.Lock(),
         ocr_submit_lock=threading.RLock(),
         stopping=threading.Event(),

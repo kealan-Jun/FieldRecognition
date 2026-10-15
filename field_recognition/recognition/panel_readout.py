@@ -103,7 +103,7 @@ def primary_unbound_photo(core, document, panel, *, valid, clock, pause, started
         vision_display_rules=rules,
         fallback={"status": "waiting", "trigger": "primary_photo"},
     )
-    save(core, document)
+    pipeline.save_document(document)
     slot_started = clock()
     acquired = acquire_primary_slot(core, valid, clock=clock, pause=pause)
     record_duration(document, "vision_queue_wait_ms", slot_started, clock())
@@ -118,7 +118,7 @@ def primary_unbound_photo(core, document, panel, *, valid, clock, pause, started
             attempted_at=core["now"](),
             trigger_elapsed_seconds=round(clock() - started, 3),
         )
-        save(core, document)
+        pipeline.save_document(document)
         vision_started = clock()
         cloud = pipeline.read_panel(panel, display_rules=rules)
         record_duration(document, "vision_ms", vision_started, clock())
@@ -233,6 +233,50 @@ def recover_primary_photo(core, document, panel, *, valid, clock, pause, started
     return False
 
 
+def submit_local(core, document, panel, x, y, *, clock=time.monotonic, detection=None):
+    precomputed = document.pop("precomputed_local", None)
+    if precomputed is not None:
+        future = Future()
+        future.set_result(precomputed)
+    else:
+        predictor = (
+            partial(
+                core["predict_readout"],
+                binding_snapshots=document.get(
+                    "all_binding_snapshots", document.get("binding_snapshots", [])
+                ),
+                field_rules=document.get("field_rules"),
+                **({"detection": detection} if detection is not None else {}),
+            )
+            if "predict_readout" in core
+            else core["predict_panel"]
+        )
+        scheduled = clock()
+        scheduled_at = core["now"]()
+
+        def predict_request(pixels, offset_x, offset_y):
+            from field_recognition.recognition.remote_ocr import inference_request
+
+            execution_started = clock()
+            execution_started_at = core["now"]()
+            with inference_request(document["job_id"]):
+                result = dict(predictor(pixels, offset_x, offset_y))
+            result.update(
+                ocr_scheduled_at=scheduled_at,
+                ocr_execution_started_at=execution_started_at,
+                ocr_execution_finished_at=core["now"](),
+                ocr_scheduler_wait_ms=round((execution_started - scheduled) * 1000, 3),
+                ocr_execution_ms=round((clock() - execution_started) * 1000, 3),
+                ocr_execution_scope="predict_readout_with_prepared_localization"
+                if detection is not None
+                else "predict_readout_including_detection_preprocessing_and_model_wait",
+            )
+            return result
+
+        future = core["ocr_pool"].submit(predict_request, panel, x, y)
+    return future
+
+
 def run(core, document, *, clock=time.monotonic, pause=time.sleep):
     pipeline = pipeline_context(core)
     started = clock()
@@ -274,6 +318,27 @@ def run(core, document, *, clock=time.monotonic, pause=time.sleep):
             panel_selection="user_selected_crop_or_full_photo",
         )
         configured = pipeline.public_config()["available"]
+        if (
+            configured
+            and pipeline.public_config()["photo_mode"] == "parallel"
+            and document.get("request_trigger") != "video_stream"
+        ):
+            from field_recognition.recognition.parallel_photo import run as run_parallel
+
+            future = run_parallel(
+                core,
+                document,
+                image,
+                panel,
+                x,
+                y,
+                pipeline=pipeline,
+                valid=valid,
+                clock=clock,
+                pause=pause,
+                started=started,
+            )
+            return
         snapshots = document.get("all_binding_snapshots", document.get("binding_snapshots", []))
         primary_attempted = bool(
             configured
@@ -301,43 +366,7 @@ def run(core, document, *, clock=time.monotonic, pause=time.sleep):
             # One cloud request per attempt. Its failure receipt survives the local fallback.
             configured = False
             document.update(phase="local_ocr_after_vision_failure")
-        precomputed = document.pop("precomputed_local", None)
-        if precomputed is not None:
-            future = Future()
-            future.set_result(precomputed)
-        else:
-            predictor = (
-                partial(
-                    core["predict_readout"],
-                    binding_snapshots=document.get(
-                        "all_binding_snapshots", document.get("binding_snapshots", [])
-                    ),
-                    field_rules=document.get("field_rules"),
-                )
-                if "predict_readout" in core
-                else core["predict_panel"]
-            )
-            scheduled = clock()
-            scheduled_at = core["now"]()
-
-            def predict_request(pixels, offset_x, offset_y):
-                from field_recognition.recognition.remote_ocr import inference_request
-
-                execution_started = clock()
-                execution_started_at = core["now"]()
-                with inference_request(document["job_id"]):
-                    result = dict(predictor(pixels, offset_x, offset_y))
-                result.update(
-                    ocr_scheduled_at=scheduled_at,
-                    ocr_execution_started_at=execution_started_at,
-                    ocr_execution_finished_at=core["now"](),
-                    ocr_scheduler_wait_ms=round((execution_started - scheduled) * 1000, 3),
-                    ocr_execution_ms=round((clock() - execution_started) * 1000, 3),
-                    ocr_execution_scope="predict_readout_including_detection_preprocessing_and_model_wait",
-                )
-                return result
-
-            future = core["ocr_pool"].submit(predict_request, panel, x, y)
+        future = submit_local(core, document, panel, x, y, clock=clock)
         video_elapsed = (document.get("video_observation") or {}).get(
             "no_digits_elapsed_seconds", 0
         )

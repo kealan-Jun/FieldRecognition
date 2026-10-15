@@ -18,7 +18,9 @@ from field_recognition.runtime.production_config import ProductionConfig
 
 def assert_disposed(runtime):
     assert runtime["stopping"].is_set()
-    for name in ("ocr_pool", "readout_pool"):
+    for name in ("ocr_pool", "readout_pool", "vision_pool"):
+        if name not in runtime:
+            continue
         with pytest.raises(RuntimeError, match="shutdown"):
             runtime[name].submit(lambda: None)
 

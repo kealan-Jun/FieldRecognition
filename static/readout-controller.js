@@ -80,7 +80,7 @@
 
     pageContext.renderOcr = function renderOcr(job) {
       const target = pageContext.$("#ocrResults");
-      if (job.record_scope === "draft") {
+      if (job.record_scope === "draft" && !job.result_available) {
         target.innerHTML =
           pageContext.readoutPhoto(job) +
           pageContext.readoutCaption(job) +
@@ -88,12 +88,14 @@
           pageContext.reprocessControl(job);
         return;
       }
-      if (["queued", "running"].includes(job.status)) {
+      if (["queued", "running"].includes(job.status) && !job.result_available) {
         const phase =
           {
             local_ocr: "正在识别面板",
             waiting_readout: "暂未读到数字，继续等待识别结果",
             extended_reading: "正在进一步识别面板",
+            parallel_reading: "本地与云端正在同时识别",
+            review_pending: "本地暂未读清，云端继续识别",
           }[job.phase] || "任务已入队";
         target.innerHTML =
           pageContext.readoutPhoto(job) +
@@ -101,7 +103,7 @@
           `<p>◌ ${phase}…</p>`;
         return;
       }
-      if (job.status !== "completed") {
+      if (job.status !== "completed" && !(job.status === "running" && job.result_available)) {
         target.innerHTML =
           pageContext.readoutPhoto(job) +
           pageContext.readoutCaption(job) +
@@ -124,6 +126,7 @@
       target.innerHTML =
         pageContext.readoutPhoto(job) +
         pageContext.readoutCaption(job) +
+        (job.reading_mode === "parallel_photo" ? `<p class="caption">${pageContext.esc(pageContext.ReadoutView.reviewLabel(job))}</p>` : "") +
         pageContext.readoutLatency(job) +
         fields
           .map(
@@ -131,9 +134,12 @@
               `<div class="ocr-line"><small>${pageContext.esc(f.instrument_name || "")} ${pageContext.esc(f.name)}</small><strong>${pageContext.esc(fieldText(f))}</strong>${f.panel_image_url ? `<a href="${pageContext.esc(f.panel_image_url)}" target="_blank" rel="noopener">本面板照片 ↗</a>` : ""}${f.issues?.length ? "<small>数值与登记规则冲突，需校正。</small>" : ""}${f.raw_text ? `<small>识别原文：${pageContext.esc(f.raw_text)}</small>` : ""}</div>`,
           )
           .join("") +
-        (!fields.length
+        (!fields.length && job.reading_mode === "parallel_photo" && job.readings?.length
+          ? job.readings.map((reading) => `<div class="ocr-line"><strong>${pageContext.esc(pageContext.ReadoutView.lineText(reading))}</strong><small>未归属候选 · 待核实</small></div>`).join("")
+          : !fields.length
           ? "<p>这张照片未取得可归属的规范读数。原图与识别原文已留在任务回执。</p>"
           : "") +
+        (job.record_scope === "draft" ? '<p><a href="/photo-measurements">查看草稿与校正 ↗</a></p>' : "") +
         pageContext.readoutIssue(job) +
         `<p><a href="${pageContext.esc(job.crop_image_url || job.image_url)}" target="_blank" rel="noopener">查看面板照片 ↗</a> · <a href="/api/jobs/${pageContext.esc(job.job_id)}" target="_blank" rel="noopener">结果 JSON ↗</a></p>` +
         pageContext.reprocessControl(job);

@@ -40,6 +40,8 @@ def update_timing(document, *, preserve_recorded_durations=False):
         ("result_generated_at", "result_generated_at"),
         ("archive_published_at", "archive_published_at"),
         ("archive_readable_at", "archive_readable_at"),
+        ("first_result_at", "first_result_at"),
+        ("result_updated_at", "result_updated_at"),
     ]:
         if document.get(source):
             timing[target] = document[source]
@@ -97,6 +99,8 @@ def update_timing(document, *, preserve_recorded_durations=False):
         "archive_readability_ms": ("archive_published_at", "archive_readable_at"),
         "detect_to_result_ms": ("first_observed_at", "result_finished_at"),
         "frame_to_result_ms": ("frame_observed_at", "result_finished_at"),
+        "write_to_first_result_ms": ("source_written_at", "first_result_at"),
+        "run_to_first_result_ms": ("run_started_at", "first_result_at"),
     }
     recorded = (timing.get("durations_ms") or {}) if preserve_recorded_durations else {}
     timing["durations_ms"] = {
@@ -157,7 +161,8 @@ def update_timing(document, *, preserve_recorded_durations=False):
         "vision_ms": "provider_calls; excludes_provider_slot_wait_when_monotonic",
         "ocr_wait_ms": "run_start_to_reported_ocr_start_including_scheduler_and_detection",
         "ocr_scheduler_wait_ms": "single_worker_executor_submission_to_execution_start",
-        "ocr_execution_ms": "predict_readout_including_detection_preprocessing_and_model_wait",
+        "ocr_execution_ms": local.get("ocr_execution_scope")
+        or "predict_readout_including_detection_preprocessing_and_model_wait",
         "ocr_model_lock_wait_ms": "sum_of_model_adapter_lock_waits",
         "ocr_model_prepare_ms": "sum_of_model_preparation_including_load_or_remote_health_checks",
         "ocr_model_call_ms": "sum_of_model_adapter_calls_excluding_local_lock_and_preparation",

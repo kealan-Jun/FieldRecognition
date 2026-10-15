@@ -50,6 +50,8 @@ def test_new_fingerprints_use_actual_implementation_and_keep_old_receipt_keys():
     for actual in (
         "field_recognition/measurements/readout_rules.py",
         "field_recognition/recognition/config.py",
+        "field_recognition/recognition/panel_readout.py",
+        "field_recognition/recognition/parallel_photo.py",
         "field_recognition/recognition/red_geometry.py",
         "field_recognition/recognition/pipeline_context.py",
         "field_recognition/measurements/measurement_actions.py",

@@ -84,7 +84,7 @@ def install_tools(app, core):
         "get_panel_result": (
             JobId,
             lambda a: core["get_job"](a.job_id),
-            "查询识别任务。completed 时统一读取 lines；confidence、polygon 可能为 null，不能补造。queued/running 时稍后查询原 job_id；failed/interrupted/cancelled 时报告未完成，不重新提交、不编造读数。后台 local_ocr/fallback 保留审计来源，用户读数无需另作云端标注。",
+            "查询识别任务。completed 时读取 lines。并行照片模式的 running 且 result_available=true 时可先展示初读，标记复核中，并继续查询同一 job_id；result_revision 推进后原位更新同条读数，不追加第二条识别记录。confidence、polygon 可能为 null，不能补造。queued/running 时稍后查询原 job_id；failed/interrupted/cancelled 时报告未完成，不重新提交、不编造读数。后台 local_ocr/fallback 保留审计来源；parallel_review 表示模型复核状态，不等于人工确认。",
         ),
         "end_instrument_binding": (
             BindingId,

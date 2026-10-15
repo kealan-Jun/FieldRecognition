@@ -183,7 +183,9 @@ def public_config(config=None):
         "configured": configured,
         "endpoint_valid": endpoint_valid,
         "available": enabled and configured and endpoint_valid and bool(model),
-        "photo_mode": "primary" if primary_photos(config) else "fallback",
+        "photo_mode": config.photo_mode
+        if config.photo_mode in {"primary", "parallel"}
+        else "fallback",
         "enable_thinking": config.enable_thinking if selected == "aliyun" else None,
         "sends": "panel_crop_or_current_camera_frame",
         "no_digits_seconds": config.no_digits_seconds,

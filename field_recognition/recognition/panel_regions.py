@@ -69,8 +69,20 @@ def _orient_pair_roles(regions):
     return evidence
 
 
-def predict(core, image, x=0, y=0, *, video=False, allowed_instrument_ids=()):
+def predict(
+    core,
+    image,
+    x=0,
+    y=0,
+    *,
+    video=False,
+    allowed_instrument_ids=(),
+    localization_only=False,
+    detection=None,
+):
     detector = core["panel_detector"]
+    if localization_only and (not detector.enabled() or not allowed_instrument_ids):
+        return {"status": "completed", "lines": [], "panel_regions": []}
     if not detector.enabled():
         return core["predict_panel"](image, x, y)
     started = core["now"]()
@@ -87,44 +99,53 @@ def predict(core, image, x=0, y=0, *, video=False, allowed_instrument_ids=()):
             instrument_identity_basis="unconfirmed",
         )
         return result
+    prepared_detection = detection is not None
     detection = (
-        detector.predict(image, photo=True)
-        if allowed and not video
-        else detector.predict(image)
-        if allowed
-        else {"status": "waiting_binding", "boxes": [], "model": "YOLO11n"}
+        copy.deepcopy(detection)
+        if prepared_detection
+        else (
+            detector.predict(image, photo=True)
+            if allowed and not video
+            else detector.predict(image)
+            if allowed
+            else {"status": "waiting_binding", "boxes": [], "model": "YOLO11n"}
+        )
     )
     from field_recognition.recognition.panel_layout import resolve_type_boxes, roles_for_boxes
 
-    detection["boxes"] = resolve_type_boxes(
-        detection["boxes"], allowed, core.get("get_instrument", lambda _: {})
-    )
-    detection.update(started_at=started, finished_at=core["now"]())
-    detection["allowed_instrument_ids"] = sorted(allowed)
-    detection["skipped_unbound_panels"] = [
-        b for b in detection["boxes"] if b["instrument_id"] not in allowed
-    ]
+    if not prepared_detection:
+        detection["boxes"] = resolve_type_boxes(
+            detection["boxes"], allowed, core.get("get_instrument", lambda _: {})
+        )
+        detection.update(started_at=started, finished_at=core["now"]())
+        detection["allowed_instrument_ids"] = sorted(allowed)
+        detection["skipped_unbound_panels"] = [
+            b for b in detection["boxes"] if b["instrument_id"] not in allowed
+        ]
+        diagnostics = detection.setdefault("diagnostics", {})
+        invoked = detection["status"] not in {"waiting_binding", "failed"}
+        diagnostics.setdefault("raw_candidate_count", len(detection["boxes"]) if invoked else None)
+        diagnostics.setdefault(
+            "raw_count_basis",
+            "detector_returned_boxes"
+            if invoked
+            else "detector_not_run"
+            if not allowed
+            else "detector_failed",
+        )
+        diagnostics.setdefault(
+            "quality_filtered_count", len(detection["boxes"]) if invoked else None
+        )
+        exclusions = diagnostics.setdefault("excluded_candidates", [])
+        exclusions.extend(
+            dict(b, reason=b.get("association_issue") or "target_not_allowed")
+            for b in detection["skipped_unbound_panels"]
+        )
+        diagnostics["binding_matched_count"] = len(detection["boxes"]) - len(
+            detection["skipped_unbound_panels"]
+        )
+        detection["duration_ms"] = round((time.monotonic() - begin) * 1000, 3)
     diagnostics = detection.setdefault("diagnostics", {})
-    invoked = detection["status"] not in {"waiting_binding", "failed"}
-    diagnostics.setdefault("raw_candidate_count", len(detection["boxes"]) if invoked else None)
-    diagnostics.setdefault(
-        "raw_count_basis",
-        "detector_returned_boxes"
-        if invoked
-        else "detector_not_run"
-        if not allowed
-        else "detector_failed",
-    )
-    diagnostics.setdefault("quality_filtered_count", len(detection["boxes"]) if invoked else None)
-    exclusions = diagnostics.setdefault("excluded_candidates", [])
-    exclusions.extend(
-        dict(b, reason=b.get("association_issue") or "target_not_allowed")
-        for b in detection["skipped_unbound_panels"]
-    )
-    diagnostics["binding_matched_count"] = len(detection["boxes"]) - len(
-        detection["skipped_unbound_panels"]
-    )
-    detection["duration_ms"] = round((time.monotonic() - begin) * 1000, 3)
     ocr_started = time.monotonic()
     model_calls = []
 
@@ -168,9 +189,11 @@ def predict(core, image, x=0, y=0, *, video=False, allowed_instrument_ids=()):
                 "ocr_model_call_count": 0,
             }
             if crop_issue
+            else {"status": "running", "lines": [], "actual_model_invocation": False}
+            if localization_only
             else predict_panel(panel, x + cx, y + cy)
         )
-        if not crop_issue and box["class_id"] == 1 and not video:
+        if not localization_only and not crop_issue and box["class_id"] == 1 and not video:
             from field_recognition.recognition.lcd_digits import refine_lcd
 
             instrument = core.get("get_instrument", lambda _: {})(box["instrument_id"]) or {}
@@ -184,7 +207,7 @@ def predict(core, image, x=0, y=0, *, video=False, allowed_instrument_ids=()):
                 source_offset=(x, y),
                 instrument=instrument,
             )
-        elif not crop_issue:
+        elif not localization_only and not crop_issue:
             # A syntactically numeric OCR token (e.g. "5G") can still violate
             # the registered field rule. Retry its source pixels, not a guessed
             # character substitution, while preserving the untouched receipt.
@@ -215,7 +238,7 @@ def predict(core, image, x=0, y=0, *, video=False, allowed_instrument_ids=()):
                 ),
                 require_native_conflict_confirmation=box["class_id"] == 0 and not video,
             )
-        if not crop_issue and box["class_id"] == 0:
+        if not localization_only and not crop_issue and box["class_id"] == 0:
             from field_recognition.recognition.led_digits import verify_digits
 
             local = verify_digits(panel, local, x + cx, y + cy)
@@ -264,7 +287,7 @@ def predict(core, image, x=0, y=0, *, video=False, allowed_instrument_ids=()):
             "display_state": local.get("display_state"),
         }
         regions.append(region)
-    if not video:
+    if not video and not localization_only:
         orientations = _orient_pair_roles(regions)
         if orientations:
             diagnostics["source_orientations"] = orientations

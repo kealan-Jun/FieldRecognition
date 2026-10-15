@@ -534,6 +534,9 @@ def photo_candidates(jobs, sources, *, unbound_only=True):
                     "capture_id": job.get("capture_id"),
                     "recognition_root_job_id": job.get("recognition_root_job_id", job["job_id"]),
                     "recognition_revision": job.get("recognition_revision", 1),
+                    "result_stage": job.get("result_stage"),
+                    "result_revision": job.get("result_revision"),
+                    "parallel_review": job.get("parallel_review"),
                     "captured_at": captured_at,
                     "capture_time_basis": basis,
                     "observed_at": (job.get("video_observation") or {}).get("observed_at"),
@@ -599,6 +602,17 @@ def photo_readme(
             + " 单值复核结果</a>"
         )
     body += "</p>"
+    for job in jobs:
+        if job.get("reading_mode") == "parallel_photo":
+            review_status = (job.get("parallel_review") or {}).get("status")
+            label = {
+                "running": "本地初读 · 云端复核中",
+                "failed": "本地初读 · 云端复核未完成",
+                "conflict": "复核存在冲突 · 待核对",
+                "unreadable": "云端未读清 · 待核对",
+                "completed": "模型复核完成 · 未经人工核实",
+            }.get(review_status, "本地与云端正在识别")
+            body += "<p>" + esc(job.get("job_id")) + "：" + esc(label) + "</p>"
     if missing_assets:
         body += (
             f"<p><strong>历史图片证据缺失 {len(missing_assets)} 项，"
@@ -681,7 +695,12 @@ def photo_readme(
 
 
 def make_views(
-    bundles, paths, receipts, *, preserve_asset_locations=False, placed_assets=None,
+    bundles,
+    paths,
+    receipts,
+    *,
+    preserve_asset_locations=False,
+    placed_assets=None,
     known_missing_assets=frozenset(),
 ):
     views, days = {}, {}
@@ -742,10 +761,7 @@ def make_views(
         for digest, (_, item) in bundle["artifacts"].items():
             if digest not in placed:
                 stored = paths.data["assets"].get(digest, item)
-                if (
-                    item["path"] in known_missing_assets
-                    and not paths._resolve(stored["path"])[2]
-                ):
+                if item["path"] in known_missing_assets and not paths._resolve(stored["path"])[2]:
                     # Rebuild navigation around a previously audited loss. Do
                     # not manufacture bytes, move aliases or claim restoration.
                     placed[digest] = item | {
@@ -819,6 +835,13 @@ def make_views(
                         "job_id",
                         "capture_id",
                         "status",
+                        "reading_mode",
+                        "result_available",
+                        "result_stage",
+                        "result_revision",
+                        "result_updated_at",
+                        "first_result_at",
+                        "parallel_review",
                         "lines",
                         "readings",
                         "operator",
@@ -1033,6 +1056,9 @@ def make_views(
                                 "display_value",
                                 "unit",
                                 "quality_issues",
+                                "result_stage",
+                                "result_revision",
+                                "parallel_review",
                             )
                         }
                         for r in readings
@@ -1207,10 +1233,15 @@ def make_views(
                         for m in content.get("measurement_files", [])
                     ],
                     "photo": next(
-                        (v["path"] for v in photos.values()
-                         if "original" in v["kind"] and v.get("available") is not False),
-                        next((v["path"] for v in photos.values()
-                              if v.get("available") is not False), None),
+                        (
+                            v["path"]
+                            for v in photos.values()
+                            if "original" in v["kind"] and v.get("available") is not False
+                        ),
+                        next(
+                            (v["path"] for v in photos.values() if v.get("available") is not False),
+                            None,
+                        ),
                     ),
                 }
             )

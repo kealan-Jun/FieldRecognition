@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from field_recognition.measurements.readout_rules import UNITS
+from field_recognition.measurements.reading_results import result_ready
 
 
 SCHEMA_VERSION = "instrument-measurement/1"
@@ -366,12 +367,12 @@ def build_records(document):
         for name in names:
             matches = [r for r in candidates if r.get("measurement_name") == name]
             reading, conflict = select_field_reading(matches, name, instrument)
-            if document.get("status") != "completed":
+            if not result_ready(document):
                 reading = {}
             value, unit_bases[name] = measurement_value(name, reading, instrument)
             displays = [r for r in regions if r.get("measurement_name") == name]
             if (
-                document.get("status") == "completed"
+                result_ready(document)
                 and len(displays) == 1
                 and (displays[0].get("display_state") or {}).get("text") == "OFF"
             ):

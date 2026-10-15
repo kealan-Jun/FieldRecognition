@@ -200,7 +200,16 @@ def current_panel_bindings(_runtime, camera_id):
 
 
 def predict_readout(
-    _runtime, panel, x=0, y=0, *, video=False, binding_snapshots=None, field_rules=None
+    _runtime,
+    panel,
+    x=0,
+    y=0,
+    *,
+    video=False,
+    binding_snapshots=None,
+    field_rules=None,
+    localization_only=False,
+    detection=None,
 ):
     from field_recognition.recognition.panel_regions import predict
 
@@ -226,6 +235,8 @@ def predict_readout(
             x,
             y,
             video=video,
+            localization_only=localization_only,
+            detection=detection,
             allowed_instrument_ids={
                 b["instrument"]["id"]
                 for b in binding_snapshots

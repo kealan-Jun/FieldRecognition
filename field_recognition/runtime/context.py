@@ -111,7 +111,7 @@ class RuntimeContext(MutableMapping[str, Any]):
             component = self.get(name)
             if component is not None:
                 dispose(component.close)
-        for name in ("ocr_pool", "readout_pool"):
+        for name in ("readout_pool", "vision_pool", "ocr_pool"):
             pool = self.get(name)
             if pool is not None:
                 dispose(partial(pool.shutdown, wait=wait, cancel_futures=True))

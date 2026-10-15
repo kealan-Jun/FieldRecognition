@@ -4,6 +4,15 @@ import re
 from field_recognition.measurements.readout_rules import READOUT, NUMBER
 
 
+def result_ready(document):
+    """A durable preliminary projection is readable while its review owns the lease."""
+    return document.get("status") == "completed" or (
+        document.get("status") == "running"
+        and document.get("reading_mode") == "parallel_photo"
+        and document.get("result_available") is True
+    )
+
+
 def build_readings(document):
     from field_recognition.measurements.measurement_records import binding_for_region
 
@@ -19,6 +28,7 @@ def build_readings(document):
         else []
     )
     result = []
+    region_ordinals = {}
     regions = {r["panel_id"]: r for r in document.get("panel_regions", [])}
     for line in document.get("lines", []):
         text = line.get("text", "")
@@ -64,9 +74,16 @@ def build_readings(document):
             if vision_line
             else line.get("unit") or (text[match.end() :].strip() if match else None) or None
         )
+        region_id = region.get("panel_id") if region else None
+        region_ordinals[region_id] = region_ordinals.get(region_id, 0) + 1
+        reading_id = (
+            f"{document['job_id']}:{region_id}:{region_ordinals[region_id]}"
+            if document.get("reading_mode") == "parallel_photo" and region_id
+            else f"{document['job_id']}:{len(result) + 1}"
+        )
         result.append(
             {
-                "reading_id": f"{document['job_id']}:{len(result) + 1}",
+                "reading_id": reading_id,
                 "text": text,
                 "value": value,
                 "unit": observed_unit,

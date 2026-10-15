@@ -47,7 +47,7 @@ MetaData 部署由采集端创建 `日期_相机ID/MetaData/时刻/照片`，处
 3. bind_instrument：使用实际扫描所得 instrument_id、scan_id 和用户提供的 operator。同相机、仪器、实际人员及绑定内容的重复请求返回原 binding_id；当天直接提交新操作人会在一个事务内结束该相机的旧人员使用时段、为全部有效仪器关系建立后继时段并追加审计。旧 binding_id 和历史读数人员不改写，新时段的 binding_id 不同，二维码证据和当天有效期保留。其他仪器仍可独立追加关联。传 request_id（UUID）重试可返回原回执；expected_binding_id 或 expected_revision 可检测并发冲突。action=refresh 显式创建新时段，必须带 request_id；不延长当天有效期。跨日必须重新识别仪器码／场景码。成功绑定后异步预加载 PaddleOCR，绑定接口不等待模型加载完成。多人共用相机和当前使用人设置见 [托管运行说明](docs/ProductionRuntime.md)。
 4. 用户对现有 Agent 说“拍照”，沿用该 Agent 的拍照与 NAS 保存流程。本服务监控配置相机的新语音照片，未绑定也执行 OCR 和留存，稳定后自动识别；不用再调用 capture_and_scan。
 5. get_field_state 查看该相机的 jobs；需要直接传递现有拍照回执时，调用 read_saved_panel，传 binding_id、确切 image_path 和可选 crop。已导入的本地 capture_id 继续用 read_panel。重复提交同一源照片与选框沿用原任务。
-6. 每隔约 1 秒 get_panel_result；只有 completed 才展示 lines。调用方设置自己的总等待期限，超时保留 job_id 稍后查询，不重新提交 OCR。
+6. 每隔约 1 秒 get_panel_result。通常在 completed 时展示 lines；并行照片模式的 running 且 `result_available=true` 时即可展示初读，并标记“云端复核中”。继续查询同一 job_id，`result_revision` 推进后原位更新同条读数；任务终态后结束轮询。调用方设置自己的总等待期限，超时保留 job_id 稍后查询，不重新提交 OCR。
 7. 使用结束时 end_instrument_binding。
 
 不传 binding_id 时，不据此推断有效绑定；自动目录导入可关联拍摄时已存在的有效绑定。没有有效绑定且照片未实际解出仪器码时，仪器/场景保持空值；照片真实二维码解码得到的仪器身份可保留为 `instrument_identity_basis=decoded_photo_qr`，仍不建立绑定或把未定位读数归属给该仪器。显式传入 binding_id 后仍检查相机、时间、场景和二维码冲突，校验失败拒绝关联请求。crop 不传表示整图识别，不代表已自动定位面板。上传照片的 camera_id 为调用方声明，不等于硬件身份认证。
@@ -133,7 +133,9 @@ result = tools.call('get_panel_result', {'job_id': job['job_id']})
 - `image_path`、可选 `binding_id` 和 `crop=[x,y,w,h]`。image_path 是已配置 voice_photos 内的具体照片绝对路径或相对路径。文件名日期/时间和相机目录均校验；无目录自动搜索、无“最新图”猜测。
 - `photo`、可选 `binding_id` 和 crop。photo 包含源 `capture_id`、`camera_id`、带时区 `captured_at`、`source_ref`、纯 `image_base64`，可选原字节 `sha256`。source_ref 只作回执保留，不解释为任意下载 URL。照片相机、绑定时间、原图哈希不符则拒绝。
 
-同一照片和选框已有任务时返回原 job_id；不要通过重发来等待结果。识别先用常驻 OCR，从任务真正运行开始计时，5 秒没有完整数字才用视觉兜底。每次最多一个云端请求，同一绑定（未绑定时同一相机）两次尝试至少隔 30 秒。收到 `completed` 后统一展示 `lines`；没有数字时如实回答看不清。`confidence`、`polygon` 允许 null，不要生成分数、坐标或额外读数。界面无需单列云端来源，后端 `local_ocr`、`fallback`、`external_photo` 保存过程和原图回执。
+同一照片和选框已有任务时返回原 job_id；不要通过重发来等待结果。默认 fallback 模式先用常驻 OCR，从任务真正运行开始计时，5 秒没有完整数字才用视觉兜底。该兜底每次最多一个云端请求，同一绑定（未绑定时同一相机）两次尝试至少隔 30 秒。收到 `completed` 后统一展示 `lines`；没有数字时如实回答看不清。`confidence`、`polygon` 允许 null，不要生成分数、坐标或额外读数。界面无需单列云端来源，后端 `local_ocr`、`fallback`、`external_photo` 保存过程和原图回执。
+
+待部署并行模式：显式设置 `FIELD_VISION_PHOTO_MODE=parallel`，并保留已有提供方、模型和凭据配置。本地与云端同时读取同一照片；绑定照片先共用一次授权面板定位，再并行识别相同的源区域。云端不等待本地数字，也不受五秒触发/三十秒兜底冷却约束；多面板每个授权面板单独请求，提供方调用仍串行。`result_stage=preliminary/reviewed`、`result_revision`、`result_updated_at`、`parallel_review` 表达当前投影及复核状态；模型复核不等于人工确认。初读优先归档，复核更新原事件目录的 Result/Readings，原始回执版本保留；未绑定照片仍只产生未归属候选。外部 Agent 必须轮询并编辑原读数位置，才能呈现同条更新。详见 [并行照片识别](docs/ParallelPhotoReview20261015.md)。
 
 `get_field_state.photo_watch` 提供监控状态、待处理文件数和最近 job_id；自动识别结果位于同一状态的 jobs。此项目没有更改现有 Agent 的聊天或拍照服务，Agent 若要在对话中主动报出读数，需通过 get_field_state/get_panel_result 获取结果。网页会自动刷新显示。
 
