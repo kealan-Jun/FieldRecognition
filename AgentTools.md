@@ -137,6 +137,8 @@ result = tools.call('get_panel_result', {'job_id': job['job_id']})
 
 待部署并行模式：显式设置 `FIELD_VISION_PHOTO_MODE=parallel`，并保留已有提供方、模型和凭据配置。本地与云端同时读取同一照片；绑定照片先共用一次授权面板定位，再并行识别相同的源区域。云端不等待本地数字，也不受五秒触发/三十秒兜底冷却约束；多面板每个授权面板单独请求，提供方调用仍串行。`result_stage=preliminary/reviewed`、`result_revision`、`result_updated_at`、`parallel_review` 表达当前投影及复核状态；模型复核不等于人工确认。初读优先归档，复核更新原事件目录的 Result/Readings，原始回执版本保留；未绑定照片仍只产生未归属候选。外部 Agent 必须轮询并编辑原读数位置，才能呈现同条更新。详见 [并行照片识别](docs/ParallelPhotoReview20261015.md)。
 
+并行模式的[误报保护补丁](docs/CloudReviewRepair20261015.md)对已定位红色数码屏检查原始笔画完整性；低清且无有效本地支持的云端数值不会作为有效值覆盖。云端先返回时可显示初步候选，`parallel_review.crosscheck_pending=true` 表示还在等待本地交叉检查，须继续轮询同一任务。`conflicts` 或 `quality_issue` 必须如实标记待核对，不把保留的原始数字或模型调用成功当作有效读数或人工确认。
+
 `get_field_state.photo_watch` 提供监控状态、待处理文件数和最近 job_id；自动识别结果位于同一状态的 jobs。此项目没有更改现有 Agent 的聊天或拍照服务，Agent 若要在对话中主动报出读数，需通过 get_field_state/get_panel_result 获取结果。网页会自动刷新显示。
 
 
