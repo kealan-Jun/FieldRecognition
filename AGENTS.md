@@ -30,7 +30,7 @@
 
 - Develop and test in an isolated worktree with temporary data. Do not modify loaded source, dependencies, configuration or served assets in the live checkout. Completing or pushing an iteration does not authorize disruptive deployment.
 - Do not stop/restart the live API, camera/scanner, OCR or archive services. Do not bypass the upgrade guard with checkout/pull, installers or systemctl.
-- Inspect the tested revision with `scripts/upgrade_runtime.py --revision <SHA>`. This inspection must not stop services. While services run, only its narrow allowlist of documentation, tests and the standalone upgrade tool may advance without restart.
+- Inspect the tested revision with `scripts/upgrade_runtime.py --project-root <production-checkout> --revision <SHA>`. This inspection must not stop services. While services run, only its narrow allowlist of documentation, tests and the standalone upgrade tool may advance without restart.
 - Runtime changes remain staged until an uninterrupted replacement mechanism is implemented and verified. The shared source deployment currently has no verified rolling/blue-green path. Process health and passing tests do not prove zero downtime, lossless scans or retained active bindings.
 - Do not create an outage to satisfy offline deployment preconditions. An explicitly authorized service interruption must identify its effect on active bindings and ongoing scans before execution. Capture service identity/health before and after a deployment.
 - Preserve QR evidence, timestamps, binding history and queued OCR/archive records. Device/service failures and Beijing midnight still follow automatic release policy; never restore expired bindings to hide an outage.
@@ -50,3 +50,9 @@
 - Run relevant tests while developing, then the complete suite for runtime changes. Check Python with `compileall` and the configured Ruff checks; run `node --check` on every changed JavaScript file. Changes to module/resource layout also require import, compatibility entry point and fingerprint checks.
 - Documentation-only edits need `git diff --check` and referenced-path/command validation. Update current navigation after moves; do not rewrite historical conclusions.
 - For runtime changes or deployment candidates, inspect the tested revision with the upgrade guard after checks pass. Complete authorized synchronization and report branch/SHA, checks and deployment state. A service response alone is not end-to-end recognition proof.
+
+## Storage placement — authorized 2026-10-10
+
+- Keep active code, Python/OCR runtimes, current weights, SQLite/WAL, queues, binding state and current evidence work local. Do not modify or relocate live Data/ opportunistically or bypass the uninterrupted-operation upgrade guard.
+- Completed delivery packages and historical bulk material belong on verified `//RealityLoop.local/backup_data` under `/mnt/realityloop-backup-data/LocalSSDOffload/x1/FieldRecognition`. Verify the CIFS source and host `.storage-volume.json` before access; never create a fallback beneath an unmounted NAS path. Existing business evidence archive ownership and provenance remain unchanged.
+- The inactive `output/Delivery-20261009-b27982e` was moved with full SHA256, source-stability and active-user checks. Its original path is a compatibility link; receipt is under the host NAS root's `receipts/FieldRecognition/`. New delivery work should use a bounded temporary SSD workspace under `/srv/sentinel-data/LocalWorkspaces/FieldRecognition` and save the completed package on NAS. Preserve at least 50 GiB free on `/` and 80 GiB on `/srv/sentinel-data` before bulk work.

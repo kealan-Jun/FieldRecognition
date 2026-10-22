@@ -9,6 +9,7 @@ from field_recognition.capture.photo_watch import SavedPhotoWatcher
 from field_recognition.capture.saved_photo import install as install_saved_photo
 from field_recognition.capture.video_ocr import install as install_video_ocr
 from field_recognition.measurements.evidence_timeline import install as install_evidence_timeline
+from field_recognition.measurements.event_feed import install as install_event_feed
 from field_recognition.measurements.photo_measurements import install as install_measurements
 from field_recognition.measurements.result_reprocessing import install as install_reprocessing
 from field_recognition.runtime.runtime_rpc import camera_component
@@ -29,3 +30,4 @@ def install_components(runtime):
     install_reprocessing(runtime)
     runtime["archive_store"] = ArchiveStore(runtime)
     install_evidence_timeline(runtime)
+    install_event_feed(runtime)
