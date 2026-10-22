@@ -219,6 +219,7 @@ def recover_primary_photo(core, document, panel, *, valid, clock, pause, started
             "detector_error",
         ):
             document.pop(key, None)
+        document["recognition_skipped"] = False
         return True
     recovery = copy.deepcopy(document.get("fallback", {}))
     document.clear()

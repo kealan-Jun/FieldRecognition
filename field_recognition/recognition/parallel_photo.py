@@ -236,6 +236,29 @@ def _merge(document, reviewed, local_ready):
         ):
             states.append("conflict")
         else:
+            if document.get("panel_detection"):
+                # Whole-photo transcription supplies candidates, not a detected
+                # panel. Keep the failed localized branch as evidence instead of
+                # applying its region-only filter to the independent answer.
+                document["localized_attempt"] = {
+                    key: copy.deepcopy(document[key])
+                    for key in (
+                        "panel_detection",
+                        "panel_regions",
+                        "local_ocr",
+                        "recognition_skipped",
+                        "skip_reason",
+                        "failure_reason",
+                        "error",
+                    )
+                    if key in document
+                }
+                document["whole_photo_recovery"] = {
+                    "status": "completed",
+                    "reason": "no_localized_readings",
+                    "association": "unbound_candidates",
+                }
+                document.pop("panel_detection")
             for key in (
                 "lines",
                 "model",
@@ -266,10 +289,19 @@ def _merge(document, reviewed, local_ready):
     accepted = any(s in {"completed", "unreadable"} for s in states)
     if accepted:
         document["parallel_review"]["result"] = (
-            "consistent" if before == values(document) else "updated"
+            "unverified"
+            if document.get("whole_photo_recovery", {}).get("status") == "completed"
+            else "consistent"
+            if before == values(document)
+            else "updated"
         )
+        if document.get("whole_photo_recovery", {}).get("status") == "completed":
+            document["parallel_review"]["reason"] = "local_panel_not_localized"
         for key in ("recognition_skipped", "skip_reason", "failure_reason", "error"):
             document.pop(key, None)
+        # Explicit task outcome overrides the nested local branch's skip while
+        # retaining that branch unchanged for diagnosis and old receipt readers.
+        document["recognition_skipped"] = False
         document["outcome"] = (
             "numeric_readout"
             if build_readings(document)

@@ -52,9 +52,12 @@ def test_parallel_initial_and_reviewed_values_replace_the_same_result_container(
     const state={latest_photo_job:{...initial,job_id:'newer',external_photo:{captured_at:'2026-10-15T09:00:00Z'}},
       latest_panel_job:{...initial,camera_id:'cam',external_photo:{captured_at:'2026-10-15T08:00:00Z'}}};
     state.latest_photo_job.camera_id='cam';
-    process.stdout.write(JSON.stringify({first,final,latest:ctx.ReadoutView.selectLatest(state,'cam').job_id}));
+    const unverified=ctx.ReadoutView.reviewLabel({...initial,
+      parallel_review:{status:'completed',result:'unverified',reason:'local_panel_not_localized'}});
+    process.stdout.write(JSON.stringify({first,final,unverified,latest:ctx.ReadoutView.selectLatest(state,'cam').job_id}));
     """
     result = json.loads(subprocess.check_output(["node", "-e", script], text=True))
     assert "12.34 g" in result["first"] and "云端复核中" in result["first"]
     assert "12.35 g" in result["final"] and "12.34 g" not in result["final"]
     assert result["latest"] == "newer"
+    assert result["unverified"] == "仅整图候选 · 面板未定位 · 待核实"

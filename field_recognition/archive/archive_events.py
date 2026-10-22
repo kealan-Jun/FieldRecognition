@@ -40,8 +40,8 @@ def processing_outcome(job):
         "waiting_service",
     }:
         terminal = False
-    skipped = job.get("recognition_skipped") or (job.get("local_ocr") or {}).get(
-        "recognition_skipped"
+    skipped = job.get(
+        "recognition_skipped", (job.get("local_ocr") or {}).get("recognition_skipped")
     )
     return {
         "task_id": job.get("job_id"),
@@ -51,9 +51,11 @@ def processing_outcome(job):
         "outcome": ("failed" if status != "completed" else "skipped" if skipped else "succeeded")
         if terminal
         else "pending",
-        "reason": job.get("skip_reason")
-        or (job.get("local_ocr") or {}).get("skip_reason")
-        or job.get("error"),
+        "reason": (
+            job.get("skip_reason") or (job.get("local_ocr") or {}).get("skip_reason")
+            if skipped
+            else job.get("error")
+        ),
     }
 
 
@@ -612,6 +614,8 @@ def photo_readme(
                 "unreadable": "云端未读清 · 待核对",
                 "completed": "模型复核完成 · 未经人工核实",
             }.get(review_status, "本地与云端正在识别")
+            if (job.get("parallel_review") or {}).get("result") == "unverified":
+                label = "仅整图候选 · 面板未定位 · 待核实"
             if (job.get("parallel_review") or {}).get("crosscheck_pending"):
                 label = "初步读数 · 本地交叉检查中"
             body += "<p>" + esc(job.get("job_id")) + "：" + esc(label) + "</p>"
@@ -857,6 +861,8 @@ def make_views(
                         "allowed_instrument_ids",
                         "allowed_instrument_ids_basis",
                         "local_ocr",
+                        "localized_attempt",
+                        "whole_photo_recovery",
                         "fallback",
                         "panel_regions",
                         "recognition_versions",
@@ -1135,9 +1141,7 @@ def make_views(
             content["processing_status"] = content["status"]
             if content["status"] == "completed" and not records:
                 skipped = current_jobs and all(
-                    j.get("recognition_skipped")
-                    or (j.get("local_ocr") or {}).get("recognition_skipped")
-                    for j in current_jobs
+                    processing_outcome(j)["outcome"] == "skipped" for j in current_jobs
                 )
                 content["status"] = (
                     "skipped"
@@ -1148,9 +1152,9 @@ def make_views(
                 )
             content["skip_reasons"] = list(
                 dict.fromkeys(
-                    j.get("skip_reason") or (j.get("local_ocr") or {}).get("skip_reason")
-                    for j in current_jobs
-                    if j.get("skip_reason") or (j.get("local_ocr") or {}).get("skip_reason")
+                    task["reason"]
+                    for task in content["task_outcomes"]
+                    if task["outcome"] == "skipped" and task["reason"]
                 )
             )
             if not measurement_files:

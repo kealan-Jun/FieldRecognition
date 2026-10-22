@@ -10,6 +10,7 @@ from tests.support.aliyun_vision import response
 from tests.support.demo import app_client  # noqa: F401
 from tests.support.panel_readout import Clock, cloud_result, refresh_recognition_config
 from tests.support.unbound_readout import photo
+from tests.support.archive_store import archive  # noqa: F401
 
 
 @pytest.fixture
@@ -324,7 +325,7 @@ def test_bound_primary_reviews_even_numeric_ocr_and_uses_registered_precision(
 
 @pytest.mark.parametrize("missing_detection", [True, False])
 def test_primary_failed_localization_recovers_full_photo_without_identity(
-    app_client, configured, monkeypatch, missing_detection
+    app_client, configured, archive, monkeypatch, missing_detection
 ):
     from tests.support.panel_regions import configure, BOXES
     from tests.support.multi_readout import two_bindings
@@ -373,6 +374,14 @@ def test_primary_failed_localization_recovers_full_photo_without_identity(
     assert result["readings"][0]["instrument"] is None
     assert not result["readings"][0]["human_verified"]
     assert "panel_detection" not in result and not result.get("recognition_skipped")
+    app.archive_store.step(100)
+    evidence_path = next(archive[2].glob("*/VoicePhotoReadings/*/Evidence.json"))
+    evidence = json.loads(evidence_path.read_text())
+    assert evidence["processing_outcome"] == "succeeded" and evidence["skip_reasons"] == []
+    assert evidence["observations"][0]["localized_attempt"]["panel_detection"]
+    assert evidence["observations"][0]["whole_photo_recovery"]["status"] == "completed"
+    candidates = json.loads((evidence_path.parent / "UnboundReadings.json").read_text())
+    assert candidates["readings"][0]["instrument_id"] is None
 
 
 def test_failed_whole_photo_recovery_retains_original_panel_evidence(

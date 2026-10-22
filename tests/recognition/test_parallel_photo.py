@@ -257,6 +257,96 @@ def test_bound_readers_share_one_localization_and_update_same_result_files(
     assert len(final["local_ocr"]["panel_regions"]) == 3
 
 
+@pytest.mark.parametrize("cloud_first", [False, True])
+@pytest.mark.parametrize("answer", ["readable", "unreadable", "failed"])
+def test_missing_bound_panel_keeps_whole_photo_candidates_and_localization_failure(
+    parallel_context, archive, monkeypatch, cloud_first, answer
+):
+    app, client = parallel_context
+    two_bindings(app, client)
+    configure(app, monkeypatch, [])
+    release, local_started, cloud_finished = Event(), Event(), Event()
+    predict = app.predict_readout
+
+    def local(*args, **kwargs):
+        if not kwargs.get("localization_only"):
+            local_started.set()
+            if cloud_first:
+                assert release.wait(4)
+        return predict(*args, **kwargs)
+
+    def cloud(*args, **kwargs):
+        assert local_started.wait(3)
+        if not cloud_first:
+            assert release.wait(4)
+        cloud_finished.set()
+        if answer == "failed":
+            return {"status": "failed", "error": "timeout", "attempted": True}
+        result = cloud_result()
+        if answer == "unreadable":
+            result["answer"] = {"status": "unreadable", "readings": []}
+        return result
+
+    monkeypatch.setattr(app, "predict_readout", local)
+    monkeypatch.setattr(aliyun_vision, "read_panel", cloud)
+    monkeypatch.setattr(
+        app, "predict_panel", lambda *a, **kw: pytest.fail("No localized crop may reach OCR")
+    )
+    job = enqueue(parallel_context)
+    with running(app, job, release) as future:
+        if cloud_first and answer == "readable":
+            early = observe(client, job["job_id"], lambda r: r.get("result_available"))
+            assert early["readings"][0]["instrument"] is None
+            assert early["parallel_review"]["crosscheck_pending"]
+        elif cloud_first:
+            assert cloud_finished.wait(3)
+        else:
+            observe(client, job["job_id"], lambda r: r.get("local_ocr"))
+        release.set()
+        future.result(timeout=4)
+    final = app.get_job(job["job_id"])
+    assert final["local_ocr"]["failure_reason"] == "panel_not_detected"
+    assert len(final["all_binding_snapshots"]) == 2
+    assert final["instrument"] is final["binding_id"] is None
+    assert final["measurement_records"] == []
+    expected = 1 if answer == "readable" else 0
+    assert len(final["readings"]) == expected
+    if answer != "failed":
+        assert not final["recognition_skipped"]
+        assert final["whole_photo_recovery"]["status"] == "completed"
+        assert final["localized_attempt"]["failure_reason"] == "panel_not_detected"
+        assert final["parallel_review"]["result"] == "unverified"
+        assert final["outcome"] == ("numeric_readout" if expected else "no_numeric_readout")
+    else:
+        assert final["recognition_skipped"]
+        assert final["failure_reason"] == "panel_not_detected"
+    if expected:
+        reading = final["readings"][0]
+        assert reading["value"] == "12.34" and reading["binding_id"] is None
+        assert reading["human_verified"] is False
+    app.archive_store.step(100)
+    root = archive[2]
+    evidence = json.loads(next(root.glob("*/VoicePhotoReadings/*/Evidence.json")).read_text())
+    assert evidence["processing_outcome"] == ("skipped" if answer == "failed" else "succeeded")
+    assert evidence["skip_reasons"] == (["no_visible_bound_panel"] if answer == "failed" else [])
+    obs = evidence["observations"][0]
+    assert obs["local_ocr"]["failure_reason"] == "panel_not_detected"
+    if answer != "failed":
+        assert obs["localized_attempt"]["panel_detection"]["boxes"] == []
+        assert obs["whole_photo_recovery"]["association"] == "unbound_candidates"
+        if expected:
+            assert (
+                "仅整图候选 · 面板未定位 · 待核实"
+                in next(root.glob("*/VoicePhotoReadings/*/Readme.html")).read_text()
+            )
+    for name in ("Readings.json", "UnboundReadings.json"):
+        ledger = json.loads(next(root.glob("*/VoicePhotoReadings/*/" + name)).read_text())
+        assert len(ledger["readings"]) == expected
+        if expected:
+            assert ledger["readings"][0]["instrument_id"] is None
+    assert not list(root.glob("*/VoicePhotoReadings/*/Result*.json"))
+
+
 def test_a_superseded_lease_cannot_publish_the_cloud_response(parallel_context, monkeypatch):
     app, client = parallel_context
     release = Event()
