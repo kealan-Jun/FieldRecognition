@@ -4,7 +4,7 @@
 按拍摄时间浏览的 `/api/evidence-timeline` 有不同游标契约。见
 [事件消费接口](docs/EventFeedIntegration.md)。现有 15 个 Agent 工具保持兼容。
 
-2026-10-22 待部署：[语音照片无归属调查与候选留存修复](docs/VoicePhotoAttribution20261022.md)。本批绑定已进入识别快照，但旋转画面的面板定位返回零候选。修复并行整图转录候选被过滤和最终 skip 状态错误；无本地定位可比结果时标记 `parallel_review.result=unverified`，不生成仪器正式读数。自动方向恢复和现场数值验收尚未完成。
+2026-10-22 本机已于 14:14 上线：[语音照片无归属调查与候选留存修复](docs/VoicePhotoAttribution20261022.md)。本批绑定已进入识别快照，但旋转画面的面板定位返回零候选。修复并行整图转录候选被过滤和最终 skip 状态错误；无本地定位可比结果时标记 `parallel_review.result=unverified`，不生成仪器正式读数。自动方向恢复和现场数值验收尚未完成。本次按使用者明确授权重启，结束两条旧绑定，恢复后需重新扫码；后续迭代继续遵守不中断要求。
 
 2026-10-15 待部署：[扫码异常保护与诊断](docs/ScannerFaultRecovery20261015.md)为单帧二维码解码异常增加固定 30 秒恢复期限，持续失败或其他采集会话故障仍释放；新增 `automation.session.last_error` 与 `consecutive_decode_errors`。这不是当前运行服务已经升级的声明。
 
