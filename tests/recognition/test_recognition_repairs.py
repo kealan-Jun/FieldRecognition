@@ -146,7 +146,7 @@ def test_diagnostics_distinguish_not_run_miss_disallowed_and_unknown_identity(
     assert result["panel_detection"]["diagnostics"]["raw_candidate_count"] == raw
     assert result["panel_detection"]["diagnostics"]["ocr_input_region_count"] == 0
     assert not calls and result["ocr_elapsed_ms"] is None
-    assert core["panel_detector"].calls == bool(allowed)
+    assert core["panel_detector"].calls == (4 if allowed and not boxes else bool(allowed))
 
 
 def test_detector_exception_is_failed_not_successful_empty_result(monkeypatch):

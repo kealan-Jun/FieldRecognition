@@ -1,5 +1,7 @@
 # 现场识别 Agent 工具 v1
 
+2026-10-22 后续修复：[语音照片方向恢复](docs/PhotoOrientationRecovery.md)补上有效绑定照片零候选时的方向检查、原图坐标和诊断归档。九张原图离线回放恢复面板归属，六张天平形成候选，三张搅拌器仍无可靠数字；上线状态以该文末节为准。
+
 跨项目可恢复消费使用只读 `GET /api/events/feed`，复用同事务归档 outbox；它与
 按拍摄时间浏览的 `/api/evidence-timeline` 有不同游标契约。见
 [事件消费接口](docs/EventFeedIntegration.md)。现有 15 个 Agent 工具保持兼容。

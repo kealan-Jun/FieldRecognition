@@ -274,7 +274,7 @@ FieldRecognition/
 | **系统实现与安装** | [技术方案](docs/Architecture.md) · [GPU 部署](docs/GPU部署.md) · [托管运行](docs/ProductionRuntime.md) |
 | **让 Agent 获取读数** | [工具参数、发现接口与 Python 示例](AgentTools.md) |
 | **采集与身份关联** | [自动运行](docs/本机自动运行.md) · [绑定快照](docs/FieldRepair20260920.md) · [自动解绑](docs/AutomaticBindingRelease20260921.md) · [短断流恢复](docs/BindingReconnect20261014.md) · [两路采集](docs/TwoStreamEvidence20260923.md) |
-| **照片、结果与复核** | [NAS 留存指南](docs/NAS文件夹与留存指南.md) · [六字段契约](schemas/InstrumentMeasurement.schema.json) · [视觉配置](docs/NianfengVision20260925.md) · [界面演示](docs/ReadmeShowcase.md) |
+| **照片、结果与复核** | [NAS 留存指南](docs/NAS文件夹与留存指南.md) · [六字段契约](schemas/InstrumentMeasurement.schema.json) · [照片方向恢复](docs/PhotoOrientationRecovery.md) · [视觉配置](docs/NianfengVision20260925.md) · [界面演示](docs/ReadmeShowcase.md) |
 | **维护与目录** | [文档索引](docs/README.md) · [代码结构](docs/CodeStructure.md) · [Agent 指南](AGENTS.md) · [贡献指南](CONTRIBUTING.md) · [安全说明](SECURITY.md) |
 | **验证与升级** | [升级入口](docs/RuntimeReliability.md#升级入口) · [数据库迁移](docs/BindingMigration.md) · [时延验收](docs/PublicationLatency20261008.md) · [项目进展](docs/ProjectHistory.md) |
 

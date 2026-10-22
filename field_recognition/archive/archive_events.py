@@ -867,6 +867,7 @@ def make_views(
                         "panel_regions",
                         "recognition_versions",
                         "panel_detection",
+                        "photo_orientation",
                         "timing",
                         "archive",
                         "instrument",

@@ -66,8 +66,9 @@ def _cloud(core, original, template, image, panel, pipeline, valid, started):
 
         for region in document.get("panel_regions", []):
             if region.get("class_id") == 0:
-                x, y, w, h = region["crop"]
-                region["source_pixel_review"] = native_diagnostics(image[y : y + h, x : x + w])
+                from field_recognition.recognition.photo_orientation import source_panel
+
+                region["source_pixel_review"] = native_diagnostics(source_panel(image, region))
     except Exception as exc:
         document["fallback"] = {"status": "failed", "error": type(exc).__name__}
     return document
@@ -225,6 +226,7 @@ def _merge(document, reviewed, local_ready):
                 "workbench",
                 "workbenches",
                 "panel_detection",
+                "photo_orientation",
                 "panel_selection",
             ):
                 if key in reviewed:

@@ -88,6 +88,7 @@ def versions():
                 "panel_regions.py",
                 "field_recognition/recognition/panel_readout.py",
                 "field_recognition/recognition/parallel_photo.py",
+                "field_recognition/recognition/photo_orientation.py",
                 "digit_regions.py",
                 "field_recognition/recognition/red_geometry.py",
                 "led_digits.py",

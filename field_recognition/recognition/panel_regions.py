@@ -11,7 +11,7 @@ import numpy as np
 from field_recognition.recognition.aliyun_vision import answer_lines
 from field_recognition.measurements.readout_rules import NUMBER, READOUT, fallback_reason
 from field_recognition.recognition.pipeline_context import ReadoutPipeline
-from field_recognition.recognition.digit_regions import refine_digits, extract_digits
+from field_recognition.recognition.digit_regions import refine_digits
 
 
 def _orient_pair_roles(regions):
@@ -69,6 +69,39 @@ def _orient_pair_roles(regions):
     return evidence
 
 
+def _prepare_detection(core, detection, allowed, started, begin):
+    from field_recognition.recognition.panel_layout import resolve_type_boxes
+
+    detection["boxes"] = resolve_type_boxes(
+        detection["boxes"], allowed, core.get("get_instrument", lambda _: {})
+    )
+    detection.update(started_at=started, finished_at=core["now"]())
+    detection["allowed_instrument_ids"] = sorted(allowed)
+    detection["skipped_unbound_panels"] = [
+        b for b in detection["boxes"] if b["instrument_id"] not in allowed
+    ]
+    diagnostics = detection.setdefault("diagnostics", {})
+    invoked = detection["status"] not in {"waiting_binding", "failed"}
+    diagnostics.setdefault("raw_candidate_count", len(detection["boxes"]) if invoked else None)
+    diagnostics.setdefault(
+        "raw_count_basis",
+        "detector_returned_boxes"
+        if invoked
+        else "detector_not_run"
+        if not allowed
+        else "detector_failed",
+    )
+    diagnostics.setdefault("quality_filtered_count", len(detection["boxes"]) if invoked else None)
+    diagnostics.setdefault("excluded_candidates", []).extend(
+        dict(b, reason=b.get("association_issue") or "target_not_allowed")
+        for b in detection["skipped_unbound_panels"]
+    )
+    diagnostics["binding_matched_count"] = len(detection["boxes"]) - len(
+        detection["skipped_unbound_panels"]
+    )
+    detection["duration_ms"] = round((time.monotonic() - begin) * 1000, 3)
+
+
 def predict(
     core,
     image,
@@ -88,6 +121,30 @@ def predict(
     started = core["now"]()
     begin = time.monotonic()
     allowed = set(allowed_instrument_ids)
+    from field_recognition.recognition.photo_orientation import Rotation, recover, restore
+
+    orientation = (detection or {}).get("photo_orientation") or {}
+    if orientation.get("status") == "recovered":
+        degree = orientation["degrees_ccw"]
+        if (
+            video
+            or degree not in (90, 180, 270)
+            or orientation["source_size"] != [image.shape[1], image.shape[0]]
+            or orientation["source_offset"] != [x, y]
+            or set(orientation["oriented_detection"].get("allowed_instrument_ids", [])) != allowed
+            or hashlib.sha256(image.tobytes()).hexdigest() != orientation["source_pixels_sha256"]
+        ):
+            raise ValueError("Prepared photo orientation does not match the source input")
+        rotation = Rotation(degree, image.shape[1], image.shape[0], x, y)
+        result = predict(
+            core,
+            rotation.image(image),
+            allowed_instrument_ids=allowed,
+            localization_only=localization_only,
+            detection=orientation["oriented_detection"],
+        )
+        proof = {k: v for k, v in orientation.items() if k != "oriented_detection"}
+        return restore(result, rotation, proof)
     # A saved photo remains readable without an instrument identity. Keep its
     # raw OCR separate from detector-bound measurements; video still requires
     # an active binding before spending inference on background frames.
@@ -111,40 +168,25 @@ def predict(
             else {"status": "waiting_binding", "boxes": [], "model": "YOLO11n"}
         )
     )
-    from field_recognition.recognition.panel_layout import resolve_type_boxes, roles_for_boxes
+    from field_recognition.recognition.panel_layout import roles_for_boxes
 
     if not prepared_detection:
-        detection["boxes"] = resolve_type_boxes(
-            detection["boxes"], allowed, core.get("get_instrument", lambda _: {})
-        )
-        detection.update(started_at=started, finished_at=core["now"]())
-        detection["allowed_instrument_ids"] = sorted(allowed)
-        detection["skipped_unbound_panels"] = [
-            b for b in detection["boxes"] if b["instrument_id"] not in allowed
-        ]
-        diagnostics = detection.setdefault("diagnostics", {})
-        invoked = detection["status"] not in {"waiting_binding", "failed"}
-        diagnostics.setdefault("raw_candidate_count", len(detection["boxes"]) if invoked else None)
-        diagnostics.setdefault(
-            "raw_count_basis",
-            "detector_returned_boxes"
-            if invoked
-            else "detector_not_run"
-            if not allowed
-            else "detector_failed",
-        )
-        diagnostics.setdefault(
-            "quality_filtered_count", len(detection["boxes"]) if invoked else None
-        )
-        exclusions = diagnostics.setdefault("excluded_candidates", [])
-        exclusions.extend(
-            dict(b, reason=b.get("association_issue") or "target_not_allowed")
-            for b in detection["skipped_unbound_panels"]
-        )
-        diagnostics["binding_matched_count"] = len(detection["boxes"]) - len(
-            detection["skipped_unbound_panels"]
-        )
-        detection["duration_ms"] = round((time.monotonic() - begin) * 1000, 3)
+        _prepare_detection(core, detection, allowed, started, begin)
+        if not video and allowed and detection["status"] == "completed" and not detection["boxes"]:
+            rotation, rotated_detection, proof = recover(core, image, allowed)
+            proof["original_detection"] = copy.deepcopy(detection)
+            if rotation:
+                _prepare_detection(core, rotated_detection, allowed, started, begin)
+                rotation = Rotation(rotation.degrees, image.shape[1], image.shape[0], x, y)
+                result = predict(
+                    core,
+                    rotation.image(image),
+                    allowed_instrument_ids=allowed,
+                    localization_only=localization_only,
+                    detection=rotated_detection,
+                )
+                return restore(result, rotation, proof)
+            detection["photo_orientation"] = proof
     diagnostics = detection.setdefault("diagnostics", {})
     ocr_started = time.monotonic()
     model_calls = []
@@ -330,6 +372,11 @@ def predict(
     result["ocr_model_call_scopes"] = sorted(
         {call["ocr_model_call_scope"] for call in model_calls if call.get("ocr_model_call_scope")}
     )
+    if detection.get("photo_orientation"):
+        result["photo_orientation"] = copy.deepcopy(detection["photo_orientation"])
+        from field_recognition.recognition.photo_orientation import record_calls
+
+        record_calls(result, detection["photo_orientation"])
     if not regions:
         result.update(
             panel_selection="no_bound_panel",
@@ -339,6 +386,11 @@ def predict(
         result["failure_reason"] = (
             "no_active_instrument_binding"
             if not allowed
+            else "panel_orientation_unconfirmed"
+            if any(
+                attempt["authorized_box_count"]
+                for attempt in (detection.get("photo_orientation") or {}).get("attempts", [])
+            )
             else "instrument_identity_unconfirmed"
             if any(
                 b.get("association_issue") == "instance_evidence_required"
@@ -455,10 +507,9 @@ def finish(
                 "binding_id": region["binding_id"],
                 "basis": region["association_basis"],
             }
-        x, y, w, h = region["crop"]
-        crop = image[y : y + h, x : x + w].copy()
-        if (region.get("digit_region") or {}).get("status") == "located":
-            crop, _ = extract_digits(image, region["digit_region"])
+        from field_recognition.recognition.photo_orientation import source_panel
+
+        crop = source_panel(image, region, digit_crop=True)
         ident = str(uuid.uuid4())
         path = core["DATA"] / "Images" / f"{ident}.png"
         if not cv2.imwrite(str(path), crop):
